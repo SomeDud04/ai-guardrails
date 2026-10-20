@@ -71,6 +71,22 @@ dispatch and client cancellation. The focused repair established:
   non-queuing bound (default 2) for synchronous readiness and authenticated
   operator calls: `/health/ready`, `/admin/events` and `/admin/export.csv`.
   Chat keeps its existing separate semaphore and bounded-admission behavior.
+- `POST /v1/chat/completions` has one absolute, server-owned HTTP chat work
+  deadline. `make_app(chat_work_timeout=...)` defaults to 60 s and accepts up to
+  300 s. Invalid values (bool, zero, negative, NaN, infinity or out of range)
+  leave the application live but not ready: readiness and chat return `503`, and
+  the safe 60 s default is stored. The deadline starts when the gateway worker is
+  dispatched, after the separate existing body-read limit. Expiry returns the
+  existing generic `503 UNAVAILABLE` envelope with the HTTP `request_id`, never
+  a late result. The route reuses the tested `_await_control_call` helper; chat
+  and control-plane capacities remain separate. The running worker is shielded
+  and keeps its chat admission slot until the real thread finishes; there is no
+  queue or retry. Remembered repeated cancellation is re-raised at worker
+  completion or the original deadline, whichever comes first. Each dispatched
+  chat worker task is also retained in the per-app `app.state.chat_tasks` set
+  until its done callback observes real completion, so a timed-out task cannot
+  be garbage-collected while its thread is still running; the callback still
+  consumes the result/exception and releases the slot exactly once.
 - A slot is acquired only after operator authentication and query validation
   (or after readiness's cheap structural checks). Exhaustion returns the
   existing generic `503` immediately; readiness keeps its existing
@@ -91,7 +107,9 @@ dispatch and client cancellation. The focused repair established:
   thread, does not add a native model/driver timeout, does not solve in-flight
   thread termination or upstream-call cancellation, and does not prevent an
   infrastructure-level bypass outside this process. No native hard deadline is
-  verified.
+  verified. The chat deadline is an HTTP response deadline only: native input
+  guard, generation, output guard and audit may continue after the `503`; audit
+  records describe server processing, not proof of client delivery.
 - Focused evidence: 10 deterministic event-gated ASGI tests in
   `tests/test_control_plane.py` cover readiness/events/export saturation, short
   test deadlines (0.05–0.1 s via patched constants, versus the 5-second
@@ -103,6 +121,21 @@ dispatch and client cancellation. The focused repair established:
   success/error, and no CSV or audit after a failed, timed-out or cancelled
   export. Every test gate is released in `finally`, and request tasks are
   settled during cleanup.
+- Focused evidence: 9 deterministic event-gated ASGI tests in
+  `tests/test_chat_deadline.py` cover a stalled input guard with no inference
+  before release, a stalled output guard with no buffered output release,
+  generation timeout late success and late error, repeated cancellation held past
+  a shortened deadline with no response, overload rejection without excess
+  dispatch while the thread runs, exact-once capacity recovery, liveness during
+  a stalled worker, invalid `chat_work_timeout` values failing closed with the
+  safe default, accepted 60/300 s bounds and unchanged normal chat. Test
+  deadlines are 0.1 s; every gate is released in `finally` and tasks are settled.
+  The late-error case keeps the injected error in place until the gate is opened
+  and the worker really finishes, so it proves a late failure rather than a late
+  success: the output guard never runs, the response body is unchanged, and
+  capacity recovers only after the error is cleared. Both generation cases also
+  assert the per-app `chat_tasks` strong reference still holds the timed-out task
+  after the `503` and drops it once that task actually finishes.
 
 ### Focused audit repair
 
@@ -377,8 +410,9 @@ Uvicorn 0.54.0, psycopg 3.3.6, HTTPX 0.28.1, PyYAML 6.0.3):
 
 | Command | Result |
 |---|---|
-| `.\.venv\Scripts\python.exe -m unittest discover -s tests -v` | **315 tests run, 313 passed, 2 skipped, exit 0, 17.900s** — this worker's local run, not a final caller run; the earlier 312/310 run was also worker evidence and already included the user's 21 global-installer tests (the earlier 284/282, 283/281, 271/269, 249/247 and 226/224 figures are historical; the two skips are the existing optional `TEST_AUDIT_DSN`-gated PostgreSQL tests) |
+| `.\.venv\Scripts\python.exe -m unittest discover -s tests` | **324 tests run, 322 passed, 2 skipped, exit 0, 21.847s** (22.843 s wall) — this worker's local run, not a final caller run; the two skips are the existing optional `TEST_AUDIT_DSN`-gated PostgreSQL tests; earlier 315/313, 312/310, 284/282, 283/281, 271/269, 249/247 and 226/224 figures are historical |
 | `.\.venv\Scripts\python.exe -m unittest tests.test_control_plane -v` | **10 focused event-gated control-plane tests OK** (short-deadline readiness/events/export saturation, cancellation held past a shortened deadline with no late audit/CSV, shared capacity 2 across distinct routes, invalid `control_concurrency` bounds fail closed, no excess dispatch, auth-before-admission, chat separation, liveness, late success/error recovery, no CSV on failed/timed-out export audit) |
+| `.\.venv\Scripts\python.exe -m unittest tests.test_chat_deadline -v` | **9 focused event-gated chat-deadline tests OK, exit 0, 1.453s** (stalled input/output guards, late success, retained late error with no output-guard call, repeated cancellation, overload, exact-once capacity, invalid bounds, normal chat; timed-out tasks remain strongly referenced until real completion) |
 | `.\.venv\Scripts\python.exe -m unittest tests.test_pii tests.test_pii_eval -v` | **34 focused PII/span/evaluator tests OK** (metric math, strict spans, terminal-period and punctuation boundaries, invalid dotted suffixes, Unicode `\d` preservation, invalid fixtures, manifest freeze, v1 hash preservation, v2 single-label adjudication, CLI exit 0/1/2, reproducibility, no raw text) |
 | `.\.venv\Scripts\python.exe -m unittest tests.test_operator -v` | **23 operator/API tests OK** (real SQLite audit rows + real ASGI; PostgreSQL SQL/params via driver double only) |
 | `.\.venv\Scripts\python.exe -m unittest tests.test_export -v` | **23 export tests OK** (real ASGI app + real SQLite audit rows; PostgreSQL export-audit SQL via driver double only) |
@@ -469,11 +503,14 @@ but this is **not** `docker compose config`, image-build or runtime validation.
   BM/Chinese sentences is not semantic guard evidence; English semantic guard
   acceptance remains unverified and BM/Chinese semantic protection is
   unsupported for pilot acceptance.
-- The bounded control-plane admission is partial local hardening only: it
-  cannot terminate a running thread, cancel an upstream call, impose a native
-  model/driver hard deadline, or stop an infrastructure-level bypass outside
-  this process. Cancellation is deferred until the worker finishes or the
-  original deadline, whichever comes first. Tasks 16-20 remain pending.
+- The bounded control-plane admission and HTTP chat work deadline are partial
+  local hardening only: they cannot terminate a running thread, cancel an
+  upstream call, impose a native model/driver hard deadline, or stop an
+  infrastructure-level bypass outside this process. Retaining chat task
+  references and releasing the slot after the thread returns is not thread
+  termination or a native deadline. Cancellation is deferred until the worker
+  finishes or the original deadline, whichever comes first. Tasks 16-20 remain
+  pending.
 - Any acceptance of the full day-2 milestone or live pilot.
 
 ## Backlog disposition
@@ -489,16 +526,16 @@ but this is **not** `docker compose config`, image-build or runtime validation.
 | 11: operator events | Read-only authenticated HTML/API, separate SQLite reader boundary and PostgreSQL SQL doubles implemented and locally tested; live PostgreSQL reader role pending |
 | 12: bounded CSV export | Authenticated `/admin/export.csv`, append-only prepared-export audit and UI flow implemented and locally verified (23 ASGI export tests + 10 Node.js cases); PostgreSQL SQL via double, caller synthetic browser download confirmed, no Docker run |
 | 13/14: PII quality and language boundary | Frozen synthetic fixtures/manifest, deterministic evaluator, focused tests and docs delivered; narrow reviewed EMAIL boundary regression fixed and verified through ASGI and loopback HTTP; reviewed v2 passes EMAIL and MY_PHONE but the MyKad gate still fails, so the overall quality gate remains FAIL; original v1 EMAIL score is annotation-conflicted; caller-review pass is known regression evidence, not unseen/independent; native English guard proof and BM/Chinese semantic support remain open |
-| 15 | Bounded control-plane admission: partial local hardening delivered (non-queuing shared capacity for readiness/operator reads and export audit, short test deadlines, cancellation deferred until worker completion or the original deadline); infrastructure bypass and native hard deadlines unverified |
+| 15 | Bounded control-plane admission plus the bounded HTTP chat work deadline: partial local hardening delivered (non-queuing shared capacity for readiness/operator reads and export audit; one server-owned 60 s default/300 s max chat response deadline with exact-once slot release, retained worker task references, short test deadlines, cancellation deferred until worker completion or the original deadline); infrastructure bypass and native hard deadlines unverified |
 | 16-20 | Not implemented or accepted |
 
 Tasks 13/14 deliver an authored synthetic evaluation, a narrow reviewed
 privacy regression repair and a documented language boundary, not customer
 acceptance. The current full local suite figure from this worker's run is
-`315 tests run, 313 passed, 2 skipped in 17.900s` (final caller confirmation
-pending), where both skips are the existing optional PostgreSQL tests. The
-earlier 312/310 run was worker evidence that already included the user's 21
-global-installer tests; older counts quoted elsewhere are historical.
+`324 tests run, 322 passed, 2 skipped in 21.847s` (exit 0; final caller
+confirmation pending), where both skips are the existing optional PostgreSQL
+tests. The earlier 315/313, 312/310, 284/282, 283/281, 271/269, 249/247 and
+226/224 figures are historical.
 The caller-review corpus's post-fix pass is not an accuracy or independent
 hold-out claim. Native inference, independent held-out PII labels, English
 semantic-guard acceptance, BM/Chinese semantic protection, real PostgreSQL

@@ -82,6 +82,14 @@ Request rules:
   fields, a non-`pilot-local` model, `stream: true`, more than 16 messages, or
   invalid roles/content all return a generic `400`.
 - One complete body-read deadline applies; timeouts and overload return `503`.
+- A separate, absolute server-owned chat work deadline starts when
+  `Gateway.handle` is dispatched. `make_app(chat_work_timeout=...)` defaults to
+  60 s (maximum 300 s); expiry returns the existing generic `503 UNAVAILABLE`
+  with the HTTP `request_id`. The shielded worker keeps its chat admission slot
+  until the real thread finishes, and any late result or error is consumed and
+  never sent. Invalid values leave the app live but not ready, with chat
+  unavailable and the safe 60 s default. This is an HTTP response deadline, not
+  thread termination or a native model/guard/audit deadline.
 - Missing/invalid auth returns `401`; attack/output guard blocks return `403`;
   oversized actual bytes, a serialized conversation over 4096 characters, or
   token budget returns `413`.
@@ -309,6 +317,14 @@ rates and CPU memory/latency are unmeasured. The native model forward path has n
 hard preemptive deadline, so process-isolated serving, outage behavior and
 performance evidence remain required.
 
+The bounded chat work deadline is likewise an HTTP response deadline only. Input
+guard, generation, output guard and terminal audit can continue in the shielded
+worker after the client receives `503`; the admission slot is released only when
+that real call returns. Audit records therefore describe server-side processing
+and are not proof that the client received a response. No process isolation,
+thread termination, upstream-call cancellation or native hard deadline is added
+or claimed.
+
 **Compose limitation:** the default `Dockerfile`/`compose.yaml` install only the
 `server` extra and do not mount guard weights. Do not claim container guard
 activation works. A small optional guard-image/mount step is still needed.
@@ -511,11 +527,13 @@ conservative version tags (`python:3.12-slim-bookworm`,
 verification and a full release security review remain pending. No digest was
 invented.
 
-The full local suite after the EMAIL repair reports **283 tests run, 281 passed
-and 2 skipped** (exit 0). The two skips are the existing optional PostgreSQL
+The full local suite now reports **324 tests run, 322 passed and 2 skipped**
+(exit 0, 21.847s; worker evidence, caller confirmation pending). The two skips
+are the existing optional PostgreSQL
 integration tests, skipped honestly because `TEST_AUDIT_DSN` is not set; no
 PostgreSQL round-trip was run and no residual skip was added for the export or
-PII work. Earlier `271 tests run, 269 passed`, `249 tests run, 247 passed` and
+PII work. Earlier `315 tests run, 313 passed`, `283 tests run, 281 passed`,
+`271 tests run, 269 passed`, `249 tests run, 247 passed` and
 `226 tests run, 224 passed` counts are stale. A SQLite test-helper close race
 that intermittently raised `WinError 32` on Windows was fixed in the helper
 itself.

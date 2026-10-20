@@ -61,6 +61,11 @@ DEFAULT_MAX_BODY_BYTES = 64 * 1024
 MAX_CONFIGURED_BODY_BYTES = 4 * 1024 * 1024
 DEFAULT_BODY_READ_TIMEOUT = 5.0
 MAX_CONFIGURED_BODY_READ_TIMEOUT = 60.0
+# Absolute HTTP deadline for one dispatched chat worker (input guard, generation,
+# output guard and terminal audit).  This is a response deadline only: it does
+# not terminate the synchronous thread or add a native model deadline.
+DEFAULT_CHAT_WORK_TIMEOUT = 60.0
+MAX_CONFIGURED_CHAT_WORK_TIMEOUT = 300.0
 DEFAULT_MAX_CONCURRENCY = 5
 MAX_CONFIGURED_CONCURRENCY = 256
 # Control-plane work (readiness probes and authenticated operator reads/writes)
@@ -581,6 +586,8 @@ def _resolve_export_log(
         return None
 
 
+# Shared "HTTP deadline expired" sentinel returned by _await_control_call for
+# both control-plane work and dispatched chat work.
 _CONTROL_TIMEOUT = object()
 
 
@@ -641,10 +648,11 @@ class _ControlPlaneAdmission:
 
 
 async def _await_control_call(task: "asyncio.Task", timeout: float, finish: Any) -> Any:
-    """Wait for a control-plane worker, retaining its slot across timeout/cancel.
+    """Wait for a shielded worker, retaining its slot across timeout/cancel.
 
-    A timeout returns ``_CONTROL_TIMEOUT`` without cancelling the worker; the
-    done callback releases the slot on real completion.  Repeated client
+    Shared by control-plane admission and the dispatched chat worker.  A timeout
+    returns ``_CONTROL_TIMEOUT`` without cancelling the worker; the done callback
+    (or ``finish``) releases the slot on real completion.  Repeated client
     cancellation is deferred until the worker finishes or the original deadline
     expires, whichever comes first.  A remembered cancellation is re-raised at
     that point (never replaced by the sentinel or a late worker result/error),
@@ -730,6 +738,7 @@ def make_app(
     body_read_timeout: float = DEFAULT_BODY_READ_TIMEOUT,
     max_concurrency: int = DEFAULT_MAX_CONCURRENCY,
     control_concurrency: int = DEFAULT_CONTROL_CONCURRENCY,
+    chat_work_timeout: float = DEFAULT_CHAT_WORK_TIMEOUT,
     app_id: str = "nasi-lemak",
     environ: dict[str, str] | None = None,
 ) -> FastAPI:
@@ -749,6 +758,7 @@ def make_app(
         and _valid_positive_float(body_read_timeout, MAX_CONFIGURED_BODY_READ_TIMEOUT)
         and _valid_positive_int(max_concurrency, MAX_CONFIGURED_CONCURRENCY)
         and _valid_positive_int(control_concurrency, MAX_CONFIGURED_CONTROL_CONCURRENCY)
+        and _valid_positive_float(chat_work_timeout, MAX_CONFIGURED_CHAT_WORK_TIMEOUT)
     )
     # Invalid numeric configuration must not crash startup.  Use safe defaults
     # for the live-but-not-ready application; readiness and chat stay closed.
@@ -756,6 +766,7 @@ def make_app(
     read_timeout = body_read_timeout if _valid_positive_float(body_read_timeout, MAX_CONFIGURED_BODY_READ_TIMEOUT) else DEFAULT_BODY_READ_TIMEOUT
     concurrency = max_concurrency if _valid_positive_int(max_concurrency, MAX_CONFIGURED_CONCURRENCY) else DEFAULT_MAX_CONCURRENCY
     control_limit = control_concurrency if _valid_positive_int(control_concurrency, MAX_CONFIGURED_CONTROL_CONCURRENCY) else DEFAULT_CONTROL_CONCURRENCY
+    chat_timeout = chat_work_timeout if _valid_positive_float(chat_work_timeout, MAX_CONFIGURED_CHAT_WORK_TIMEOUT) else DEFAULT_CHAT_WORK_TIMEOUT
 
     runtime_writer_dsn = (
         _file_env("NASI_LEMAK_AUDIT_DSN", env) if audit_dsn is None else audit_dsn
@@ -836,6 +847,11 @@ def make_app(
     app.state.sem = asyncio.Semaphore(concurrency)
     app.state.control_concurrency = control_limit
     app.state.control_admission = _ControlPlaneAdmission(control_limit)
+    app.state.chat_work_timeout = chat_timeout
+    # Retain a strong reference to every dispatched chat worker task so a
+    # timed-out request cannot let the task be garbage-collected while its
+    # thread still runs.  The done callback removes it only on real completion.
+    app.state.chat_tasks: set[asyncio.Task] = set()
 
     @app.middleware("http")
     async def assign_request_id(request: Request, call_next):
@@ -1129,7 +1145,10 @@ def make_app(
         def release_when_worker_done(task: "asyncio.Task") -> None:
             # Consume the worker result/exception here so no unfinished-task
             # warning or raw traceback is emitted.  The slot is released exactly
-            # once, after the synchronous handler has really finished.
+            # once, after the synchronous handler has really finished.  The
+            # strong reference is dropped only at that same real completion, not
+            # when the HTTP deadline expires.
+            request.app.state.chat_tasks.discard(task)
             try:
                 task.exception()
             except BaseException:
@@ -1167,8 +1186,19 @@ def make_app(
                 )
             )
             dispatched = True
+            request.app.state.chat_tasks.add(task)
             task.add_done_callback(release_when_worker_done)
-            status, payload = await _wait_for_worker(task)
+            result = await _await_control_call(
+                task,
+                request.app.state.chat_work_timeout,
+                release_when_worker_done,
+            )
+            if result is _CONTROL_TIMEOUT:
+                # The HTTP deadline expired, but the shielded worker keeps its
+                # admission slot until the native call really returns.  Any late
+                # success/error is consumed and never becomes a response.
+                return _error_response(request_id, "UNAVAILABLE", 503)
+            status, payload = result
             return JSONResponse(payload, status_code=status)
         finally:
             if not dispatched:
@@ -1193,30 +1223,6 @@ def make_app(
         return _error_response(request.state.request_id, "INVALID_REQUEST", 404)
 
     return app
-
-
-async def _wait_for_worker(task: "asyncio.Task") -> Any:
-    """Wait for the worker task, shielding it from client cancellation.
-
-    A client disconnect cancels this ASGI task, not the synchronous gateway
-    thread.  The concurrency slot must stay held until that thread really
-    completes, including when cancellation is delivered repeatedly.  Once it
-    completes, the original cancellation is re-raised.
-    """
-    cancelled = False
-    while not task.done():
-        try:
-            return await asyncio.shield(task)
-        except asyncio.CancelledError:
-            cancelled = True
-            continue
-    if cancelled:
-        try:
-            task.result()
-        except BaseException:
-            pass
-        raise asyncio.CancelledError()
-    return task.result()
 
 
 # Module-level app for ``uvicorn nasi_lemak.server:app``.  Missing or invalid
