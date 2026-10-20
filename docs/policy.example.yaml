@@ -1,0 +1,18 @@
+# Non-secret example startup policy for the Nasi Lemak gateway.
+#
+# This file is inert documentation: the server never reads this path by
+# default. Copy an operator-approved version to a separate preserved path and
+# point NASI_LEMAK_POLICY_FILE at it before a controlled restart.
+#
+# The loader accepts exactly these five keys, one YAML document, no anchors,
+# aliases or custom tags, at most 8 nested collections and at most 32 KiB.
+# deny_phrases are literal case-insensitive substrings matched across every
+# accepted input turn and the buffered output; they are not a semantic topic
+# filter and cannot disable PII masks or guard verdicts.
+
+app_id: nasi-lemak
+version: "2026-10-20.1"
+model: pilot-local
+token_budget: 256
+deny_phrases:
+  - "synthetic denied phrase"

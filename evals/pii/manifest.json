@@ -1,0 +1,9 @@
+{
+  "schema_version": 1,
+  "frozen_on": "2026-10-20",
+  "provenance": "Agent-authored synthetic fixtures; not independently labelled human hold-out data.",
+  "files": {
+    "development.json": "d950e445326fb94058847bd5b373947091ce57897035c979953ec580bf04c6b7",
+    "evaluation.json": "fa644f708df31e182a1e64ff1f9eb891dc3d99800c10ff81cea026e73ea55381"
+  }
+}

@@ -1,0 +1,124 @@
+{
+  "corpus_id": "pii-caller-review-edge-v1",
+  "corpus_sha256": "6ec81452e320ac03517eed894f1cd416f73f54736335c04eca49153465aa7e14",
+  "counts": {
+    "evaluated_cases": 6,
+    "excluded_cases": 0,
+    "gold_entities": 3,
+    "predicted_entities": 2,
+    "total_cases": 6
+  },
+  "errors": [
+    {
+      "case_id": "CR-EMAIL-001",
+      "case_label": "email_final_period_positive",
+      "end": 25,
+      "kind": "false_negative",
+      "reason": "gold_span_without_exact_prediction",
+      "start": 8,
+      "type": "EMAIL"
+    }
+  ],
+  "excluded_cases": [],
+  "gates": {
+    "customer_approved": false,
+    "entities": {
+      "EMAIL": {
+        "applicable": true,
+        "passed": false,
+        "precision_min": 0.95,
+        "recall_min": 0.95,
+        "status": "fail"
+      },
+      "MYKAD": {
+        "applicable": true,
+        "passed": true,
+        "precision_min": 0.95,
+        "recall_min": 0.95,
+        "status": "pass"
+      },
+      "MY_PHONE": {
+        "applicable": true,
+        "passed": true,
+        "precision_min": 0.95,
+        "recall_min": 0.95,
+        "status": "pass"
+      }
+    },
+    "overall_pass": false,
+    "overall_status": "fail",
+    "precision_min": 0.95,
+    "provisional_engineering_gate": true,
+    "recall_min": 0.95,
+    "requires_nonzero_positive_and_negative_cases": true,
+    "statistically_validated": false
+  },
+  "manifest_sha256": "f5d24ecbb20fe60948f585b973f25c1428bd3b2f45dec87cec911dfa9bcc07ab",
+  "match_rule": "exact_entity_type_and_offsets_one_to_one",
+  "per_entity": {
+    "EMAIL": {
+      "f1": 0.0,
+      "fn": 1,
+      "fp": 0,
+      "gate_applicable": true,
+      "gate_status": "fail",
+      "gold_count": 1,
+      "negative_cases": 1,
+      "positive_cases": 1,
+      "precision": null,
+      "predicted_cases": 0,
+      "predicted_count": 0,
+      "recall": 0.0,
+      "tp": 0
+    },
+    "MYKAD": {
+      "f1": 1.0,
+      "fn": 0,
+      "fp": 0,
+      "gate_applicable": true,
+      "gate_status": "pass",
+      "gold_count": 1,
+      "negative_cases": 1,
+      "positive_cases": 1,
+      "precision": 1.0,
+      "predicted_cases": 1,
+      "predicted_count": 1,
+      "recall": 1.0,
+      "tp": 1
+    },
+    "MY_PHONE": {
+      "f1": 1.0,
+      "fn": 0,
+      "fp": 0,
+      "gate_applicable": true,
+      "gate_status": "pass",
+      "gold_count": 1,
+      "negative_cases": 1,
+      "positive_cases": 1,
+      "precision": 1.0,
+      "predicted_cases": 1,
+      "predicted_count": 1,
+      "recall": 1.0,
+      "tp": 1
+    }
+  },
+  "report_kind": "pii_quality_evaluation",
+  "runtime_sha256": {
+    "nasi_lemak/gateway.py": "2a566f90ccfdfb83ccc23b8a231c161105d4ecc4c459f3c84e82e1bdbd00c7fd",
+    "nasi_lemak/pii.py": "640aa7699cb3b102893272dffd151bc95c93b270f8bacdaea7490bd4e14c4ed1",
+    "nasi_lemak/pii_eval.py": "e6e3b17e354b035c8627678596d0bfa4b299567c051a763a1b6d55eb8a55e8b0"
+  },
+  "schema_version": 1,
+  "scope": {
+    "entities": [
+      "EMAIL",
+      "MY_PHONE",
+      "MYKAD"
+    ],
+    "fixture_provenance": "agent-authored synthetic; not independently labelled human hold-out data",
+    "formats": "ASCII structured format recognizers only",
+    "identity_validity": "not established",
+    "semantic_context": "not evaluated"
+  },
+  "split": "evaluation"
+}

@@ -1,0 +1,8 @@
+{
+  "schema_version": 1,
+  "frozen_on": "2026-10-20",
+  "provenance": "Reviewed regression corpus copied from the frozen v1 evaluation with one caller-agent adjudicated gold correction (EV-EMAIL-014). Not independently labelled human hold-out data.",
+  "files": {
+    "evaluation.json": "aa4879f2c7a678781498f514bdfd9d38213c15b6eb11c559f3df3824b5b7b4db"
+  }
+}

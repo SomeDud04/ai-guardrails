@@ -1,0 +1,888 @@
+{
+  "schema_version": 1,
+  "split": "evaluation",
+  "corpus_id": "pii-synthetic-evaluation-v1",
+  "provenance": "Agent-authored synthetic fixtures. Not independently labelled, not customer data.",
+  "scope_notes": [
+    "Only ASCII structured EMAIL, MY_PHONE and MYKAD-like formats are in scope.",
+    "Full-width and obfuscated forms are marked unsupported and excluded from metrics.",
+    "A format match does not establish identity validity or semantic context."
+  ],
+  "cases": [
+    {
+      "id": "EV-EMAIL-001",
+      "focus": "EMAIL",
+      "scope": "in_scope",
+      "label": "bm_positive",
+      "notes": "BM surrounding text; structured ASCII email.",
+      "text": "Sila e-mel aisyah.rahman@example.invalid untuk maklumat lanjut.",
+      "gold": [
+        {
+          "type": "EMAIL",
+          "start": 11,
+          "end": 40,
+          "text": "aisyah.rahman@example.invalid"
+        }
+      ]
+    },
+    {
+      "id": "EV-EMAIL-002",
+      "focus": "EMAIL",
+      "scope": "in_scope",
+      "label": "chinese_positive",
+      "notes": "Chinese surrounding text; trailing full-width comma is outside the span.",
+      "text": "請將資料寄到 mei.lin@test.invalid，謝謝。",
+      "gold": [
+        {
+          "type": "EMAIL",
+          "start": 7,
+          "end": 27,
+          "text": "mei.lin@test.invalid"
+        }
+      ]
+    },
+    {
+      "id": "EV-EMAIL-003",
+      "focus": "EMAIL",
+      "scope": "in_scope",
+      "label": "plus_tag_positive",
+      "notes": "Plus tag and dotted local part.",
+      "text": "Contact first.last+campaign@example.invalid today.",
+      "gold": [
+        {
+          "type": "EMAIL",
+          "start": 8,
+          "end": 43,
+          "text": "first.last+campaign@example.invalid"
+        }
+      ]
+    },
+    {
+      "id": "EV-EMAIL-004",
+      "focus": "EMAIL",
+      "scope": "in_scope",
+      "label": "underscore_positive",
+      "notes": "Underscore local part and numeric-looking domain label.",
+      "text": "Write to ops_team@test.invalid before 17:00.",
+      "gold": [
+        {
+          "type": "EMAIL",
+          "start": 9,
+          "end": 30,
+          "text": "ops_team@test.invalid"
+        }
+      ]
+    },
+    {
+      "id": "EV-EMAIL-005",
+      "focus": "EMAIL",
+      "scope": "in_scope",
+      "label": "multiple_entities",
+      "notes": "Two distinct emails in one case.",
+      "text": "Reach a@example.invalid or b@test.invalid today.",
+      "gold": [
+        {
+          "type": "EMAIL",
+          "start": 6,
+          "end": 23,
+          "text": "a@example.invalid"
+        },
+        {
+          "type": "EMAIL",
+          "start": 27,
+          "end": 41,
+          "text": "b@test.invalid"
+        }
+      ]
+    },
+    {
+      "id": "EV-EMAIL-006",
+      "focus": "EMAIL",
+      "scope": "in_scope",
+      "label": "punctuation_multiple",
+      "notes": "Semicolon punctuation separates two emails.",
+      "text": "CC user.name@example.invalid; backup@test.invalid",
+      "gold": [
+        {
+          "type": "EMAIL",
+          "start": 3,
+          "end": 28,
+          "text": "user.name@example.invalid"
+        },
+        {
+          "type": "EMAIL",
+          "start": 30,
+          "end": 49,
+          "text": "backup@test.invalid"
+        }
+      ]
+    },
+    {
+      "id": "EV-EMAIL-007",
+      "focus": "EMAIL",
+      "scope": "in_scope",
+      "label": "parenthesis_boundary",
+      "notes": "Parentheses are outside the exact span.",
+      "text": "Email (support@example.invalid) is monitored.",
+      "gold": [
+        {
+          "type": "EMAIL",
+          "start": 7,
+          "end": 30,
+          "text": "support@example.invalid"
+        }
+      ]
+    },
+    {
+      "id": "EV-EMAIL-008",
+      "focus": "EMAIL",
+      "scope": "in_scope",
+      "label": "bm_positive_short",
+      "notes": "BM sentence with one email.",
+      "text": "Hantar kepada admin@test.invalid segera.",
+      "gold": [
+        {
+          "type": "EMAIL",
+          "start": 14,
+          "end": 32,
+          "text": "admin@test.invalid"
+        }
+      ]
+    },
+    {
+      "id": "EV-EMAIL-009",
+      "focus": "EMAIL",
+      "scope": "in_scope",
+      "label": "chinese_positive_short",
+      "notes": "Chinese sentence; CJK full stop outside the span.",
+      "text": "我的電郵是 user123@example.invalid。",
+      "gold": [
+        {
+          "type": "EMAIL",
+          "start": 6,
+          "end": 29,
+          "text": "user123@example.invalid"
+        }
+      ]
+    },
+    {
+      "id": "EV-EMAIL-010",
+      "focus": "EMAIL",
+      "scope": "in_scope",
+      "label": "plus_urgent_positive",
+      "notes": "Plus tag followed by ASCII comma.",
+      "text": "Escalate to oncall+urgent@test.invalid, please.",
+      "gold": [
+        {
+          "type": "EMAIL",
+          "start": 12,
+          "end": 38,
+          "text": "oncall+urgent@test.invalid"
+        }
+      ]
+    },
+    {
+      "id": "EV-EMAIL-011",
+      "focus": "EMAIL",
+      "scope": "in_scope",
+      "label": "email_phone_multi",
+      "notes": "Two entity types in one case.",
+      "text": "Email a@example.invalid dan telefon 012-3456789.",
+      "gold": [
+        {
+          "type": "EMAIL",
+          "start": 6,
+          "end": 23,
+          "text": "a@example.invalid"
+        },
+        {
+          "type": "MY_PHONE",
+          "start": 36,
+          "end": 47,
+          "text": "012-3456789"
+        }
+      ]
+    },
+    {
+      "id": "EV-EMAIL-012",
+      "focus": "EMAIL",
+      "scope": "in_scope",
+      "label": "email_mykad_multi",
+      "notes": "Two entity types in one case.",
+      "text": "ID 900101-12-3456, e-mel z@test.invalid, terima kasih.",
+      "gold": [
+        {
+          "type": "MYKAD",
+          "start": 3,
+          "end": 17,
+          "text": "900101-12-3456"
+        },
+        {
+          "type": "EMAIL",
+          "start": 25,
+          "end": 39,
+          "text": "z@test.invalid"
+        }
+      ]
+    },
+    {
+      "id": "EV-EMAIL-013",
+      "focus": "EMAIL",
+      "scope": "in_scope",
+      "label": "negative_no_tld",
+      "notes": "No dotted TLD; no production match expected.",
+      "text": "E-mel bukan nama@example tanpa domain.",
+      "gold": []
+    },
+    {
+      "id": "EV-EMAIL-014",
+      "focus": "EMAIL",
+      "scope": "in_scope",
+      "label": "negative_trailing_dot",
+      "notes": "Trailing sentence dot after the TLD is a word-boundary near-match.",
+      "text": "Tulis kepada nama@example.invalid. untuk maklumat.",
+      "gold": []
+    },
+    {
+      "id": "EV-EMAIL-015",
+      "focus": "EMAIL",
+      "scope": "in_scope",
+      "label": "negative_double_at",
+      "notes": "Double at-sign is malformed.",
+      "text": "Alamat salah: nama@@example.invalid",
+      "gold": []
+    },
+    {
+      "id": "EV-EMAIL-016",
+      "focus": "EMAIL",
+      "scope": "in_scope",
+      "label": "negative_short_tld",
+      "notes": "One-letter TLD fails the two-character rule.",
+      "text": "Contact name@example.i for details.",
+      "gold": []
+    },
+    {
+      "id": "EV-EMAIL-017",
+      "focus": "EMAIL",
+      "scope": "in_scope",
+      "label": "negative_empty_domain_label",
+      "notes": "Domain begins with a dot; malformed structured address.",
+      "text": "Not email: user@.invalid",
+      "gold": []
+    },
+    {
+      "id": "EV-EMAIL-018",
+      "focus": "EMAIL",
+      "scope": "in_scope",
+      "label": "negative_hyphen_suffix",
+      "notes": "Hyphen after the TLD is excluded by the right boundary.",
+      "text": "Email user@example.invalid-extra is rejected.",
+      "gold": []
+    },
+    {
+      "id": "EV-EMAIL-019",
+      "focus": "EMAIL",
+      "scope": "unsupported",
+      "label": "unsupported_obfuscated",
+      "notes": "Obfuscated 'at'/'dot' form is outside the ASCII structured-format scope; excluded from metrics.",
+      "text": "E-mel terobfuskasi: nama [at] example [dot] invalid",
+      "gold": []
+    },
+    {
+      "id": "EV-EMAIL-020",
+      "focus": "EMAIL",
+      "scope": "in_scope",
+      "label": "negative_literal_mask_token",
+      "notes": "A pre-existing literal mask token must never count as a detection.",
+      "text": "Placeholder [EMAIL] must not count as a detection.",
+      "gold": []
+    },
+    {
+      "id": "EV-PHONE-001",
+      "focus": "MY_PHONE",
+      "scope": "in_scope",
+      "label": "bm_compact_positive",
+      "notes": "BM text with compact local mobile number.",
+      "text": "Nombor telefon saya 0123456789.",
+      "gold": [
+        {
+          "type": "MY_PHONE",
+          "start": 20,
+          "end": 30,
+          "text": "0123456789"
+        }
+      ]
+    },
+    {
+      "id": "EV-PHONE-002",
+      "focus": "MY_PHONE",
+      "scope": "in_scope",
+      "label": "chinese_separated_positive",
+      "notes": "Chinese text with one hyphen-separated local mobile number.",
+      "text": "我的電話是 012-3456789。",
+      "gold": [
+        {
+          "type": "MY_PHONE",
+          "start": 6,
+          "end": 17,
+          "text": "012-3456789"
+        }
+      ]
+    },
+    {
+      "id": "EV-PHONE-003",
+      "focus": "MY_PHONE",
+      "scope": "in_scope",
+      "label": "plus_compact_positive",
+      "notes": "Country code with plus prefix.",
+      "text": "Call +60123456789 now.",
+      "gold": [
+        {
+          "type": "MY_PHONE",
+          "start": 5,
+          "end": 17,
+          "text": "+60123456789"
+        }
+      ]
+    },
+    {
+      "id": "EV-PHONE-004",
+      "focus": "MY_PHONE",
+      "scope": "in_scope",
+      "label": "country_code_no_plus",
+      "notes": "Country code without a plus prefix.",
+      "text": "Hubungi 60123456789 untuk bantuan.",
+      "gold": [
+        {
+          "type": "MY_PHONE",
+          "start": 8,
+          "end": 19,
+          "text": "60123456789"
+        }
+      ]
+    },
+    {
+      "id": "EV-PHONE-005",
+      "focus": "MY_PHONE",
+      "scope": "in_scope",
+      "label": "space_separated_positive",
+      "notes": "Space-separated groups.",
+      "text": "Phone: 012 345 6789.",
+      "gold": [
+        {
+          "type": "MY_PHONE",
+          "start": 7,
+          "end": 19,
+          "text": "012 345 6789"
+        }
+      ]
+    },
+    {
+      "id": "EV-PHONE-006",
+      "focus": "MY_PHONE",
+      "scope": "in_scope",
+      "label": "mixed_separator_positive",
+      "notes": "Mixed hyphen and space separators.",
+      "text": "Phone: 012-3456 789.",
+      "gold": [
+        {
+          "type": "MY_PHONE",
+          "start": 7,
+          "end": 19,
+          "text": "012-3456 789"
+        }
+      ]
+    },
+    {
+      "id": "EV-PHONE-007",
+      "focus": "MY_PHONE",
+      "scope": "in_scope",
+      "label": "plus_separated_positive",
+      "notes": "Country code plus a hyphen-separated local number.",
+      "text": "Hotline +6012-3456789.",
+      "gold": [
+        {
+          "type": "MY_PHONE",
+          "start": 8,
+          "end": 21,
+          "text": "+6012-3456789"
+        }
+      ]
+    },
+    {
+      "id": "EV-PHONE-008",
+      "focus": "MY_PHONE",
+      "scope": "in_scope",
+      "label": "two_phones_positive",
+      "notes": "Two distinct phone numbers in one case.",
+      "text": "Alternatif 012-3456789 atau 019-8765432.",
+      "gold": [
+        {
+          "type": "MY_PHONE",
+          "start": 11,
+          "end": 22,
+          "text": "012-3456789"
+        },
+        {
+          "type": "MY_PHONE",
+          "start": 28,
+          "end": 39,
+          "text": "019-8765432"
+        }
+      ]
+    },
+    {
+      "id": "EV-PHONE-009",
+      "focus": "MY_PHONE",
+      "scope": "in_scope",
+      "label": "email_phone_multi",
+      "notes": "Email and phone in one case.",
+      "text": "E-mel a@test.invalid, telefon 013-2223333.",
+      "gold": [
+        {
+          "type": "EMAIL",
+          "start": 6,
+          "end": 20,
+          "text": "a@test.invalid"
+        },
+        {
+          "type": "MY_PHONE",
+          "start": 30,
+          "end": 41,
+          "text": "013-2223333"
+        }
+      ]
+    },
+    {
+      "id": "EV-PHONE-010",
+      "focus": "MY_PHONE",
+      "scope": "in_scope",
+      "label": "mykad_phone_multi",
+      "notes": "MyKad-like and phone in one case.",
+      "text": "ID 900101-12-3456, telefon 014-5556666.",
+      "gold": [
+        {
+          "type": "MYKAD",
+          "start": 3,
+          "end": 17,
+          "text": "900101-12-3456"
+        },
+        {
+          "type": "MY_PHONE",
+          "start": 27,
+          "end": 38,
+          "text": "014-5556666"
+        }
+      ]
+    },
+    {
+      "id": "EV-PHONE-011",
+      "focus": "MY_PHONE",
+      "scope": "in_scope",
+      "label": "spaced_group_positive",
+      "notes": "Eleven-digit local number with a space group.",
+      "text": "Telefon 011-1234 5678 (WhatsApp).",
+      "gold": [
+        {
+          "type": "MY_PHONE",
+          "start": 8,
+          "end": 21,
+          "text": "011-1234 5678"
+        }
+      ]
+    },
+    {
+      "id": "EV-PHONE-012",
+      "focus": "MY_PHONE",
+      "scope": "in_scope",
+      "label": "plus_eleven_digit_positive",
+      "notes": "Country-code form with eleven digits after the plus.",
+      "text": "SMS +60111222333.",
+      "gold": [
+        {
+          "type": "MY_PHONE",
+          "start": 4,
+          "end": 16,
+          "text": "+60111222333"
+        }
+      ]
+    },
+    {
+      "id": "EV-PHONE-013",
+      "focus": "MY_PHONE",
+      "scope": "in_scope",
+      "label": "punctuation_after_positive",
+      "notes": "Comma follows the number.",
+      "text": "Call 018-777 8888, please.",
+      "gold": [
+        {
+          "type": "MY_PHONE",
+          "start": 5,
+          "end": 17,
+          "text": "018-777 8888"
+        }
+      ]
+    },
+    {
+      "id": "EV-PHONE-014",
+      "focus": "MY_PHONE",
+      "scope": "in_scope",
+      "label": "bm_alternate_positive",
+      "notes": "A second distinct compact local form.",
+      "text": "Telefon bimbit: 0123456789.",
+      "gold": [
+        {
+          "type": "MY_PHONE",
+          "start": 16,
+          "end": 26,
+          "text": "0123456789"
+        }
+      ]
+    },
+    {
+      "id": "EV-PHONE-015",
+      "focus": "MY_PHONE",
+      "scope": "in_scope",
+      "label": "negative_too_short",
+      "notes": "Seven-digit number is one digit too short for the accepted local form.",
+      "text": "Nombor 0123456 tidak lengkap.",
+      "gold": []
+    },
+    {
+      "id": "EV-PHONE-016",
+      "focus": "MY_PHONE",
+      "scope": "in_scope",
+      "label": "negative_separated_short",
+      "notes": "Nine-digit separated form is too short.",
+      "text": "Nombor 012-345 678 tidak lengkap.",
+      "gold": []
+    },
+    {
+      "id": "EV-PHONE-017",
+      "focus": "MY_PHONE",
+      "scope": "in_scope",
+      "label": "negative_twelve_digit_phone_shape",
+      "notes": "Twelve-digit overlong phone-like value; also matches the MyKad shape, so a cross-entity false positive is expected.",
+      "text": "Nombor 012345678901 terlalu panjang.",
+      "gold": []
+    },
+    {
+      "id": "EV-PHONE-018",
+      "focus": "MY_PHONE",
+      "scope": "in_scope",
+      "label": "negative_leading_word_boundary",
+      "notes": "Leading word character prevents the left boundary.",
+      "text": "Rujukan ABC0123456789 bukan telefon.",
+      "gold": []
+    },
+    {
+      "id": "EV-PHONE-019",
+      "focus": "MY_PHONE",
+      "scope": "in_scope",
+      "label": "negative_trailing_word_boundary",
+      "notes": "Trailing word characters prevent the right boundary.",
+      "text": "Nombor 0123456789abc bukan telefon.",
+      "gold": []
+    },
+    {
+      "id": "EV-PHONE-020",
+      "focus": "MY_PHONE",
+      "scope": "in_scope",
+      "label": "negative_short_country_code",
+      "notes": "Country-code form with too few subscriber digits.",
+      "text": "Nombor 6012345678 terlalu pendek.",
+      "gold": []
+    },
+    {
+      "id": "EV-PHONE-021",
+      "focus": "MY_PHONE",
+      "scope": "unsupported",
+      "label": "unsupported_fullwidth_digits",
+      "notes": "Full-width digits are outside the ASCII structured-format scope; excluded from metrics.",
+      "text": "Nombor penuh: ０１２３４５６７８９",
+      "gold": []
+    },
+    {
+      "id": "EV-MYKAD-001",
+      "focus": "MYKAD",
+      "scope": "in_scope",
+      "label": "bm_positive_separated",
+      "notes": "BM text with a hyphenated MyKad-like number.",
+      "text": "No. Kad Pengenalan: 900101-12-3456.",
+      "gold": [
+        {
+          "type": "MYKAD",
+          "start": 20,
+          "end": 34,
+          "text": "900101-12-3456"
+        }
+      ]
+    },
+    {
+      "id": "EV-MYKAD-002",
+      "focus": "MYKAD",
+      "scope": "in_scope",
+      "label": "chinese_positive_compact",
+      "notes": "Chinese text with a compact twelve-digit value.",
+      "text": "身份證號碼 900101123456。",
+      "gold": [
+        {
+          "type": "MYKAD",
+          "start": 6,
+          "end": 18,
+          "text": "900101123456"
+        }
+      ]
+    },
+    {
+      "id": "EV-MYKAD-003",
+      "focus": "MYKAD",
+      "scope": "in_scope",
+      "label": "english_positive_separated",
+      "notes": "English text with a hyphenated value.",
+      "text": "MyKad 880202-10-5678 for reference.",
+      "gold": [
+        {
+          "type": "MYKAD",
+          "start": 6,
+          "end": 20,
+          "text": "880202-10-5678"
+        }
+      ]
+    },
+    {
+      "id": "EV-MYKAD-004",
+      "focus": "MYKAD",
+      "scope": "in_scope",
+      "label": "compact_positive",
+      "notes": "Compact twelve-digit value after a short label.",
+      "text": "IC: 010203040506",
+      "gold": [
+        {
+          "type": "MYKAD",
+          "start": 4,
+          "end": 16,
+          "text": "010203040506"
+        }
+      ]
+    },
+    {
+      "id": "EV-MYKAD-005",
+      "focus": "MYKAD",
+      "scope": "in_scope",
+      "label": "bm_positive_separated_alt",
+      "notes": "A second distinct hyphenated value.",
+      "text": "Kad 720315-08-9012.",
+      "gold": [
+        {
+          "type": "MYKAD",
+          "start": 4,
+          "end": 18,
+          "text": "720315-08-9012"
+        }
+      ]
+    },
+    {
+      "id": "EV-MYKAD-006",
+      "focus": "MYKAD",
+      "scope": "in_scope",
+      "label": "multiple_mykad",
+      "notes": "Two distinct MyKad-like values in one case.",
+      "text": "IDs 900101-12-3456 and 880202-10-5678.",
+      "gold": [
+        {
+          "type": "MYKAD",
+          "start": 4,
+          "end": 18,
+          "text": "900101-12-3456"
+        },
+        {
+          "type": "MYKAD",
+          "start": 23,
+          "end": 37,
+          "text": "880202-10-5678"
+        }
+      ]
+    },
+    {
+      "id": "EV-MYKAD-007",
+      "focus": "MYKAD",
+      "scope": "in_scope",
+      "label": "email_mykad_phone_multi",
+      "notes": "Three entity types in one case.",
+      "text": "Email a@test.invalid; MyKad 900101-12-3456; telefon 012-3456789.",
+      "gold": [
+        {
+          "type": "EMAIL",
+          "start": 6,
+          "end": 20,
+          "text": "a@test.invalid"
+        },
+        {
+          "type": "MYKAD",
+          "start": 28,
+          "end": 42,
+          "text": "900101-12-3456"
+        },
+        {
+          "type": "MY_PHONE",
+          "start": 52,
+          "end": 63,
+          "text": "012-3456789"
+        }
+      ]
+    },
+    {
+      "id": "EV-MYKAD-008",
+      "focus": "MYKAD",
+      "scope": "in_scope",
+      "label": "compact_positive_alt",
+      "notes": "Compact value in BM context.",
+      "text": "Pemohon 000101015678.",
+      "gold": [
+        {
+          "type": "MYKAD",
+          "start": 8,
+          "end": 20,
+          "text": "000101015678"
+        }
+      ]
+    },
+    {
+      "id": "EV-MYKAD-009",
+      "focus": "MYKAD",
+      "scope": "in_scope",
+      "label": "bm_separated_positive",
+      "notes": "Hyphenated value in a reference label.",
+      "text": "Rujukan kad: 650505-05-4321.",
+      "gold": [
+        {
+          "type": "MYKAD",
+          "start": 13,
+          "end": 27,
+          "text": "650505-05-4321"
+        }
+      ]
+    },
+    {
+      "id": "EV-MYKAD-010",
+      "focus": "MYKAD",
+      "scope": "in_scope",
+      "label": "chinese_separated_positive",
+      "notes": "Chinese text with a hyphenated value.",
+      "text": "身份證 851212-14-7890 已驗證。",
+      "gold": [
+        {
+          "type": "MYKAD",
+          "start": 4,
+          "end": 18,
+          "text": "851212-14-7890"
+        }
+      ]
+    },
+    {
+      "id": "EV-MYKAD-011",
+      "focus": "MYKAD",
+      "scope": "in_scope",
+      "label": "english_separated_positive",
+      "notes": "Hyphenated value after an English label.",
+      "text": "MyKad-like 700707-07-7777.",
+      "gold": [
+        {
+          "type": "MYKAD",
+          "start": 11,
+          "end": 25,
+          "text": "700707-07-7777"
+        }
+      ]
+    },
+    {
+      "id": "EV-MYKAD-012",
+      "focus": "MYKAD",
+      "scope": "in_scope",
+      "label": "compact_positive_third",
+      "notes": "Compact twelve-digit value.",
+      "text": "No kad 990909099999.",
+      "gold": [
+        {
+          "type": "MYKAD",
+          "start": 7,
+          "end": 19,
+          "text": "990909099999"
+        }
+      ]
+    },
+    {
+      "id": "EV-MYKAD-013",
+      "focus": "MYKAD",
+      "scope": "in_scope",
+      "label": "negative_eleven_digits",
+      "notes": "Eleven-digit value is one digit too short.",
+      "text": "Bukan kad: 900101-12-345.",
+      "gold": []
+    },
+    {
+      "id": "EV-MYKAD-014",
+      "focus": "MYKAD",
+      "scope": "in_scope",
+      "label": "negative_thirteen_digits",
+      "notes": "Thirteen-digit value is one digit too long.",
+      "text": "Rujukan 1900101123456 bukan kad.",
+      "gold": []
+    },
+    {
+      "id": "EV-MYKAD-015",
+      "focus": "MYKAD",
+      "scope": "in_scope",
+      "label": "negative_letter_suffix",
+      "notes": "Letter suffix breaks the numeric shape.",
+      "text": "Kod 900101-12-345A bukan kad.",
+      "gold": []
+    },
+    {
+      "id": "EV-MYKAD-016",
+      "focus": "MYKAD",
+      "scope": "in_scope",
+      "label": "ambiguous_order_id",
+      "notes": "Field-labelled order identifier is not PII; format-only regex is expected to false-positive.",
+      "text": "Order 900101123456 shipped.",
+      "gold": []
+    },
+    {
+      "id": "EV-MYKAD-017",
+      "focus": "MYKAD",
+      "scope": "in_scope",
+      "label": "ambiguous_sku",
+      "notes": "Field-labelled SKU is not PII; format-only regex is expected to false-positive.",
+      "text": "SKU 880202105678 tersedia.",
+      "gold": []
+    },
+    {
+      "id": "EV-MYKAD-018",
+      "focus": "MYKAD",
+      "scope": "in_scope",
+      "label": "ambiguous_part_number",
+      "notes": "Field-labelled part number is not PII; format-only regex is expected to false-positive.",
+      "text": "Part no. 123456789012.",
+      "gold": []
+    },
+    {
+      "id": "EV-MYKAD-019",
+      "focus": "MYKAD",
+      "scope": "in_scope",
+      "label": "negative_literal_mask_token",
+      "notes": "A pre-existing literal mask token must never count as a detection.",
+      "text": "Placeholder [MYKAD] must not count.",
+      "gold": []
+    },
+    {
+      "id": "EV-MYKAD-020",
+      "focus": "MYKAD",
+      "scope": "unsupported",
+      "label": "unsupported_space_separated",
+      "notes": "Space-separated MyKad-like form is outside the documented ASCII structured-format scope; excluded from metrics.",
+      "text": "Kad: 900101 12 3456",
+      "gold": []
+    }
+  ]
+}

@@ -1,0 +1,21 @@
+__pycache__/
+*.py[cod]
+.venv/
+venv/
+.env
+.env.*
+*.sqlite
+*.sqlite3
+*.db
+*.pem
+*.key
+.orchestration/
+.secrets/
+
+# Generated local code graph database (SQLite/WAL/shm, pid and log files).
+.codegraph/
+
+# Local build and packaging output.
+build/
+dist/
+*.egg-info/

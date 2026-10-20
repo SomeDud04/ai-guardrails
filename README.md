@@ -1,0 +1,563 @@
+# Project Nasi Lemak gateway
+
+This repository contains a **real FastAPI HTTP gateway** plus the synthetic
+in-process foundation it grew from. The HTTP surface is local and fail-closed.
+Local guard/tokenizer wiring and one versioned YAML startup policy are
+implemented, but **no pretrained guard checkpoint has been downloaded or
+executed here**, the optional ML extra is not installed in this workspace, and
+the upstream API model ID is still unknown. The server therefore starts live and
+deliberately stays **not ready**, returning generic `503` for chat until a valid
+operator-supplied policy file, locally supplied guard artifacts, the confirmed
+model ID and PostgreSQL audit are configured. There is no demo mode, allow-all
+adapter or environment-selected bypass.
+
+Docker Compose packaging is provided for a gateway + PostgreSQL audit stack.
+**It has not been built or run in this workspace because Docker is not
+installed.** See [Validation limits](#validation-limits).
+
+## Status
+
+| Area | State |
+|---|---|
+| `POST /v1/chat/completions` HTTP handling | Implemented locally, tested |
+| Bounded body reading, strict JSON, auth, readiness | Implemented locally, tested |
+| SQLite audit | Development/test only |
+| PostgreSQL audit store | Implemented; optional integration tests skipped without `TEST_AUDIT_DSN` |
+| Authenticated operator event view | Read-only `/admin` shell and `/admin/events` API implemented locally; optional separate reader config; PostgreSQL reader SQL checked with a driver double only |
+| Bounded CSV export | `/admin/export.csv` implemented locally with a separate append-only export audit; contract in [docs/evidence-export.md](docs/evidence-export.md); PostgreSQL SQL checked with a driver double only |
+| Versioned YAML startup policy | Strict loader, mandatory file activation, literal deny phrases and restart/rollback tests implemented locally |
+| Real tokenizer / attack guard / output guard | Adapters and server wiring implemented locally; **pretrained weights not run** |
+| PII quality gate (synthetic) | Frozen agent-authored evaluation + deterministic evaluator; reviewed EMAIL terminal-period repair passes six known regression cases; v1 EMAIL fails on 1 frozen false positive and MyKad on 4; **not customer accepted**. See [docs/pii-quality.md](docs/pii-quality.md) |
+| Generation transport | Implemented; not live-verified |
+| Docker image / Compose runtime | **Not built or run here**; Compose does not install guard ML deps or mount weights |
+| LiteLLM routing | Deferred |
+| TLS ingress | Not present; localhost HTTP only |
+
+This is not a completed day-2 milestone and not a production pilot.
+
+## Local development
+
+Use the workspace virtualenv:
+
+```powershell
+.\.venv\Scripts\python.exe -m unittest discover -s tests -v
+.\.venv\Scripts\python.exe -m nasi_lemak.demo
+.\.venv\Scripts\python.exe scripts/preflight.py
+```
+
+Run the server locally (it will be live but not ready without an explicitly
+configured policy file, locally supplied guard artifacts and a confirmed
+upstream model ID):
+
+```powershell
+.\.venv\Scripts\python.exe -m uvicorn nasi_lemak.server:app --host 127.0.0.1 --port 8000 --no-access-log
+```
+
+`pyproject.toml` is the canonical dependency definition. The `server` extra
+pins the tested HTTP runtime (FastAPI 0.147.0, Uvicorn 0.54.0, psycopg 3.3.6
+binary); the `test` extra adds HTTPX 0.28.1 and PyYAML 6.0.3.
+
+## HTTP surface
+
+Only these routes exist:
+
+| Method | Path | Meaning |
+|---|---|---|
+| `GET` | `/health/live` | Process liveness; `200 {"status":"ok"}` |
+| `GET` | `/health/ready` | `200 {"status":"ready"}` only when configuration and audit readiness pass; otherwise `503 {"status":"not_ready"}` |
+| `POST` | `/v1/chat/completions` | Bounded OpenAI-compatible chat request |
+| `GET` | `/admin` | Static operator login/view shell only when optional operator config is valid; otherwise safe `404`/`503` |
+| `GET` | `/admin/events` | Authenticated, read-only, filtered and paginated event metadata (operator key only) |
+| `GET` | `/admin/export.csv` | Authenticated, bounded CSV snapshot of all rows matching the filters; append-only export audit before release |
+
+There are no docs, OpenAPI, redoc, debug or trailing-slash routes.
+
+Request rules:
+
+- `Content-Type: application/json` exactly (parameters after `;` are ignored).
+- Exactly one `Authorization: Bearer <application-key>` header.
+- Body is streamed and bounded by actual bytes, independent of
+  `Content-Length`; the default ceiling is 64 KiB (configured maximum 4 MiB).
+- Invalid UTF-8, malformed JSON, duplicate keys, non-finite numbers, unknown
+  fields, a non-`pilot-local` model, `stream: true`, more than 16 messages, or
+  invalid roles/content all return a generic `400`.
+- One complete body-read deadline applies; timeouts and overload return `503`.
+- Missing/invalid auth returns `401`; attack/output guard blocks return `403`;
+  oversized actual bytes, a serialized conversation over 4096 characters, or
+  token budget returns `413`.
+- Error bodies contain only a stable `code`, fixed generic `message` and
+  `request_id`. Raw exception text, request content, credentials and DSNs are
+  never returned or logged.
+- Readiness performs cheap structural checks plus a bounded audit-store probe.
+  It does not call the model or guard network endpoints.
+
+The exact chat contract, including the unavailable-state semantics, is in
+`docs/api-contract.yaml`.
+
+## Operator event view
+
+The optional operator view is a minimal, local, read-only HTML/JSON surface. It
+is not a policy editor, approval workflow or chart dashboard. When
+no operator configuration is present, both routes return the normal generic
+`404` and chat is unaffected. Partial or invalid configuration returns a generic
+`503`; an operator outage never makes chat unavailable.
+
+| Variable | Meaning |
+|---|---|
+| `NASI_LEMAK_OPERATOR_KEY_DIGEST` | Lowercase 64-hex SHA-256 digest of one operator key. `_FILE` is supported. |
+| `NASI_LEMAK_OPERATOR_AUDIT_DSN` | DSN for a separate SELECT-only reader role. `_FILE` is supported. |
+
+The operator digest must differ from `NASI_LEMAK_APP_KEY_DIGEST`; configuring the
+same digest disables the operator routes. `POST /v1/chat/completions` accepts only
+the chat key, and `/admin/events` accepts only the operator key. There is no
+default, sample or production key in source.
+
+`/admin` returns static HTML/CSS/JS with no event, secret or runtime
+configuration. The password-style token field is read by JavaScript; the token
+stays in tab memory and is sent only as an `Authorization: Bearer` header to
+same-origin `/admin/events`. It is never placed in a URL, cookie, local/session
+storage or log. Disconnect and `pagehide` clear the token, rows and metadata
+immediately and abort the in-flight request; a generation counter rejects late
+success/error callbacks from an older connection. Event values are rendered with
+`textContent`, never `innerHTML`. The shell includes decision/event-type/
+request-ID filters, `Next`/`Previous` paging (cursor history stays in memory), the
+active policy version/digest and a health status. A `request_started` row shows
+the pending decision recorded by that start event; the table does not infer that
+the request is still incomplete, because its final outcome may be in a later
+event or another page. Both routes send `Cache-Control: no-store`, a hash-based
+restrictive CSP (no `unsafe-inline`, `eval`, remote origin or framing), `nosniff`,
+frame denial and same-origin resource policy, with no CORS.
+
+`/admin/events` authenticates before any read and uses a separate reader
+boundary, never `Gateway.audit_events()` or the runtime writer store/DSN. The
+reader is SELECT-only, scopes every page to the trusted server-side `app_id`,
+uses fixed SQL identifiers and parameterised values, a positive `seq` keyset
+cursor, `LIMIT` at most 100 with a fetch of `limit + 1`, and bounded
+decision/event-type/request-ID filters. PostgreSQL uses lazy `psycopg`, a bounded
+connect timeout, `statement_timeout` and `default_transaction_read_only=on`, then
+closes the connection. Responses contain only an allowlisted metadata shape plus
+`has_more`, `next_cursor`, current policy version/digest and health; DSNs, raw
+rows and driver errors are never returned. Reader failures return generic `503`
+metadata only. The separate `/admin/export.csv` route reuses the operator key but
+runs its own strict query parser, one bounded snapshot and an append-only export
+audit; its caps, CSV format and failure modes are in
+[docs/evidence-export.md](docs/evidence-export.md). Count aggregation is not
+implemented.
+
+For a local browser check, the synthetic fixture binds only `127.0.0.1` and
+prints its explicit synthetic key at startup:
+
+```powershell
+.\.venv\Scripts\python.exe scripts/operator_demo.py --port 18789
+```
+
+It writes 127 synthetic rows (126 scoped demo events plus one unrelated-application
+row), with `req_demo_01`–`req_demo_03` first and then filler requests, so the
+default 50-row page has `Next`/`Previous` pages. It also includes one harmless
+`<img ...>` metadata string to exercise escaping. Optional
+`--reader-delay SECONDS` (bounded to 30) and `--reader-unavailable` switches
+exist only in this synthetic script for caller race/outage checks; they are not
+runtime environment configuration. The fixture passes `environ={}` explicitly,
+so it never reads process environment or `*_FILE` secret paths. It is not
+production evidence and must not be deployed.
+
+Browser qualification includes a caller check in an IAB host on port 18789: the
+synthetic fixture's 50-row page displayed 50 rows, and `Export matching events`
+produced an actual `nasi-lemak-events-export.csv` download. The caller parsed
+126 data rows and 13 columns, all scoped to `synthetic-operator-demo`, with
+canonical filters `decision=*;event_type=*;request_id=*` and SHA-256
+`38e37eeb5c1923d7ed97867ad073596616487f305a0095cd8ab2b9dd7c8ba84e`; this is
+synthetic browser-download evidence only. Delayed-reply/stale-response race,
+outage and escaping behaviour remain unexercised by the caller browser. Local
+tests exercise the inline JavaScript with Node.js plus a deterministic DOM and
+deferred fetch, not a browser engine or CSP execution. For a real setup, provision the
+`nasi_lemak_audit_reader` NOLOGIN group from `audit_roles.sql`, then have an
+administrator create a separate LOGIN reader outside this repository, for
+example:
+
+```sql
+CREATE ROLE nasi_lemak_operator LOGIN IN ROLE nasi_lemak_audit_reader;
+\password nasi_lemak_operator
+```
+
+Write that role's DSN only through `NASI_LEMAK_OPERATOR_AUDIT_DSN_FILE` or an
+approved secret manager. Never reuse the runtime writer DSN, a chat key or a
+default password. The Compose file does not configure the operator feature, so
+the default stack leaves it disabled; no Compose deployment is claimed here.
+
+## Startup policy
+
+The production server requires one operator-supplied policy file:
+
+| Variable | Meaning |
+|---|---|
+| `NASI_LEMAK_POLICY_FILE` | Path to one UTF-8 YAML policy file, read once while the app is constructed |
+
+`docs/policy.example.yaml` is a non-secret example of the exact canonical form.
+The loader accepts only these five keys:
+
+```yaml
+app_id: nasi-lemak            # must equal the server-side app id
+version: "2026-10-20.1"       # non-empty audit/version string
+model: pilot-local            # the only accepted public alias
+token_budget: 256             # integer 1..512
+deny_phrases:                 # up to 64 non-empty strings, 256 chars each
+  - "synthetic denied phrase"
+```
+
+The file must contain exactly one YAML document, no anchors, aliases or custom
+tags, no duplicate keys, at most 8 nested collections and at most 32 KiB. An
+explicitly injected `Policy`/`Gateway` is a Python test seam only, not a runtime
+mode.
+
+Activation is construction-time only. To activate a new version, an operator
+copies an approved file to a **preserved** path outside version control, points
+`NASI_LEMAK_POLICY_FILE` at it and performs a controlled restart. The previously
+approved file is never overwritten, so a rollback selects that preserved file
+and restarts again. There is **no hot reload, in-process editor, database policy
+management or approval mechanism**; approval is an operator procedure, and the
+gateway only enforces the file it was started with.
+
+A missing, unreadable, oversized, malformed or otherwise invalid file makes the
+app live `200` but not ready `503`, and chat stays `503`; it never falls back to
+built-in defaults and never loads guard artifacts. A valid file's `version` and
+SHA-256 policy `digest` are recorded in `app.state` and on every audit event for
+the active policy. The digest covers the app identity, version, alias, token
+budget and deny phrases.
+
+`deny_phrases` are **literal, case-insensitive substrings** checked against every
+accepted input turn before generation and against buffered output before
+release. They are not a regex and not a semantic topic filter. No policy value
+can disable the three mandatory PII masks (email, Malaysian phone, MyKad), the
+attack guard, the contextual output guard or the audit-before-release ordering.
+
+## Generation transport
+
+The OpenAI-compatible client is configured only from server-side environment
+variables; no URL, key, cloud fallback or proxy is inferred. Non-loopback plain
+HTTP requires the explicit
+`NASI_LEMAK_GENERATION_ALLOW_INSECURE_HTTP=true` opt-in, and TLS verification
+is never disabled. See `docs/generation.env.example` for a non-secret example.
+
+The supplied endpoint is:
+
+```text
+http://82haf69n.flexinfra.com.my/v1
+```
+
+Here `/v1` is an **assumed** OpenAI-compatible prefix, not a live-verified fact.
+The supplied endpoint uses **no authentication** (`NASI_LEMAK_GENERATION_AUTH=none`),
+requires the explicit insecure-HTTP opt-in, and its exact API model ID is
+**still unknown**. `NASI_LEMAK_GENERATION_MODEL` therefore remains blank;
+generation and probes fail closed while it is blank. Do not use the display name
+`Qwen3.8 27B FP8` as an API model ID.
+
+An earlier `GET .../v1/models` attempt timed out on port 80. No successful
+serving, model listing or inference has been demonstrated, and no further live
+network checks are made in this workspace.
+
+## Local guard wiring
+
+`nasi_lemak/server.py:make_adapters_from_env` composes the local guard adapters
+with the generation client. The default loaders are lazy: the module imports
+`torch`/`transformers` only when a model is actually loaded, so the gateway and
+the main test suite run without the optional ML extra. The interfaces and
+limitations are documented in [`docs/guards.md`](docs/guards.md).
+
+Required guard settings (all must be supplied; there is no default Hub ID,
+download or demo adapter):
+
+| Variable | Meaning |
+|---|---|
+| `NASI_LEMAK_PROMPT_GUARD_MODEL_DIR` | Existing local Prompt Guard 2 directory (tokenizer, config, safetensors). Also used as the input tokenizer. |
+| `NASI_LEMAK_LLAMA_GUARD_MODEL_DIR` | Existing local Llama Guard 3 directory (tokenizer, config, safetensors). |
+| `NASI_LEMAK_PROMPT_GUARD_THRESHOLD` | Finite malicious-probability threshold in `[0, 1]`; uncalibrated. |
+| `NASI_LEMAK_LLAMA_GUARD_CONTEXT_LIMIT` | Integer context budget of at least 33; the guard reserves 32 verdict tokens inside it. |
+
+The existing `NASI_LEMAK_GENERATION_*` settings are validated first. Every load
+uses `local_files_only=True`, `trust_remote_code=False`, `token=False` and
+safetensors weights; model files must already exist locally. No network access,
+Hub resolution, cache fallback or customer path/secret is emitted. An invalid
+or missing setting, unreadable directory, missing dependency or load failure
+returns no adapters, so the app stays live `200` / ready `503` and chat `503`.
+
+Behavior preserved by this wiring:
+
+- Input coverage tokenizes the **complete original canonical conversation** with
+  the actual Prompt Guard tokenizer (`add_special_tokens=True`,
+  `truncation=False`). More than the 512-token budget returns `413` before
+  generation.
+- Output screening passes the **complete current-request sanitized conversation**
+  plus the buffered model output to `scan_response(messages, output)`. The
+  real adapter requires that contextual method; a context-free call fails
+  closed. Synthetic test adapters may still use the legacy `scan_output(text)`
+  fallback.
+- The terminal audit write still precedes any response release; guard, audit or
+  malformed-verdict failures release no output.
+
+The user/operator must obtain license-approved weights independently and install
+the optional extra when ready:
+
+```powershell
+.\.venv\Scripts\python.exe -m pip install -e ".[guards]"
+```
+
+This workspace has **not** run that install. The exact pins in
+`pyproject.toml` were only checked against PyPI metadata and their mutual
+compatibility is untested. Real pretrained inference, quality, false-positive
+rates and CPU memory/latency are unmeasured. The native model forward path has no
+hard preemptive deadline, so process-isolated serving, outage behavior and
+performance evidence remain required.
+
+**Compose limitation:** the default `Dockerfile`/`compose.yaml` install only the
+`server` extra and do not mount guard weights. Do not claim container guard
+activation works. A small optional guard-image/mount step is still needed.
+
+## PII quality evaluation (synthetic)
+
+`evals/pii/` freezes agent-authored, versioned synthetic fixtures with explicit
+gold spans, plus a SHA256 manifest. `nasi_lemak/pii_eval.py` runs the actual
+production recognizers through the shared span function used by `mask_pii` and
+writes metadata-only reports under `evals/pii/results/`:
+
+```powershell
+.\.venv\Scripts\python.exe -m nasi_lemak.pii_eval --split evaluation
+.\.venv\Scripts\python.exe -m nasi_lemak.pii_eval --root evals/pii/reviewed-labels-v2
+```
+
+The current v1 evaluation split has 61 cases (58 evaluated, 3 explicitly
+unsupported), 16 EMAIL, 17 MY_PHONE and 15 MYKAD gold entities. Caller review
+reproduced a privacy gap where an address followed by a sentence period stayed
+unmasked. A narrow reviewed repair of only the EMAIL right boundary keeps the
+period in the output while masking the address.
+
+Caller-agent label adjudication produced a separate reviewed v2 corpus that
+corrects exactly one disclosed annotation error: v1 `EV-EMAIL-014` labelled a
+sentence-final address as non-PII. V2 scores EMAIL 17 TP / 0 FP / 0 FN
+(1.0000/1.0000) and MY_PHONE 1.0000/1.0000, but MyKAD still has four labelled
+false positives (order ID, SKU, part number and an overlong phone-like value
+that also matches 12 digits), so precision is 0.7895/1.0000 and the v2 CLI
+still exits `1`. The v1 raw score (EMAIL 16 TP / 1 FP / 0 FN) is retained but
+is annotation-conflicted and is not a reliable current EMAIL quality score.
+
+The separate six-case caller-review corpus exits `0`, but both reviewed
+corpora are known-regression evidence, not unseen or independent hold-out sets.
+Preserved `before-email-fix` reports retain the original failing evidence. This
+is synthetic format-recognizer evidence only, not an independent human hold-out
+set, population metric, privacy audit or customer acceptance. Full method,
+labels, hashes, adjudication and limits:
+[docs/pii-quality.md](docs/pii-quality.md). Language boundary:
+[docs/language-support.md](docs/language-support.md).
+
+## Docker Compose packaging
+
+`Dockerfile`, `compose.yaml`, `.dockerignore` and `docs/compose.env.example`
+provide a two-service stack:
+
+- `db`: PostgreSQL, no host-published port, named persistent volume
+  `nasi_lemark_db`, container healthcheck.
+- `gateway`: built from the minimal image, non-root UID 10001, read-only root
+  filesystem with a small `/tmp` tmpfs, all capabilities dropped,
+  `no-new-privileges`, memory/CPU/PID limits, and `127.0.0.1:8000` published by
+  default. It waits for `db` to become healthy.
+- PostgreSQL is attached only to an **internal** network. The gateway is also
+  on the default bridge so it can reach the external model endpoint.
+
+The image copies only `pyproject.toml` and `nasi_lemak/`; it installs the
+`server` extra, packages the `.sql` bootstrap files, and runs:
+
+```text
+uvicorn nasi_lemak.server:app --host 0.0.0.0 --port 8000 --workers 1 --no-access-log
+```
+
+No reload, debug worker, Docker socket, privileged mode or access log.
+
+### Operator runbook
+
+Never place a password, DSN containing a password, application key or digest
+value in chat, shell history, Git or the repository. Use `.secrets/` locally
+(ignored by Git and Docker) and an approved secret manager for the real key.
+
+1. Create a local env file from the sample and replace every
+   `/ABSOLUTE/PATH/...` placeholder:
+
+   ```powershell
+   New-Item -ItemType Directory -Force .secrets | Out-Null
+   Copy-Item docs/compose.env.example .secrets/compose.env
+   ```
+
+2. Create the three secret files with an approved password manager or secure
+   prompt, **not** by echoing secrets into a command:
+
+   - `db_admin_password`: PostgreSQL administrator password (no trailing
+     newline).
+   - `audit_dsn`: one runtime writer DSN, never the administrator DSN. Create
+     the path as an empty placeholder before the first `config`/`up db` (the
+     gateway is not started yet); fill in the real DSN after step 5.
+   - `app_key_digest`: lowercase 64-hex SHA-256 digest of the application key.
+
+   `POSTGRES_ADMIN_USER` is a non-secret name. The sample paths do not exist,
+   so a copied-but-unedited env file fails instead of starting with a default
+   credential.
+
+3. Render and inspect the configuration (this does not start anything):
+
+   ```powershell
+   docker compose --env-file .secrets/compose.env config
+   ```
+
+4. Start PostgreSQL and wait for health:
+
+   ```powershell
+   docker compose --env-file .secrets/compose.env up -d db
+   docker compose --env-file .secrets/compose.env ps
+   ```
+
+   The mounted `audit_schema.sql` and `audit_roles.sql` run **only when the data
+   volume is empty**. They create the schema and NOLOGIN group roles, not a
+   runtime LOGIN role and not any password. **Never delete a live database
+   volume to rerun bootstrap.** For an existing volume, apply the SQL manually
+   with administrator credentials.
+
+5. Provision the runtime LOGIN role in the `nasi_lemak_audit_writer` group, then
+   set its password interactively with `\password` (it is not echoed):
+
+   ```powershell
+   docker compose --env-file .secrets/compose.env exec db psql -U <admin-user> -d nasi_lemak
+   ```
+
+   ```sql
+   CREATE ROLE nasi_lemak_gateway LOGIN IN ROLE nasi_lemak_audit_writer;
+   \password nasi_lemak_gateway
+   ```
+
+   Write the corresponding DSN to the local `audit_dsn` file without printing
+   it:
+
+   ```text
+   postgresql://nasi_lemak_gateway:<password>@db:5432/nasi_lemak
+   ```
+
+6. Start the gateway:
+
+   ```powershell
+   docker compose --env-file .secrets/compose.env up -d gateway
+   ```
+
+7. Check status and endpoints:
+
+   ```powershell
+   Invoke-RestMethod http://127.0.0.1:8000/health/live
+   Invoke-WebRequest http://127.0.0.1:8000/health/ready
+   ```
+
+   With the default Compose file, live is `200` and ready/chat are `503`. That
+   is **intentional safe startup**, not successful guarded inference: the image
+   does not install the optional guard ML dependencies, does not mount local
+   guard model directories, no policy file is mounted or configured, and the
+   upstream model ID is still blank. The PostgreSQL DSN and app digest alone do
+   not make inference ready. A real deployment must add a read-only mount and
+   `NASI_LEMAK_POLICY_FILE` for the operator-approved policy file; that Compose
+   change is not delivered in this slice.
+
+8. Stop without deleting data:
+
+   ```powershell
+   docker compose --env-file .secrets/compose.env down
+   ```
+
+   `down -v` deletes the database volume; never use it on a live system.
+
+The DB administrator password is mounted as a Docker secret and read through
+`POSTGRES_PASSWORD_FILE`; it is not plaintext in the environment. The runtime
+audit DSN and application-key digest use the server's
+`NASI_LEMAK_AUDIT_DSN_FILE` and `NASI_LEMAK_APP_KEY_DIGEST_FILE` file-backed
+variables. The administrator DSN is not used by the gateway.
+
+## Security and operational limits
+
+- The gateway is localhost-only HTTP. **TLS ingress is required before any
+  remote pilot.**
+- SQLite remains a local development/test store only. The production server
+  requires PostgreSQL, and its runtime role is append-only.
+- There is no background reconciler. Incomplete request records are reconciled
+  only through an explicit offline call (`Gateway.reconcile_incomplete(offline=True)`)
+  after stopping all gateway writers.
+- PII masking uses experimental ASCII format recognizers. A frozen
+  agent-authored synthetic evaluation appears in
+  [docs/pii-quality.md](docs/pii-quality.md); a reviewed EMAIL terminal-period
+  repair passes six known regression cases, but the v1 EMAIL gate fails on one
+  frozen false positive and the MyKad gate on four. This is not independent
+  held-out or customer evidence, and semantic PII plus BM/Chinese guard
+  protection is not established ([docs/language-support.md](docs/language-support.md)).
+  The measured ASCII fixtures do not mean every non-ASCII character is rejected:
+  preserved Python regexes use Unicode `\d` and `IGNORECASE`.
+- LiteLLM routing is deferred. No streaming, tools or multimodal input exists,
+  and there is no policy editor, hot reload or approval workflow. Policy
+  activation is one validated file selected server-side and read at
+  construction; a controlled restart is the only activation/rollback mechanism.
+  The optional `/admin` view only displays read-only event metadata and cannot
+  change policy.
+- No live-data approval or deployment exists.
+
+## Validation limits
+
+At packaging time Docker was absent from `PATH`. Therefore the Dockerfile was
+not built, `compose.yaml` was not run, and `docker compose config` was not
+executed. YAML and Dockerfile were reviewed statically; Python tests and a
+local ASGI liveness check were run from the existing virtualenv. Image tags are
+conservative version tags (`python:3.12-slim-bookworm`,
+`postgres:16.4-bookworm`); immutable image digests, registry signature
+verification and a full release security review remain pending. No digest was
+invented.
+
+The full local suite after the EMAIL repair reports **283 tests run, 281 passed
+and 2 skipped** (exit 0). The two skips are the existing optional PostgreSQL
+integration tests, skipped honestly because `TEST_AUDIT_DSN` is not set; no
+PostgreSQL round-trip was run and no residual skip was added for the export or
+PII work. Earlier `271 tests run, 269 passed`, `249 tests run, 247 passed` and
+`226 tests run, 224 passed` counts are stale. A SQLite test-helper close race
+that intermittently raised `WinError 32` on Windows was fixed in the helper
+itself.
+
+The focused PII span/evaluator suites contain 33 tests; the assembled ASGI
+enforcement suite has 7. New regressions cover an email at EOF with a period,
+period then whitespace, closing parenthesis, comma/question mark, a valid longer
+domain, and invalid dotted/double-dot suffixes that must not be partially
+masked. An ASGI/HTTP test proves the sent email is absent from the captured
+upstream body while the period is retained, the full original context still
+reaches the attack guard, the buffered reply is masked for the client and the
+terminal audit remains metadata-only. The v1 evaluation CLI exits `1` for its
+truthful EMAIL and MyKad gate failures; the review CLI exits `0`. Reports contain
+no raw fixture text and are byte-reproducible. Only the narrow EMAIL right
+boundary changed; no threshold, label, fixture or scope was altered to force a
+pass.
+
+Task 12's export path is locally verified: 23 ASGI export tests over the real
+app with real SQLite audit rows, plus 10 Node.js behaviour cases for the
+operator shell. PostgreSQL export-audit SQL is checked with a driver double
+only; no PostgreSQL server, Docker runtime or native model was exercised. A
+caller IAB run of the synthetic fixture produced a browser download; contract:
+[docs/evidence-export.md](docs/evidence-export.md). Guard
+tests use deterministic inference doubles, not pretrained weights; policy tests
+use temporary files and local SQLite/model doubles. Operator tests use real
+SQLite audit rows and the actual ASGI app; PostgreSQL reader SQL/parameter
+construction is checked with a driver double only, not a live PostgreSQL server.
+The operator-shell lifecycle tests extract the real inline script and run it
+with the local Node.js runtime, a minimal deterministic DOM and deferred fetch
+replies; that is JavaScript behaviour evidence, not browser/CSP execution.
+
+`tests/test_enforcement_integration.py` adds assembled-path checks over the real
+ASGI app, YAML policy, gateway, real generation client against a loopback HTTP
+fixture and real SQLite audit. Captured upstream requests, audit rows, release
+behaviour and fail-closed ordering are asserted; guard/tokenizer verdicts remain
+deterministic doubles, so this is not native classifier or live-endpoint
+evidence. See [docs/control-verification.md](docs/control-verification.md).
+
+## References
+
+Official documentation consulted for this packaging:
+
+- FastAPI container deployment: <https://fastapi.tiangolo.com/deployment/docker/>
+- psycopg 3 transaction management: <https://www.psycopg.org/psycopg3/docs/basic/transactions.html>
+- Docker Compose startup order and healthchecks: <https://docs.docker.com/compose/how-tos/startup-order/>

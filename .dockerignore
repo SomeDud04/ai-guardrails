@@ -1,0 +1,39 @@
+# Keep orchestration/routing state, local tools and secret material out of the
+# build context, in addition to the explicit Dockerfile COPY allowlist.
+.orchestration/
+.agents/
+.opencode/
+.codegraph/
+.git/
+.venv/
+venv/
+
+# Local secret directory and dotenv-style files.  Never ship credentials.
+.secrets/
+.env
+.env.*
+
+# Keys and certificates (the generation CA file is a runtime mount, not image content).
+*.pem
+*.key
+*.p12
+*.pfx
+
+# Local databases and caches.
+*.db
+*.sqlite
+*.sqlite3
+__pycache__/
+*.py[cod]
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+
+# Only metadata and the package are needed; everything below is development-only.
+tests/
+docs/
+scripts/
+README.md
+AGENTS.md
+Dockerfile
+.dockerignore

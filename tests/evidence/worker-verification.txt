@@ -1,0 +1,21 @@
+Project Nasi Lemak initial synthetic slice
+Date: 2026-10-19
+
+TDD evidence
+- Before implementation, the bundled interpreter's `-m unittest discover -s tests -v` run failed because `nasi_lemak` did not yet exist.
+- After the first implementation, the new oversized-input regression failed as expected: received 400, expected 413 INPUT_LIMIT.
+- The audit-order regression also failed before request-start auditing was moved ahead of coverage screening.
+- The policy-recovery regression failed before recovery was changed to copy metadata from the original request-start event.
+- All three regressions passed after the minimal changes.
+
+Final checks (bundled Python 3.12.14)
+- `& $pythonExe -m unittest discover -s tests -v`: 21 tests passed.
+- `& $pythonExe -m nasi_lemak.demo`: status 200 with synthetic `pilot-local` assistant response.
+- `& $pythonExe scripts/preflight.py`: reported local runtime; endpoint unconfigured; network probe and model load not performed; real serving blocked.
+
+The workspace interpreter command is `$pythonExe = 'C:\Users\user\.cache\codex-runtimes\codex-primary-runtime\dependencies\python\python.exe'`.
+
+Scope limits
+- No listener, real model/guard adapter, network access, or deployed service.
+- PII regexes and token counter are experimental synthetic proof only.
+- SQLite evidence is metadata-only; reconciliation is an explicit offline operation after stopping writers.

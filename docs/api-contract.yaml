@@ -1,0 +1,242 @@
+openapi: 3.1.0
+info:
+  title: Nasi Lemak bounded chat contract
+  version: 0.2.0-draft
+  description: >-
+    Implemented local FastAPI surface for the Nasi Lemak gateway, pending
+    customer review and real guard/model activation. The server is fail-closed:
+    with missing or invalid configuration it is live (GET /health/live returns
+    200) while readiness and chat return 503. No demo adapters, allow-all guards
+    or environment-selected demo mode exist. No idempotency/replay guarantee; a
+    retry is a new request and may invoke the model again. Response text is not
+    persisted, so responses cannot be replayed. Docker Compose packaging exists
+    but has not been built or run in this workspace.
+  x-implementation-status: >-
+    HTTP transport, strict request validation, bounded streaming body reads,
+    authentication, readiness, audit ordering and generic error envelopes are
+    implemented and covered by local tests. Real tokenizer, attack/output guard
+    and generation-model wiring are not implemented; the startup adapter factory
+    returns no adapters, so guarded inference is not available.
+  x-deployment-status: >-
+    Local HTTP only. No TLS ingress, remote pilot approval or deployment exists.
+    SQLite is development/test only; production runtime requires PostgreSQL.
+servers:
+  - url: http://127.0.0.1:8000
+    description: Local default. Compose publishes this loopback address only.
+paths:
+  /health/live:
+    get:
+      summary: Process liveness
+      description: >-
+        Returns 200 whenever the ASGI application is running. Does not probe the
+        model, guards, PostgreSQL or the network.
+      responses:
+        '200':
+          description: Process is live
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/LiveStatus'
+  /health/ready:
+    get:
+      summary: Guarded-service readiness
+      description: >-
+        Returns 200 only when configuration is complete, all four mandatory
+        adapter callables are present, the app key digest is valid, the policy
+        model is the expected alias, and a bounded PostgreSQL audit-store probe
+        reports append privilege. Otherwise returns 503. No model or guard
+        network call is made.
+      responses:
+        '200':
+          description: Ready for guarded requests
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ReadyStatus'
+        '503':
+          description: Configuration, adapters or audit store unavailable
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/NotReadyStatus'
+  /v1/chat/completions:
+    post:
+      security:
+        - applicationKey: []
+      description: >-
+        Application identity, policy and real model are selected server-side.
+        pilot-local is a public alias, not a provider route. Unknown fields fail.
+        The HTTP layer requires exactly one Authorization bearer header and
+        application/json, reads the streamed body with one complete deadline and
+        a byte ceiling independent of Content-Length, rejects duplicate JSON
+        keys, invalid UTF-8 and non-finite numbers, and admits concurrency before
+        reading the body. All accepted turns must fit the complete serialized
+        conversation limit and each required guard's tokenizer window without
+        truncation. Missing configuration, adapters or audit readiness, request
+        body timeout, and admission overload all return a generic 503. Errors
+        never contain raw input, exceptions, credentials or DSNs.
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/ChatRequest'
+      responses:
+        '200':
+          description: Buffered, screened response after durable terminal audit
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ChatResponse'
+        '400':
+          description: >-
+            INVALID_REQUEST - unsupported media type, malformed/duplicate-key
+            JSON, unknown fields, invalid shape or model override
+          content:
+            application/json:
+              schema: {$ref: '#/components/schemas/Error'}
+        '401':
+          description: >-
+            UNAUTHORIZED - missing, duplicate, malformed or invalid application
+            key
+          content:
+            application/json:
+              schema: {$ref: '#/components/schemas/Error'}
+        '403':
+          description: >-
+            POLICY_BLOCK - input attack verdict, configured literal deny phrase
+            in any accepted input turn or the buffered output, or unsafe output
+            verdict
+          content:
+            application/json:
+              schema: {$ref: '#/components/schemas/Error'}
+        '413':
+          description: >-
+            INPUT_LIMIT - actual streamed body bytes, serialized conversation
+            characters or guard token budget exceeded
+          content:
+            application/json:
+              schema: {$ref: '#/components/schemas/Error'}
+        '503':
+          description: >-
+            UNAVAILABLE - required guard, model, adapter, audit store or
+            configuration unavailable; body-read deadline exceeded; or admission
+            overloaded. During safe startup this is the expected chat response
+            until real guards/tokenizer/model are configured.
+          content:
+            application/json:
+              schema: {$ref: '#/components/schemas/Error'}
+      x-body-limit-default-bytes: 65536
+      x-body-limit-max-bytes: 4194304
+      x-concurrency-default: 5
+      x-concurrency-max: 256
+      x-unavailable-state: >-
+        Missing or invalid NASI_LEMAK_APP_KEY_DIGEST(_FILE),
+        NASI_LEMAK_AUDIT_DSN(_FILE), adapters, or numeric configuration produces
+        a live but not-ready application. This is intentional safe startup, not
+        a successful guarded inference path.
+  # There are no docs, OpenAPI, redoc, debug or trailing-slash routes. Unknown
+  # paths return 404 and known paths with the wrong method return 405, both with
+  # the generic INVALID_REQUEST error envelope.
+components:
+  securitySchemes:
+    applicationKey:
+      type: http
+      scheme: bearer
+      description: >-
+        Exactly one Authorization: Bearer <application-key> header is required.
+        The server stores only the SHA-256 digest (configured through a value or
+        _FILE secret); the plaintext key is never placed in repository files.
+  schemas:
+    LiveStatus:
+      type: object
+      additionalProperties: false
+      required: [status]
+      properties:
+        status: {type: string, const: ok}
+    ReadyStatus:
+      type: object
+      additionalProperties: false
+      required: [status]
+      properties:
+        status: {type: string, const: ready}
+    NotReadyStatus:
+      type: object
+      additionalProperties: false
+      required: [status]
+      properties:
+        status: {type: string, const: not_ready}
+    ChatRequest:
+      type: object
+      additionalProperties: false
+      required: [model, messages]
+      properties:
+        model:
+          type: string
+          const: pilot-local
+        stream:
+          type: boolean
+          const: false
+          default: false
+        max_tokens:
+          type: integer
+          minimum: 1
+          maximum: 256
+          default: 256
+        messages:
+          type: array
+          minItems: 1
+          maxItems: 16
+          items:
+            type: object
+            additionalProperties: false
+            required: [role, content]
+            properties:
+              role:
+                type: string
+                enum: [system, user, assistant]
+              content:
+                type: string
+                minLength: 1
+      x-serialized-conversation-character-limit: 4096
+      x-conversation-serialization: 'Each role, colon-space and content, joined by newline; included in character and tokenizer budgets'
+      x-token-limit: selected guard tokenizer and full serialization; never truncate
+    ChatResponse:
+      type: object
+      required: [id, object, model, choices]
+      properties:
+        id: {type: string}
+        object: {type: string, const: chat.completion}
+        model: {type: string, const: pilot-local}
+        choices:
+          type: array
+          minItems: 1
+          maxItems: 1
+          items:
+            type: object
+            required: [index, message, finish_reason]
+            properties:
+              index: {type: integer, const: 0}
+              finish_reason: {type: string, const: stop}
+              message:
+                type: object
+                required: [role, content]
+                properties:
+                  role: {type: string, const: assistant}
+                  content: {type: string}
+    Error:
+      type: object
+      required: [error]
+      properties:
+        error:
+          type: object
+          additionalProperties: false
+          required: [code, message, request_id]
+          properties:
+            code:
+              type: string
+              enum: [INVALID_REQUEST, UNAUTHORIZED, POLICY_BLOCK, INPUT_LIMIT, UNAVAILABLE]
+            message:
+              type: string
+              description: Fixed generic text; never raw input, output or exception details
+            request_id: {type: string}

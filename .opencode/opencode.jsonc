@@ -1,0 +1,5 @@
+{
+  "$schema": "https://opencode.ai/config.json",
+  "default_agent": "codex-coordinator",
+  "model": "opencode-go/deepseek-v4.1-flash"
+}

@@ -1,0 +1,104 @@
+# Nasi Lemak gateway + PostgreSQL audit database.
+#
+# This stack is deliberately localhost-only.  There is no TLS ingress yet; put a
+# reviewed TLS reverse proxy or ingress in front before any remote pilot.
+#
+# Secret files are mandatory.  Copy docs/compose.env.example to a local,
+# untracked env file, replace every /ABSOLUTE/PATH placeholder with a real
+# secret-file path, and never commit the resulting .secrets directory.
+#
+# The database is not published on the host.  The gateway is attached to the
+# default bridge network for outbound HTTPS/HTTP access to the configured model
+# endpoint, and to an internal-only network shared with PostgreSQL.
+
+name: nasi-lemak
+
+services:
+  db:
+    image: postgres:16.4-bookworm
+    restart: unless-stopped
+    environment:
+      POSTGRES_DB: nasi_lemak
+      POSTGRES_USER: ${POSTGRES_ADMIN_USER:?Set POSTGRES_ADMIN_USER in the operator env file}
+      # Password is supplied through a mounted Docker secret, never plaintext env.
+      POSTGRES_PASSWORD_FILE: /run/secrets/db_admin_password
+    secrets:
+      - db_admin_password
+    volumes:
+      - nasi_lemark_db:/var/lib/postgresql/data
+      # Bootstrap runs only when the data volume is empty.  These scripts create
+      # the schema and NOLOGIN group roles only; they do not create a runtime
+      # LOGIN role or any password.  See README.md for operator provisioning.
+      - ./nasi_lemak/audit_schema.sql:/docker-entrypoint-initdb.d/10-audit-schema.sql:ro
+      - ./nasi_lemak/audit_roles.sql:/docker-entrypoint-initdb.d/20-audit-roles.sql:ro
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U \"$${POSTGRES_USER}\" -d \"$${POSTGRES_DB}\""]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+      start_period: 10s
+    security_opt:
+      - no-new-privileges:true
+    networks:
+      - db_internal
+
+  gateway:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    image: nasi-lemak-gateway:0.1.0
+    restart: unless-stopped
+    depends_on:
+      db:
+        condition: service_healthy
+    ports:
+      # Localhost-only by default.
+      - "127.0.0.1:${GATEWAY_PORT:-8000}:8000"
+    environment:
+      # Server reads both secrets through its _FILE support.
+      NASI_LEMAK_AUDIT_DSN_FILE: /run/secrets/audit_dsn
+      NASI_LEMAK_APP_KEY_DIGEST_FILE: /run/secrets/app_key_digest
+      # Non-secret generation settings.  Empty values fail closed; the exact
+      # model ID is intentionally unset until confirmed.
+      NASI_LEMAK_GENERATION_URL: ${NASI_LEMAK_GENERATION_URL:-}
+      NASI_LEMAK_GENERATION_MODEL: ${NASI_LEMAK_GENERATION_MODEL:-}
+      NASI_LEMAK_GENERATION_AUTH: ${NASI_LEMAK_GENERATION_AUTH:-}
+      NASI_LEMAK_GENERATION_ALLOW_INSECURE_HTTP: ${NASI_LEMAK_GENERATION_ALLOW_INSECURE_HTTP:-}
+    secrets:
+      - audit_dsn
+      - app_key_digest
+    read_only: true
+    tmpfs:
+      - /tmp:size=16m,mode=1777
+    user: "10001:10001"
+    cap_drop:
+      - ALL
+    security_opt:
+      - no-new-privileges:true
+    mem_limit: 512m
+    cpus: 1.0
+    pids_limit: 256
+    stop_grace_period: 15s
+    networks:
+      - default
+      - db_internal
+
+volumes:
+  nasi_lemark_db:
+
+networks:
+  # Internal-only network: PostgreSQL has no route to the internet and is not
+  # published on the host.  The gateway keeps the default bridge for outbound
+  # access to the configured model endpoint.
+  db_internal:
+    internal: true
+
+secrets:
+  # Mandatory interpolation: an unset path aborts `docker compose` instead of
+  # silently starting with a default or empty credential.
+  db_admin_password:
+    file: ${DB_ADMIN_PASSWORD_FILE:?Set DB_ADMIN_PASSWORD_FILE to an absolute secret-file path}
+  audit_dsn:
+    file: ${AUDIT_DSN_FILE:?Set AUDIT_DSN_FILE to an absolute secret-file path}
+  app_key_digest:
+    file: ${APP_KEY_DIGEST_FILE:?Set APP_KEY_DIGEST_FILE to an absolute secret-file path}

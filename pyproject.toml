@@ -1,0 +1,50 @@
+[build-system]
+requires = ["setuptools>=69", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "nasi-lemak-gateway"
+version = "0.1.0"
+description = "Synthetic in-process gateway foundation for Project Nasi Lemak"
+requires-python = ">=3.11"
+dependencies = []
+
+[project.optional-dependencies]
+# Tested HTTP runtime.  The core gateway and the dependency-free synthetic demo
+# remain usable without these extras.
+server = [
+    "fastapi==0.147.0",
+    "uvicorn==0.54.0",
+    "psycopg[binary]==3.3.6",
+    # Required by the runtime startup policy loader.
+    "pyyaml==6.0.3",
+]
+test = [
+    "fastapi==0.147.0",
+    "uvicorn==0.54.0",
+    "psycopg[binary]==3.3.6",
+    "httpx==0.28.1",
+    "pyyaml==6.0.3",
+]
+# Optional local guard inference (Meta Prompt Guard 2 and Meta Llama Guard 3).
+# Both exact versions were verified as existing on the official PyPI metadata at
+# documentation time; they were NOT installed, downloaded or compatibility
+# tested in this workspace. The core package and the default test suite import
+# and run without this extra, and guards fail closed when it is absent.
+guards = [
+    "torch==2.14.1",
+    "transformers==5.20.1",
+]
+
+# The repository is flat (docs, scripts, tests and the package share one root),
+# so package discovery is explicit rather than automatic.
+[tool.setuptools]
+packages = ["nasi_lemak"]
+
+# audit_schema.sql and audit_roles.sql are shipped with the package so the
+# operator can apply them to PostgreSQL during bootstrap.
+[tool.setuptools.package-data]
+nasi_lemak = ["*.sql"]
+
+[tool.unittest]
+start-directory = "tests"

@@ -1,0 +1,88 @@
+{
+  "schema_version": 1,
+  "split": "evaluation",
+  "corpus_id": "pii-caller-review-edge-v1",
+  "provenance": "Caller-agent review synthetic corpus with explicit annotated spans. Not independent human review, not customer data and not a retroactive hold-out split.",
+  "scope_notes": [
+    "Six simple edge cases: one positive and one negative per entity.",
+    "Gold spans are explicit annotations, not outputs of the production regexes.",
+    "The EMAIL positive deliberately places a final period after the address; surrounding punctuation is outside the annotated span."
+  ],
+  "cases": [
+    {
+      "id": "CR-EMAIL-001",
+      "focus": "EMAIL",
+      "scope": "in_scope",
+      "label": "email_final_period_positive",
+      "notes": "Caller review found that a terminal period prevented an otherwise valid address from being masked. Gold excludes the final period.",
+      "text": "Contact a@example.invalid.",
+      "gold": [
+        {
+          "type": "EMAIL",
+          "start": 8,
+          "end": 25,
+          "text": "a@example.invalid"
+        }
+      ]
+    },
+    {
+      "id": "CR-EMAIL-002",
+      "focus": "EMAIL",
+      "scope": "in_scope",
+      "label": "email_no_tld_negative",
+      "notes": "No dotted domain or TLD; not an email under the documented format boundary.",
+      "text": "Contact a@example",
+      "gold": []
+    },
+    {
+      "id": "CR-PHONE-001",
+      "focus": "MY_PHONE",
+      "scope": "in_scope",
+      "label": "phone_compact_positive",
+      "notes": "Compact Malaysian mobile-shaped value.",
+      "text": "Call 0123456789",
+      "gold": [
+        {
+          "type": "MY_PHONE",
+          "start": 5,
+          "end": 15,
+          "text": "0123456789"
+        }
+      ]
+    },
+    {
+      "id": "CR-PHONE-002",
+      "focus": "MY_PHONE",
+      "scope": "in_scope",
+      "label": "phone_too_short_negative",
+      "notes": "One digit too short for the documented mobile shape.",
+      "text": "Call 0123456",
+      "gold": []
+    },
+    {
+      "id": "CR-MYKAD-001",
+      "focus": "MYKAD",
+      "scope": "in_scope",
+      "label": "mykad_grouped_positive",
+      "notes": "Hyphen-grouped 6-2-4 MyKad-shaped value.",
+      "text": "IC 900101-12-3456",
+      "gold": [
+        {
+          "type": "MYKAD",
+          "start": 3,
+          "end": 17,
+          "text": "900101-12-3456"
+        }
+      ]
+    },
+    {
+      "id": "CR-MYKAD-002",
+      "focus": "MYKAD",
+      "scope": "in_scope",
+      "label": "mykad_too_short_negative",
+      "notes": "One digit too short for the documented 12-digit MyKad shape.",
+      "text": "IC 900101-12-345",
+      "gold": []
+    }
+  ]
+}

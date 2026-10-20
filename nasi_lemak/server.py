@@ -1,0 +1,1058 @@
+"""FastAPI ASGI gateway server.
+
+The server is deliberately thin: it validates the HTTP surface, reads a bounded
+raw body off the event loop, and hands synchronous guard/generation/audit work to
+a worker thread.  All safety logic remains in ``Gateway``.
+
+The application is fail-closed.  A missing or invalid configuration produces an
+application that is live but not ready; protected chat requests return a generic
+503.  No demo adapters, allow-all guards or environment-selected demo mode are
+installed here.  Tests may inject an explicitly constructed ``Gateway``.
+
+No docs, redoc, OpenAPI schema, debug page or trailing-slash redirect is exposed.
+Request bodies are bounded while streaming, independently of Content-Length, and
+concurrency is admitted before the body is read.  Raw exception text, request
+bodies, credentials and DSNs are never returned or logged by this module.
+"""
+
+from __future__ import annotations
+
+import asyncio
+import hashlib
+import hmac
+import json
+import math
+import os
+import time
+import uuid
+from contextlib import asynccontextmanager
+from pathlib import Path
+from typing import Any
+
+from fastapi import FastAPI, Request
+from fastapi.exceptions import RequestValidationError
+from fastapi.responses import HTMLResponse, JSONResponse, Response
+from starlette.exceptions import HTTPException as StarletteHTTPException
+
+from .admin_page import ADMIN_HTML, ADMIN_SECURITY_HEADERS
+from .audit import PostgresAuditStore, UnreadyAuditStore
+from .export import (
+    EXPORT_FILENAME,
+    ExportAuditEntry,
+    ExportTooLarge,
+    PostgresExportAuditLog,
+    build_export_csv,
+    sha256_hex,
+    utc_iso,
+)
+from .gateway import Gateway, Policy
+from .operator import (
+    OperatorQueryError,
+    PostgresAuditReader,
+    parse_event_query,
+    parse_export_query,
+)
+from .policy import load_policy
+
+
+# HTTP surface bounds.  The gateway itself has a 4096-character conversation
+# limit; the body limit allows generous JSON overhead without unbounded memory.
+DEFAULT_MAX_BODY_BYTES = 64 * 1024
+MAX_CONFIGURED_BODY_BYTES = 4 * 1024 * 1024
+DEFAULT_BODY_READ_TIMEOUT = 5.0
+MAX_CONFIGURED_BODY_READ_TIMEOUT = 60.0
+DEFAULT_MAX_CONCURRENCY = 5
+MAX_CONFIGURED_CONCURRENCY = 256
+READINESS_TIMEOUT = 5.0
+ADMIN_READ_TIMEOUT = 5.0
+ADMIN_TOKEN_MAX_LENGTH = 4096
+
+_ERROR_MESSAGES = {
+    "INVALID_REQUEST": "Request is not supported.",
+    "UNAUTHORIZED": "Authentication required.",
+    "INPUT_LIMIT": "Request exceeds the supported input limit.",
+    "UNAVAILABLE": "Required safety control is unavailable.",
+    "POLICY_BLOCK": "Request did not pass safety checks.",
+}
+
+_ADAPTER_METHODS = ("count_tokens", "scan_attack", "generate", "scan_output")
+
+# Explicit local guard configuration. There is deliberately no default Hub ID,
+# download, cache fallback or demo adapter. The two model directories must
+# already exist on disk and contain a compatible tokenizer/config/safetensors
+# bundle obtained independently by the operator.
+ENV_PROMPT_GUARD_MODEL_DIR = "NASI_LEMAK_PROMPT_GUARD_MODEL_DIR"
+ENV_LLAMA_GUARD_MODEL_DIR = "NASI_LEMAK_LLAMA_GUARD_MODEL_DIR"
+ENV_PROMPT_GUARD_THRESHOLD = "NASI_LEMAK_PROMPT_GUARD_THRESHOLD"
+ENV_LLAMA_GUARD_CONTEXT_LIMIT = "NASI_LEMAK_LLAMA_GUARD_CONTEXT_LIMIT"
+
+ENV_POLICY_FILE = "NASI_LEMAK_POLICY_FILE"
+ENV_OPERATOR_KEY_DIGEST = "NASI_LEMAK_OPERATOR_KEY_DIGEST"
+ENV_OPERATOR_AUDIT_DSN = "NASI_LEMAK_OPERATOR_AUDIT_DSN"
+
+OPERATOR_DISABLED = "disabled"
+OPERATOR_READY = "ready"
+OPERATOR_UNAVAILABLE = "unavailable"
+
+POLICY_ACTIVATION_YAML = "yaml-policy"
+POLICY_ACTIVATION_EXPLICIT = "explicit-policy-object"
+POLICY_ACTIVATION_GATEWAY = "caller-injected gateway"
+POLICY_ACTIVATION_UNAVAILABLE = "policy-unavailable"
+# Kept as a compatibility alias for earlier imports. It no longer means that a
+# built-in policy was activated: an unavailable policy is never substituted.
+POLICY_ACTIVATION_PENDING = POLICY_ACTIVATION_UNAVAILABLE
+
+
+class _BodyTooLarge(Exception):
+    pass
+
+
+class _BodyTimeout(Exception):
+    pass
+
+
+class _DuplicateKeys(Exception):
+    pass
+
+
+def _error_response(request_id: str, code: str, status_code: int) -> JSONResponse:
+    return JSONResponse(
+        {
+            "error": {
+                "code": code,
+                "message": _ERROR_MESSAGES.get(code, _ERROR_MESSAGES["UNAVAILABLE"]),
+                "request_id": request_id,
+            }
+        },
+        status_code=status_code,
+    )
+
+
+def _reject_duplicate_keys(pairs: list[tuple[str, Any]]) -> dict[str, Any]:
+    seen: set[str] = set()
+    for key, _ in pairs:
+        if key in seen:
+            raise _DuplicateKeys(key)
+        seen.add(key)
+    return dict(pairs)
+
+
+def _reject_constant(_value: str) -> Any:
+    raise ValueError("non-finite JSON constant")
+
+
+def _parse_json_object(raw: bytes) -> dict[str, Any] | None:
+    try:
+        text = raw.decode("utf-8")
+    except UnicodeDecodeError:
+        return None
+    try:
+        parsed = json.loads(
+            text,
+            object_pairs_hook=_reject_duplicate_keys,
+            parse_constant=_reject_constant,
+        )
+    except (_DuplicateKeys, json.JSONDecodeError, ValueError, RecursionError):
+        return None
+    return parsed if isinstance(parsed, dict) else None
+
+
+async def _read_limited_body(request: Request, max_bytes: int, timeout: float) -> bytes:
+    """Read the actual streamed bytes, bounded and with one complete deadline."""
+    chunks: list[bytes] = []
+    total = 0
+    deadline = time.monotonic() + timeout
+    iterator = request.stream().__aiter__()
+    while True:
+        remaining = deadline - time.monotonic()
+        if remaining <= 0:
+            raise _BodyTimeout()
+        try:
+            chunk = await asyncio.wait_for(iterator.__anext__(), timeout=remaining)
+        except StopAsyncIteration:
+            break
+        except asyncio.TimeoutError:
+            raise _BodyTimeout() from None
+        if not isinstance(chunk, (bytes, bytearray)):
+            raise ValueError("invalid body chunk")
+        total += len(chunk)
+        if total > max_bytes:
+            raise _BodyTooLarge()
+        chunks.append(bytes(chunk))
+    return b"".join(chunks)
+
+
+def _is_hex_digest(value: str) -> bool:
+    return len(value) == 64 and all(c in "0123456789abcdef" for c in value.lower())
+
+
+def _normalize_key_digest(value: str | None) -> str | None:
+    if not isinstance(value, str):
+        return None
+    value = value.strip().lower()
+    return value if _is_hex_digest(value) else None
+
+
+def _file_env(name: str, environ: dict[str, str]) -> str | None:
+    """Support Docker secrets via a _FILE suffix variable.
+
+    An explicitly configured but unreadable secret file is a configuration
+    failure; it never silently falls back to an inline value.
+    """
+    file_key = f"{name}_FILE"
+    if file_key in environ:
+        path = environ[file_key]
+        if not path:
+            return None
+        try:
+            with open(path, "r", encoding="utf-8") as fh:
+                return fh.read().strip()
+        except (OSError, UnicodeError, ValueError, TypeError):
+            return None
+    return environ.get(name)
+
+
+def _valid_positive_int(value: Any, maximum: int) -> bool:
+    return (
+        not isinstance(value, bool)
+        and isinstance(value, int)
+        and 1 <= value <= maximum
+    )
+
+
+def _valid_positive_float(value: Any, maximum: float) -> bool:
+    return (
+        not isinstance(value, bool)
+        and isinstance(value, (int, float))
+        and math.isfinite(value)
+        and 0 < value <= maximum
+    )
+
+
+def _adapters_ready(adapters: Any) -> bool:
+    if adapters is None:
+        return False
+    try:
+        return all(callable(getattr(adapters, name, None)) for name in _ADAPTER_METHODS)
+    except Exception:
+        return False
+
+
+def _gateway_static_ready(gateway: Gateway) -> bool:
+    """Cheap structural checks only; no adapter, model or network probes."""
+    try:
+        store = getattr(gateway, "audit_store", None)
+        policy = getattr(gateway, "policy", None)
+        return (
+            bool(getattr(gateway, "_key_valid", False))
+            and _adapters_ready(getattr(gateway, "adapters", None))
+            and callable(getattr(store, "ready", None))
+            and isinstance(policy, Policy)
+            and policy.model == "pilot-local"
+            and policy.app_id == getattr(gateway, "app_id", None)
+        )
+    except Exception:
+        return False
+
+
+def _required_guard_setting(environ: dict[str, str], name: str) -> str:
+    value = environ.get(name)
+    if not isinstance(value, str) or not value.strip():
+        raise ValueError("required guard setting is missing")
+    return value.strip()
+
+
+def _existing_guard_directory(value: str) -> str:
+    if "\x00" in value or "://" in value:
+        raise ValueError("guard model directory is not a local path")
+    try:
+        path = Path(value).expanduser()
+        if not path.is_dir():
+            raise ValueError("guard model directory is unavailable")
+    except (OSError, ValueError):
+        raise ValueError("guard model directory is unavailable") from None
+    return str(path)
+
+
+def _guard_threshold(value: str) -> float:
+    try:
+        threshold = float(value)
+    except (TypeError, ValueError):
+        raise ValueError("guard threshold is invalid") from None
+    if not math.isfinite(threshold) or not 0.0 <= threshold <= 1.0:
+        raise ValueError("guard threshold is invalid")
+    return threshold
+
+
+def _guard_context_limit(value: str) -> int:
+    try:
+        limit = int(value, 10)
+    except (TypeError, ValueError):
+        raise ValueError("guard context limit is invalid") from None
+    # LlamaGuard3 reserves its verdict tokens inside the effective context.
+    if limit < 33:
+        raise ValueError("guard context limit is invalid")
+    return limit
+
+
+def _load_prompt_guard(directory: str, *, threshold: float) -> Any:
+    from .guards import PromptGuard2
+
+    return PromptGuard2(directory, threshold=threshold)
+
+
+def _load_llama_guard(directory: str, *, context_limit: int) -> Any:
+    from .guards import LlamaGuard3
+
+    return LlamaGuard3(directory, context_limit=context_limit)
+
+
+def _load_generation_client(config: Any) -> Any:
+    from .generation import GenerationClient
+
+    return GenerationClient(config)
+
+
+def make_adapters_from_env(
+    environ: dict[str, str] | None = None,
+    *,
+    prompt_guard_loader: Any = None,
+    llama_guard_loader: Any = None,
+    client_loader: Any = None,
+) -> Any:
+    """Build real local guard/generation adapters from server-side settings.
+
+    The keyword loader arguments are an explicit test seam only. They must not
+    be used as evidence that a pretrained checkpoint was executed. Production
+    calls use the lazy default loaders, and every model directory must already
+    exist locally. Missing files, optional ML dependencies, an invalid config
+    or a failed load returns ``None`` (the server then stays explicitly
+    unavailable). No model is downloaded, no demo/allow-all adapter is
+    substituted, and no secret, path or raw exception is returned or logged.
+
+    Required settings:
+
+    * ``NASI_LEMAK_GENERATION_URL`` and ``NASI_LEMAK_GENERATION_MODEL`` (plus
+      the existing auth settings; ``NASI_LEMAK_GENERATION_AUTH=none`` needs no
+      key).
+    * ``NASI_LEMAK_PROMPT_GUARD_MODEL_DIR``: existing local directory.
+    * ``NASI_LEMAK_LLAMA_GUARD_MODEL_DIR``: existing local directory.
+    * ``NASI_LEMAK_PROMPT_GUARD_THRESHOLD``: finite number in ``[0, 1]``.
+    * ``NASI_LEMAK_LLAMA_GUARD_CONTEXT_LIMIT``: integer of at least 33.
+    """
+    env = os.environ if environ is None else environ
+    try:
+        # Validate every cheap setting before any expensive model load. The
+        # generation settings come first, then guard paths/threshold/window.
+        from .generation import GenerationConfig, RealGatewayAdapters
+
+        config = GenerationConfig.from_env(env)
+        if not config.model:
+            raise ValueError("generation model is required")
+        prompt_dir = _existing_guard_directory(
+            _required_guard_setting(env, ENV_PROMPT_GUARD_MODEL_DIR)
+        )
+        llama_dir = _existing_guard_directory(
+            _required_guard_setting(env, ENV_LLAMA_GUARD_MODEL_DIR)
+        )
+        threshold = _guard_threshold(
+            _required_guard_setting(env, ENV_PROMPT_GUARD_THRESHOLD)
+        )
+        context_limit = _guard_context_limit(
+            _required_guard_setting(env, ENV_LLAMA_GUARD_CONTEXT_LIMIT)
+        )
+        prompt_loader = prompt_guard_loader or _load_prompt_guard
+        llama_loader = llama_guard_loader or _load_llama_guard
+        generation_loader = client_loader or _load_generation_client
+        prompt_guard = prompt_loader(prompt_dir, threshold=threshold)
+        llama_guard = llama_loader(llama_dir, context_limit=context_limit)
+        client = generation_loader(config)
+        # One real PromptGuard2 object serves both tokenizer and attack guard,
+        # so the budget and classifier window use the identical tokenizer.
+        return RealGatewayAdapters(
+            client,
+            tokenizer=prompt_guard,
+            attack_guard=prompt_guard,
+            output_guard=llama_guard,
+        )
+    except Exception:
+        return None
+
+
+def _build_runtime_gateway(
+    environ: dict[str, str],
+    app_key_digest: str | None,
+    audit_dsn: str | None,
+    adapters: Any,
+    policy: Policy | None,
+    app_id: str,
+) -> tuple[Gateway, bool, str]:
+    config_ready = True
+    activation = POLICY_ACTIVATION_UNAVAILABLE
+
+    # Resolve the cheap policy first. A missing, unreadable or invalid file must
+    # never trigger expensive guard/model loading or activate built-in defaults.
+    resolved: Policy | None = None
+    if isinstance(policy, Policy):
+        # Explicit Python test seam: this object is the server-side identity.
+        resolved = policy
+        activation = POLICY_ACTIVATION_EXPLICIT
+    elif policy is not None:
+        # A supplied but invalid policy is a configuration failure. Do not
+        # silently replace it with a valid one while claiming readiness.
+        config_ready = False
+    else:
+        try:
+            resolved = load_policy(environ.get(ENV_POLICY_FILE))
+            activation = POLICY_ACTIVATION_YAML
+        except Exception:
+            # Includes missing/unreadable/invalid files and a missing loader
+            # dependency.  Never fall back to built-in defaults.
+            resolved = None
+
+    if resolved is None:
+        config_ready = False
+        resolved = Policy()
+        activation = POLICY_ACTIVATION_UNAVAILABLE
+    elif activation == POLICY_ACTIVATION_YAML:
+        # Production startup binds YAML identity to the server-side app config.
+        if not isinstance(app_id, str) or not app_id or resolved.app_id != app_id:
+            config_ready = False
+            resolved = Policy()
+            activation = POLICY_ACTIVATION_UNAVAILABLE
+    elif not isinstance(app_id, str) or not app_id:
+        config_ready = False
+
+    # For an explicit policy the policy itself is the trusted identity source;
+    # ``app_id`` remains a validated server-side setting for YAML activation.
+    gateway_app_id = resolved.app_id
+
+    digest = _normalize_key_digest(app_key_digest)
+    if digest is None:
+        config_ready = False
+        digest = "0" * 64
+
+    if audit_dsn:
+        try:
+            audit_store = PostgresAuditStore(audit_dsn)
+        except Exception:
+            audit_store = UnreadyAuditStore()
+            config_ready = False
+    else:
+        audit_store = UnreadyAuditStore()
+        config_ready = False
+
+    if adapters is None and activation != POLICY_ACTIVATION_UNAVAILABLE:
+        try:
+            adapters = make_adapters_from_env(environ)
+        except Exception:
+            adapters = None
+    if not _adapters_ready(adapters):
+        config_ready = False
+
+    try:
+        gateway = Gateway(
+            key_digest=digest,
+            audit_store=audit_store,
+            adapters=adapters,
+            policy=resolved,
+            app_id=gateway_app_id,
+        )
+    except Exception:
+        config_ready = False
+        activation = POLICY_ACTIVATION_UNAVAILABLE
+        gateway = Gateway(
+            key_digest="0" * 64,
+            audit_store=UnreadyAuditStore(),
+            adapters=None,
+            policy=Policy(),
+        )
+
+    if not _gateway_static_ready(gateway):
+        config_ready = False
+    return gateway, config_ready, activation
+
+
+class _OperatorState:
+    """Resolved operator configuration; never rendered or serialized directly."""
+
+    __slots__ = ("mode", "digest", "reader")
+
+    def __init__(
+        self,
+        mode: str,
+        digest: bytes | None = None,
+        reader: Any = None,
+    ) -> None:
+        self.mode = mode
+        self.digest = digest
+        self.reader = reader
+
+
+def _resolve_operator(
+    environ: dict[str, str],
+    gateway: Gateway,
+    explicit_digest: str | None,
+    explicit_reader: Any,
+    runtime_dsn: str | None,
+) -> _OperatorState:
+    """Resolve the optional operator view without affecting chat readiness.
+
+    Absent configuration disables the routes (safe 404).  A partial or invalid
+    configuration disables them with a safe 503; it never makes chat unavailable.
+    The operator key must be a distinct digest, and the reader DSN must differ
+    from the runtime writer DSN.
+    """
+    explicitly_configured = explicit_digest is not None or explicit_reader is not None
+    if explicitly_configured:
+        raw_digest = explicit_digest
+        reader = explicit_reader
+        dsn = None
+    else:
+        configured = any(
+            name in environ
+            for name in (
+                ENV_OPERATOR_KEY_DIGEST,
+                f"{ENV_OPERATOR_KEY_DIGEST}_FILE",
+                ENV_OPERATOR_AUDIT_DSN,
+                f"{ENV_OPERATOR_AUDIT_DSN}_FILE",
+            )
+        )
+        if not configured:
+            return _OperatorState(OPERATOR_DISABLED)
+        raw_digest = _file_env(ENV_OPERATOR_KEY_DIGEST, environ)
+        dsn = _file_env(ENV_OPERATOR_AUDIT_DSN, environ)
+        reader = None
+
+    digest_hex = _normalize_key_digest(raw_digest)
+    if digest_hex is None:
+        return _OperatorState(OPERATOR_UNAVAILABLE)
+    digest = bytes.fromhex(digest_hex)
+    if bool(getattr(gateway, "_key_valid", False)) and hmac.compare_digest(
+        digest, gateway._key_digest
+    ):
+        # The chat and operator credentials are separate authority boundaries.
+        return _OperatorState(OPERATOR_UNAVAILABLE)
+
+    if reader is None:
+        if not isinstance(dsn, str) or not dsn.strip():
+            return _OperatorState(OPERATOR_UNAVAILABLE)
+        dsn = dsn.strip()
+        if isinstance(runtime_dsn, str) and dsn == runtime_dsn.strip():
+            return _OperatorState(OPERATOR_UNAVAILABLE)
+        try:
+            reader = PostgresAuditReader(dsn)
+        except Exception:
+            return _OperatorState(OPERATOR_UNAVAILABLE)
+    if not callable(getattr(reader, "fetch_page", None)):
+        return _OperatorState(OPERATOR_UNAVAILABLE)
+    return _OperatorState(OPERATOR_READY, digest, reader)
+
+
+def _resolve_export_log(
+    explicit_log: Any,
+    runtime_writer_dsn: str | None,
+    *,
+    allow_runtime_postgres: bool,
+) -> Any:
+    """Resolve the append-only export-audit writer without affecting chat.
+
+    An explicit injected writer is the only seam local tests/demo may use.  The
+    production path (no injected gateway) reuses the existing runtime writer DSN
+    and constructs the PostgreSQL writer lazily; a missing or invalid setup
+    leaves the export route unavailable.  No in-memory fallback exists.
+    """
+    if explicit_log is not None:
+        if callable(getattr(explicit_log, "record", None)):
+            return explicit_log
+        return None
+    if not allow_runtime_postgres:
+        return None
+    if not isinstance(runtime_writer_dsn, str) or not runtime_writer_dsn.strip():
+        return None
+    try:
+        return PostgresExportAuditLog(runtime_writer_dsn.strip())
+    except Exception:
+        return None
+
+
+async def _runtime_ready(gateway: Gateway, config_ready: bool) -> bool:
+    """Bounded structural plus audit-store readiness check."""
+    if not config_ready or not _gateway_static_ready(gateway):
+        return False
+    try:
+        ready = await asyncio.wait_for(
+            asyncio.to_thread(gateway.audit_store.ready),
+            timeout=READINESS_TIMEOUT,
+        )
+    except Exception:
+        return False
+    return ready is True
+
+
+def make_app(
+    *,
+    gateway: Gateway | None = None,
+    app_key_digest: str | None = None,
+    audit_dsn: str | None = None,
+    adapters: Any = None,
+    policy: Policy | None = None,
+    operator_key_digest: str | None = None,
+    operator_reader: Any = None,
+    export_log: Any = None,
+    max_body_bytes: int = DEFAULT_MAX_BODY_BYTES,
+    body_read_timeout: float = DEFAULT_BODY_READ_TIMEOUT,
+    max_concurrency: int = DEFAULT_MAX_CONCURRENCY,
+    app_id: str = "nasi-lemak",
+    environ: dict[str, str] | None = None,
+) -> FastAPI:
+    """Create the FastAPI application.
+
+    Production configuration comes from the environment.  Without an injected
+    ``Gateway`` or explicit ``Policy``, ``NASI_LEMAK_POLICY_FILE`` must name one
+    valid versioned YAML policy; otherwise the app is live but not ready.  A
+    ``Gateway`` or ``Policy`` may be injected explicitly for local synthetic
+    tests; that is not a demo mode and never changes the default fail-closed
+    behaviour.  Policy activation happens only here, at construction.
+    """
+    env = os.environ if environ is None else environ
+
+    numeric_ok = (
+        _valid_positive_int(max_body_bytes, MAX_CONFIGURED_BODY_BYTES)
+        and _valid_positive_float(body_read_timeout, MAX_CONFIGURED_BODY_READ_TIMEOUT)
+        and _valid_positive_int(max_concurrency, MAX_CONFIGURED_CONCURRENCY)
+    )
+    # Invalid numeric configuration must not crash startup.  Use safe defaults
+    # for the live-but-not-ready application; readiness and chat stay closed.
+    body_limit = max_body_bytes if _valid_positive_int(max_body_bytes, MAX_CONFIGURED_BODY_BYTES) else DEFAULT_MAX_BODY_BYTES
+    read_timeout = body_read_timeout if _valid_positive_float(body_read_timeout, MAX_CONFIGURED_BODY_READ_TIMEOUT) else DEFAULT_BODY_READ_TIMEOUT
+    concurrency = max_concurrency if _valid_positive_int(max_concurrency, MAX_CONFIGURED_CONCURRENCY) else DEFAULT_MAX_CONCURRENCY
+
+    runtime_writer_dsn = (
+        _file_env("NASI_LEMAK_AUDIT_DSN", env) if audit_dsn is None else audit_dsn
+    )
+    if gateway is not None:
+        runtime_gateway = gateway
+        config_ready = True
+        policy_activation = POLICY_ACTIVATION_GATEWAY
+    else:
+        runtime_gateway, config_ready, policy_activation = _build_runtime_gateway(
+            env,
+            _file_env("NASI_LEMAK_APP_KEY_DIGEST", env) if app_key_digest is None else app_key_digest,
+            runtime_writer_dsn,
+            adapters,
+            policy,
+            app_id,
+        )
+    config_ready = config_ready and numeric_ok
+
+    operator_state = _resolve_operator(
+        env,
+        runtime_gateway,
+        operator_key_digest,
+        operator_reader,
+        runtime_writer_dsn,
+    )
+    export_log_state = _resolve_export_log(
+        export_log,
+        runtime_writer_dsn,
+        allow_runtime_postgres=gateway is None,
+    )
+
+    @asynccontextmanager
+    async def lifespan(_app: FastAPI):
+        yield
+        store = getattr(getattr(_app.state, "gateway", None), "audit_store", None)
+        close = getattr(store, "close", None)
+        if callable(close):
+            try:
+                await asyncio.to_thread(close)
+            except Exception:
+                # Shutdown cleanup is best effort and never emits a traceback.
+                pass
+        reader = getattr(getattr(_app.state, "operator", None), "reader", None)
+        reader_close = getattr(reader, "close", None)
+        if callable(reader_close):
+            try:
+                await asyncio.to_thread(reader_close)
+            except Exception:
+                pass
+        export_writer = getattr(_app.state, "export_log", None)
+        export_close = getattr(export_writer, "close", None)
+        if callable(export_close):
+            try:
+                await asyncio.to_thread(export_close)
+            except Exception:
+                pass
+
+    app = FastAPI(
+        docs_url=None,
+        redoc_url=None,
+        openapi_url=None,
+        debug=False,
+        redirect_slashes=False,
+        lifespan=lifespan,
+    )
+    app.state.gateway = runtime_gateway
+    app.state.config_ready = config_ready
+    app.state.policy_activation = policy_activation
+    app.state.operator = operator_state
+    app.state.export_log = export_log_state
+    policy_active = policy_activation != POLICY_ACTIVATION_UNAVAILABLE
+    app.state.policy_digest = runtime_gateway.policy.digest if policy_active else None
+    app.state.policy_version = runtime_gateway.policy.version if policy_active else None
+    app.state.max_body_bytes = body_limit
+    app.state.body_read_timeout = read_timeout
+    app.state.max_concurrency = concurrency
+    app.state.sem = asyncio.Semaphore(concurrency)
+
+    @app.middleware("http")
+    async def assign_request_id(request: Request, call_next):
+        request_id = "req_" + uuid.uuid4().hex
+        request.state.request_id = request_id
+        try:
+            return await call_next(request)
+        except Exception:
+            # Convert unexpected failures before the ASGI server can log raw
+            # exception text.  The response carries no body or provider detail.
+            return _error_response(request_id, "UNAVAILABLE", 503)
+
+    @app.exception_handler(StarletteHTTPException)
+    async def http_exception_handler(request: Request, exc: StarletteHTTPException):
+        request_id = getattr(request.state, "request_id", "req_unknown")
+        status_code = exc.status_code if exc.status_code in (404, 405) else 400
+        return _error_response(request_id, "INVALID_REQUEST", status_code)
+
+    @app.exception_handler(RequestValidationError)
+    async def validation_exception_handler(request: Request, exc: RequestValidationError):
+        request_id = getattr(request.state, "request_id", "req_unknown")
+        return _error_response(request_id, "INVALID_REQUEST", 400)
+
+    @app.get("/health/live")
+    async def health_live(request: Request):
+        return {"status": "ok"}
+
+    @app.get("/health/ready")
+    async def health_ready(request: Request):
+        ready = await _runtime_ready(
+            request.app.state.gateway, request.app.state.config_ready
+        )
+        if ready:
+            return {"status": "ready"}
+        return JSONResponse({"status": "not_ready"}, status_code=503)
+
+    def admin_error(request: Request, status_code: int, code: str) -> JSONResponse:
+        response = _error_response(request.state.request_id, code, status_code)
+        response.headers.update(ADMIN_SECURITY_HEADERS)
+        return response
+
+    def operator_auth_error(request: Request, state: Any) -> JSONResponse | None:
+        """Shared exact operator bearer check for every operator data route.
+
+        Authentication runs before any reader call, export snapshot or audit
+        write.  There is deliberately no query-string or weaker alternative.
+        """
+        auth_headers = request.headers.getlist("authorization")
+        if len(auth_headers) != 1:
+            return admin_error(request, 401, "UNAUTHORIZED")
+        supplied = auth_headers[0]
+        if not isinstance(supplied, str) or not supplied.startswith("Bearer "):
+            return admin_error(request, 401, "UNAUTHORIZED")
+        candidate = supplied[7:]
+        if not candidate or len(candidate) > ADMIN_TOKEN_MAX_LENGTH:
+            return admin_error(request, 401, "UNAUTHORIZED")
+        try:
+            candidate_digest = hashlib.sha256(candidate.encode("utf-8")).digest()
+        except UnicodeError:
+            return admin_error(request, 401, "UNAUTHORIZED")
+        if state.digest is None or not hmac.compare_digest(candidate_digest, state.digest):
+            return admin_error(request, 401, "UNAUTHORIZED")
+        return None
+
+    @app.get("/admin")
+    async def admin_page(request: Request):
+        state = getattr(request.app.state, "operator", None)
+        if state is None or state.mode == OPERATOR_DISABLED:
+            return admin_error(request, 404, "INVALID_REQUEST")
+        if state.mode != OPERATOR_READY:
+            return admin_error(request, 503, "UNAVAILABLE")
+        return HTMLResponse(ADMIN_HTML, headers=ADMIN_SECURITY_HEADERS)
+
+    @app.get("/admin/events")
+    async def admin_events(request: Request):
+        state = getattr(request.app.state, "operator", None)
+        if state is None or state.mode == OPERATOR_DISABLED:
+            return admin_error(request, 404, "INVALID_REQUEST")
+        if state.mode != OPERATOR_READY:
+            return admin_error(request, 503, "UNAVAILABLE")
+
+        auth_error = operator_auth_error(request, state)
+        if auth_error is not None:
+            return auth_error
+
+        try:
+            filters = parse_event_query(request.query_params.multi_items())
+        except OperatorQueryError:
+            return admin_error(request, 400, "INVALID_REQUEST")
+
+        try:
+            page = await asyncio.wait_for(
+                asyncio.to_thread(
+                    state.reader.fetch_page,
+                    request.app.state.gateway.app_id,
+                    filters,
+                ),
+                timeout=ADMIN_READ_TIMEOUT,
+            )
+        except Exception:
+            # Reader/query failures are generic: no DSN, SQL or driver text.
+            return admin_error(request, 503, "UNAVAILABLE")
+
+        health = await _runtime_ready(
+            request.app.state.gateway, request.app.state.config_ready
+        )
+        payload = {
+            "events": page.events,
+            "has_more": page.has_more,
+            "next_cursor": page.next_cursor,
+            "policy": {
+                "version": request.app.state.policy_version,
+                "digest": request.app.state.policy_digest,
+            },
+            "health": "ready" if health else "not_ready",
+        }
+        return JSONResponse(payload, headers=ADMIN_SECURITY_HEADERS)
+
+    @app.get("/admin/export.csv")
+    async def admin_export_csv(request: Request):
+        state = getattr(request.app.state, "operator", None)
+        if state is None or state.mode == OPERATOR_DISABLED:
+            return admin_error(request, 404, "INVALID_REQUEST")
+        if state.mode != OPERATOR_READY:
+            return admin_error(request, 503, "UNAVAILABLE")
+
+        auth_error = operator_auth_error(request, state)
+        if auth_error is not None:
+            return auth_error
+
+        try:
+            filters = parse_export_query(request.query_params.multi_items())
+        except OperatorQueryError:
+            return admin_error(request, 400, "INVALID_REQUEST")
+
+        export_log = getattr(request.app.state, "export_log", None)
+        reader = getattr(state, "reader", None)
+        if (
+            export_log is None
+            or not callable(getattr(export_log, "record", None))
+            or not callable(getattr(reader, "fetch_export", None))
+        ):
+            # Missing audit setup means the export is unavailable, never a
+            # silent in-memory log or an unaudited CSV.
+            return admin_error(request, 503, "UNAVAILABLE")
+
+        app_id = request.app.state.gateway.app_id
+        policy_version = getattr(request.app.state, "policy_version", None)
+        policy_digest = getattr(request.app.state, "policy_digest", None)
+        if (
+            not isinstance(policy_version, str)
+            or not policy_version
+            or not isinstance(policy_digest, str)
+            or len(policy_digest) != 64
+            or any(ch not in "0123456789abcdef" for ch in policy_digest)
+        ):
+            # An unavailable or invalid startup policy must not produce an
+            # apparently valid export audit row with blank policy metadata.
+            return admin_error(request, 503, "UNAVAILABLE")
+
+        try:
+            snapshot = await asyncio.wait_for(
+                asyncio.to_thread(reader.fetch_export, app_id, filters),
+                timeout=ADMIN_READ_TIMEOUT,
+            )
+        except Exception:
+            return admin_error(request, 503, "UNAVAILABLE")
+
+        export_id = "exp_" + uuid.uuid4().hex
+        created_at = time.time()
+        created_utc = utc_iso(created_at)
+        filters_repr = filters.canonical()
+
+        try:
+            csv_bytes = build_export_csv(
+                snapshot.rows,
+                app_id=app_id,
+                export_id=export_id,
+                created_utc=created_utc,
+                filters=filters_repr,
+            )
+        except ExportTooLarge:
+            # A 413 is returned before any CSV body or audit row is produced.
+            return admin_error(request, 413, "INPUT_LIMIT")
+
+        try:
+            entry = ExportAuditEntry(
+                export_id=export_id,
+                app_id=app_id,
+                created_at=created_at,
+                filters=filters_repr,
+                row_count=len(snapshot.rows),
+                sha256=sha256_hex(csv_bytes),
+                policy_version=policy_version,
+                policy_digest=policy_digest,
+                upper_seq=snapshot.upper_seq,
+            )
+        except ValueError:
+            return admin_error(request, 503, "UNAVAILABLE")
+        try:
+            # The audit row is committed before the response object exists.
+            await asyncio.wait_for(
+                asyncio.to_thread(export_log.record, entry),
+                timeout=ADMIN_READ_TIMEOUT,
+            )
+        except Exception:
+            return admin_error(request, 503, "UNAVAILABLE")
+
+        headers = dict(ADMIN_SECURITY_HEADERS)
+        headers["Content-Type"] = "text/csv; charset=utf-8"
+        headers["Content-Disposition"] = (
+            f'attachment; filename="{EXPORT_FILENAME}"'
+        )
+        # Trusted prepared-export metadata; no token, DSN or raw row is exposed.
+        headers["X-Export-Row-Count"] = str(entry.row_count)
+        headers["X-Export-Id"] = entry.export_id
+        headers["X-Export-Sha256"] = entry.sha256
+        return Response(content=csv_bytes, headers=headers)
+
+    @app.post("/v1/chat/completions")
+    async def chat_completions(request: Request):
+        request_id = request.state.request_id
+
+        content_type = request.headers.get("content-type", "")
+        media_type = content_type.split(";", 1)[0].strip().lower()
+        if media_type != "application/json":
+            return _error_response(request_id, "INVALID_REQUEST", 400)
+
+        auth_headers = request.headers.getlist("authorization")
+        if len(auth_headers) != 1:
+            return _error_response(request_id, "UNAUTHORIZED", 401)
+
+        if not request.app.state.config_ready:
+            return _error_response(request_id, "UNAVAILABLE", 503)
+
+        gateway = request.app.state.gateway
+        if not _gateway_static_ready(gateway):
+            return _error_response(request_id, "UNAVAILABLE", 503)
+
+        sem = request.app.state.sem
+        # Admission is checked without queueing.  ``acquire`` cannot yield when a
+        # slot is free, so this check and acquisition are atomic on the loop.
+        if sem.locked():
+            return _error_response(request_id, "UNAVAILABLE", 503)
+        await sem.acquire()
+
+        dispatched = False
+        released = False
+
+        def release_once() -> None:
+            nonlocal released
+            if not released:
+                released = True
+                sem.release()
+
+        def release_when_worker_done(task: "asyncio.Task") -> None:
+            # Consume the worker result/exception here so no unfinished-task
+            # warning or raw traceback is emitted.  The slot is released exactly
+            # once, after the synchronous handler has really finished.
+            try:
+                task.exception()
+            except BaseException:
+                pass
+            release_once()
+
+        try:
+            try:
+                body_bytes = await _read_limited_body(
+                    request,
+                    request.app.state.max_body_bytes,
+                    request.app.state.body_read_timeout,
+                )
+            except _BodyTimeout:
+                return _error_response(request_id, "UNAVAILABLE", 503)
+            except _BodyTooLarge:
+                return _error_response(request_id, "INPUT_LIMIT", 413)
+            except asyncio.CancelledError:
+                raise
+            except Exception:
+                return _error_response(request_id, "INVALID_REQUEST", 400)
+
+            body = _parse_json_object(body_bytes)
+            if body is None:
+                return _error_response(request_id, "INVALID_REQUEST", 400)
+
+            headers = {"Authorization": auth_headers[0]}
+            task = asyncio.create_task(
+                asyncio.to_thread(
+                    gateway.handle,
+                    "POST",
+                    "/v1/chat/completions",
+                    headers,
+                    body,
+                )
+            )
+            dispatched = True
+            task.add_done_callback(release_when_worker_done)
+            status, payload = await _wait_for_worker(task)
+            return JSONResponse(payload, status_code=status)
+        finally:
+            if not dispatched:
+                release_once()
+
+    @app.api_route(
+        "/{path:path}",
+        methods=["GET", "POST", "PUT", "DELETE", "PATCH", "HEAD", "OPTIONS", "TRACE"],
+    )
+    async def catch_all(request: Request, path: str):
+        # Keep known paths explicit so a wrong method returns 405 rather than
+        # being swallowed by the catch-all route.
+        if path in (
+            "v1/chat/completions",
+            "health/live",
+            "health/ready",
+            "admin",
+            "admin/events",
+            "admin/export.csv",
+        ):
+            return _error_response(request.state.request_id, "INVALID_REQUEST", 405)
+        return _error_response(request.state.request_id, "INVALID_REQUEST", 404)
+
+    return app
+
+
+async def _wait_for_worker(task: "asyncio.Task") -> Any:
+    """Wait for the worker task, shielding it from client cancellation.
+
+    A client disconnect cancels this ASGI task, not the synchronous gateway
+    thread.  The concurrency slot must stay held until that thread really
+    completes, including when cancellation is delivered repeatedly.  Once it
+    completes, the original cancellation is re-raised.
+    """
+    cancelled = False
+    while not task.done():
+        try:
+            return await asyncio.shield(task)
+        except asyncio.CancelledError:
+            cancelled = True
+            continue
+    if cancelled:
+        try:
+            task.result()
+        except BaseException:
+            pass
+        raise asyncio.CancelledError()
+    return task.result()
+
+
+# Module-level app for ``uvicorn nasi_lemak.server:app``.  Missing or invalid
+# environment configuration produces an unavailable but live application.
+app = make_app()

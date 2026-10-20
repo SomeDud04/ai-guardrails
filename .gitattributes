@@ -1,0 +1,5 @@
+# Preserve frozen evaluation bytes and SHA256 provenance across platforms.
+# The corpus, manifests, and reports under evals/pii/ are frozen artifacts whose
+# bytes are hashed. Disable text conversion (core.autocrlf / text=auto / eol)
+# so a checkout on Windows yields the same bytes as on Linux or macOS.
+evals/pii/** -text

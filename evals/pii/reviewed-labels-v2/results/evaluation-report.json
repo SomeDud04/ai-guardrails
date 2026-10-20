@@ -1,0 +1,170 @@
+{
+  "corpus_id": "pii-synthetic-evaluation-v2-adjudicated",
+  "corpus_sha256": "aa4879f2c7a678781498f514bdfd9d38213c15b6eb11c559f3df3824b5b7b4db",
+  "counts": {
+    "evaluated_cases": 58,
+    "excluded_cases": 3,
+    "gold_entities": 49,
+    "predicted_entities": 53,
+    "total_cases": 61
+  },
+  "errors": [
+    {
+      "case_id": "EV-PHONE-017",
+      "case_label": "negative_twelve_digit_phone_shape",
+      "end": 19,
+      "kind": "false_positive",
+      "reason": "predicted_span_without_exact_gold",
+      "start": 7,
+      "type": "MYKAD"
+    },
+    {
+      "case_id": "EV-MYKAD-016",
+      "case_label": "ambiguous_order_id",
+      "end": 18,
+      "kind": "false_positive",
+      "reason": "predicted_span_without_exact_gold",
+      "start": 6,
+      "type": "MYKAD"
+    },
+    {
+      "case_id": "EV-MYKAD-017",
+      "case_label": "ambiguous_sku",
+      "end": 16,
+      "kind": "false_positive",
+      "reason": "predicted_span_without_exact_gold",
+      "start": 4,
+      "type": "MYKAD"
+    },
+    {
+      "case_id": "EV-MYKAD-018",
+      "case_label": "ambiguous_part_number",
+      "end": 21,
+      "kind": "false_positive",
+      "reason": "predicted_span_without_exact_gold",
+      "start": 9,
+      "type": "MYKAD"
+    }
+  ],
+  "excluded_cases": [
+    {
+      "case_id": "EV-EMAIL-019",
+      "case_label": "unsupported_obfuscated",
+      "reason": "outside_declared_scope",
+      "scope": "unsupported"
+    },
+    {
+      "case_id": "EV-PHONE-021",
+      "case_label": "unsupported_fullwidth_digits",
+      "reason": "outside_declared_scope",
+      "scope": "unsupported"
+    },
+    {
+      "case_id": "EV-MYKAD-020",
+      "case_label": "unsupported_space_separated",
+      "reason": "outside_declared_scope",
+      "scope": "unsupported"
+    }
+  ],
+  "gates": {
+    "customer_approved": false,
+    "entities": {
+      "EMAIL": {
+        "applicable": true,
+        "passed": true,
+        "precision_min": 0.95,
+        "recall_min": 0.95,
+        "status": "pass"
+      },
+      "MYKAD": {
+        "applicable": true,
+        "passed": false,
+        "precision_min": 0.95,
+        "recall_min": 0.95,
+        "status": "fail"
+      },
+      "MY_PHONE": {
+        "applicable": true,
+        "passed": true,
+        "precision_min": 0.95,
+        "recall_min": 0.95,
+        "status": "pass"
+      }
+    },
+    "overall_pass": false,
+    "overall_status": "fail",
+    "precision_min": 0.95,
+    "provisional_engineering_gate": true,
+    "recall_min": 0.95,
+    "requires_nonzero_positive_and_negative_cases": true,
+    "statistically_validated": false
+  },
+  "manifest_sha256": "17820ffedcb531dcb4a5ebf25f6fb3f39252af4408726c179f2282df8802512b",
+  "match_rule": "exact_entity_type_and_offsets_one_to_one",
+  "per_entity": {
+    "EMAIL": {
+      "f1": 1.0,
+      "fn": 0,
+      "fp": 0,
+      "gate_applicable": true,
+      "gate_status": "pass",
+      "gold_count": 17,
+      "negative_cases": 6,
+      "positive_cases": 15,
+      "precision": 1.0,
+      "predicted_cases": 15,
+      "predicted_count": 17,
+      "recall": 1.0,
+      "tp": 17
+    },
+    "MYKAD": {
+      "f1": 0.8823529411764706,
+      "fn": 0,
+      "fp": 4,
+      "gate_applicable": true,
+      "gate_status": "fail",
+      "gold_count": 15,
+      "negative_cases": 7,
+      "positive_cases": 14,
+      "precision": 0.7894736842105263,
+      "predicted_cases": 18,
+      "predicted_count": 19,
+      "recall": 1.0,
+      "tp": 15
+    },
+    "MY_PHONE": {
+      "f1": 1.0,
+      "fn": 0,
+      "fp": 0,
+      "gate_applicable": true,
+      "gate_status": "pass",
+      "gold_count": 17,
+      "negative_cases": 6,
+      "positive_cases": 16,
+      "precision": 1.0,
+      "predicted_cases": 16,
+      "predicted_count": 17,
+      "recall": 1.0,
+      "tp": 17
+    }
+  },
+  "report_kind": "pii_quality_evaluation",
+  "runtime_sha256": {
+    "nasi_lemak/gateway.py": "2a566f90ccfdfb83ccc23b8a231c161105d4ecc4c459f3c84e82e1bdbd00c7fd",
+    "nasi_lemak/pii.py": "3b605e37821008308f7be11efb1f06463b561d4f5021d21f914f0b994a07b0ee",
+    "nasi_lemak/pii_eval.py": "e6e3b17e354b035c8627678596d0bfa4b299567c051a763a1b6d55eb8a55e8b0"
+  },
+  "schema_version": 1,
+  "scope": {
+    "entities": [
+      "EMAIL",
+      "MY_PHONE",
+      "MYKAD"
+    ],
+    "fixture_provenance": "agent-authored synthetic; not independently labelled human hold-out data",
+    "formats": "ASCII structured format recognizers only",
+    "identity_validity": "not established",
+    "semantic_context": "not evaluated"
+  },
+  "split": "evaluation"
+}

@@ -1,0 +1,219 @@
+{
+  "schema_version": 1,
+  "split": "development",
+  "corpus_id": "pii-synthetic-development-v1",
+  "provenance": "Agent-authored synthetic fixtures. Not independently labelled, not customer data.",
+  "scope_notes": [
+    "Only ASCII structured EMAIL, MY_PHONE and MYKAD-like formats are in scope.",
+    "Full-width and obfuscated forms are marked unsupported and excluded from metrics.",
+    "A format match does not establish identity validity or semantic context."
+  ],
+  "cases": [
+    {
+      "id": "DEV-EMAIL-001",
+      "focus": "EMAIL",
+      "scope": "in_scope",
+      "label": "bm_development_positive",
+      "notes": "Development-only synthetic BM example.",
+      "text": "Untuk pertanyaan, e-mel dev.one@example.invalid.",
+      "gold": [
+        {
+          "type": "EMAIL",
+          "start": 24,
+          "end": 47,
+          "text": "dev.one@example.invalid"
+        }
+      ]
+    },
+    {
+      "id": "DEV-EMAIL-002",
+      "focus": "EMAIL",
+      "scope": "in_scope",
+      "label": "chinese_development_positive",
+      "notes": "Development-only synthetic Chinese example.",
+      "text": "請聯絡 dev.two@test.invalid 以取得協助。",
+      "gold": [
+        {
+          "type": "EMAIL",
+          "start": 4,
+          "end": 24,
+          "text": "dev.two@test.invalid"
+        }
+      ]
+    },
+    {
+      "id": "DEV-EMAIL-003",
+      "focus": "EMAIL",
+      "scope": "in_scope",
+      "label": "development_multiple",
+      "notes": "Two development emails.",
+      "text": "Salinan kepada dev.a@example.invalid dan dev.b@test.invalid.",
+      "gold": [
+        {
+          "type": "EMAIL",
+          "start": 15,
+          "end": 36,
+          "text": "dev.a@example.invalid"
+        },
+        {
+          "type": "EMAIL",
+          "start": 41,
+          "end": 59,
+          "text": "dev.b@test.invalid"
+        }
+      ]
+    },
+    {
+      "id": "DEV-EMAIL-004",
+      "focus": "EMAIL",
+      "scope": "in_scope",
+      "label": "development_negative_no_tld",
+      "notes": "Development negative without a dotted TLD.",
+      "text": "Bukan e-mel: dev@example sahaja.",
+      "gold": []
+    },
+    {
+      "id": "DEV-EMAIL-005",
+      "focus": "EMAIL",
+      "scope": "in_scope",
+      "label": "development_negative_trailing_dot",
+      "notes": "Development negative with trailing dot.",
+      "text": "Hantar kepada dev.c@example.invalid. segera.",
+      "gold": []
+    },
+    {
+      "id": "DEV-PHONE-001",
+      "focus": "MY_PHONE",
+      "scope": "in_scope",
+      "label": "development_bm_positive",
+      "notes": "Development BM compact phone.",
+      "text": "Telefon dev: 0198765432.",
+      "gold": [
+        {
+          "type": "MY_PHONE",
+          "start": 13,
+          "end": 23,
+          "text": "0198765432"
+        }
+      ]
+    },
+    {
+      "id": "DEV-PHONE-002",
+      "focus": "MY_PHONE",
+      "scope": "in_scope",
+      "label": "development_chinese_positive",
+      "notes": "Development Chinese separated phone.",
+      "text": "備用電話 019-8765432。",
+      "gold": [
+        {
+          "type": "MY_PHONE",
+          "start": 5,
+          "end": 16,
+          "text": "019-8765432"
+        }
+      ]
+    },
+    {
+      "id": "DEV-PHONE-003",
+      "focus": "MY_PHONE",
+      "scope": "in_scope",
+      "label": "development_plus_positive",
+      "notes": "Development country-code phone.",
+      "text": "Dev hotline +60198765432.",
+      "gold": [
+        {
+          "type": "MY_PHONE",
+          "start": 12,
+          "end": 24,
+          "text": "+60198765432"
+        }
+      ]
+    },
+    {
+      "id": "DEV-PHONE-004",
+      "focus": "MY_PHONE",
+      "scope": "in_scope",
+      "label": "development_negative_short",
+      "notes": "Development short negative.",
+      "text": "Dev nombor 0198765 tidak lengkap.",
+      "gold": []
+    },
+    {
+      "id": "DEV-PHONE-005",
+      "focus": "MY_PHONE",
+      "scope": "in_scope",
+      "label": "development_negative_long",
+      "notes": "Development overlong negative.",
+      "text": "Dev nombor 019876543210 terlalu panjang.",
+      "gold": []
+    },
+    {
+      "id": "DEV-PHONE-006",
+      "focus": "MY_PHONE",
+      "scope": "in_scope",
+      "label": "development_negative_boundary",
+      "notes": "Development boundary negative.",
+      "text": "Dev rujukan X0198765432 bukan telefon.",
+      "gold": []
+    },
+    {
+      "id": "DEV-MYKAD-001",
+      "focus": "MYKAD",
+      "scope": "in_scope",
+      "label": "development_bm_positive",
+      "notes": "Development BM separated MyKad.",
+      "text": "Kad dev 800101-01-2345.",
+      "gold": [
+        {
+          "type": "MYKAD",
+          "start": 8,
+          "end": 22,
+          "text": "800101-01-2345"
+        }
+      ]
+    },
+    {
+      "id": "DEV-MYKAD-002",
+      "focus": "MYKAD",
+      "scope": "in_scope",
+      "label": "development_chinese_positive",
+      "notes": "Development Chinese compact MyKad.",
+      "text": "測試身份證 800101012345。",
+      "gold": [
+        {
+          "type": "MYKAD",
+          "start": 6,
+          "end": 18,
+          "text": "800101012345"
+        }
+      ]
+    },
+    {
+      "id": "DEV-MYKAD-003",
+      "focus": "MYKAD",
+      "scope": "in_scope",
+      "label": "development_negative_short",
+      "notes": "Development eleven-digit negative.",
+      "text": "Dev kad 800101-01-234 tidak lengkap.",
+      "gold": []
+    },
+    {
+      "id": "DEV-MYKAD-004",
+      "focus": "MYKAD",
+      "scope": "in_scope",
+      "label": "development_negative_long",
+      "notes": "Development thirteen-digit negative.",
+      "text": "Dev kad 1800101012345 terlalu panjang.",
+      "gold": []
+    },
+    {
+      "id": "DEV-MYKAD-005",
+      "focus": "MYKAD",
+      "scope": "in_scope",
+      "label": "development_ambiguous_sku",
+      "notes": "Development ambiguous twelve-digit SKU; expected false positive.",
+      "text": "Dev SKU 800101012345.",
+      "gold": []
+    }
+  ]
+}

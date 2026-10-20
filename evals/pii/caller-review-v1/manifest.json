@@ -1,0 +1,8 @@
+{
+  "schema_version": 1,
+  "frozen_on": "2026-10-20",
+  "provenance": "Caller-agent review synthetic edge corpus. Not independent human review, not customer data and not a retroactive hold-out split.",
+  "files": {
+    "evaluation.json": "6ec81452e320ac03517eed894f1cd416f73f54736335c04eca49153465aa7e14"
+  }
+}
