@@ -65,6 +65,45 @@ dispatch and client cancellation. The focused repair established:
 - `_FILE` secret support that fails closed when an explicitly configured file is
   unreadable and never falls back to an inline value.
 
+### Bounded control-plane admission (task 15, partial local hardening)
+
+- `_ControlPlaneAdmission` in `nasi_lemak/server.py` is one per-app,
+  non-queuing bound (default 2) for synchronous readiness and authenticated
+  operator calls: `/health/ready`, `/admin/events` and `/admin/export.csv`.
+  Chat keeps its existing separate semaphore and bounded-admission behavior.
+- A slot is acquired only after operator authentication and query validation
+  (or after readiness's cheap structural checks). Exhaustion returns the
+  existing generic `503` immediately; readiness keeps its existing
+  `{"status":"not_ready"}` body. No thread is dispatched when admission fails.
+- The synchronous worker is shielded from the production 5-second HTTP deadline
+  and client cancellation. The slot is released exactly once when the thread
+  actually returns, and the thread result/exception is consumed. A timed-out or
+  cancelled export read never continues to CSV assembly or an audit write. A
+  failed or timed-out export audit releases no CSV, and the durable
+  audit-before-response rule is unchanged. `/health/live` remains independent.
+- Cancellation semantics: a remembered client cancellation is re-raised when the
+  worker finishes or the original deadline expires, whichever comes first. It is
+  never converted into `_CONTROL_TIMEOUT`/`503`, and a late worker success or
+  error cannot replace it. The worker stays shielded and the slot stays held
+  until the thread actually completes; the request never waits beyond its
+  original deadline.
+- This bounds concurrent queued background work only. It does not stop a running
+  thread, does not add a native model/driver timeout, does not solve in-flight
+  thread termination or upstream-call cancellation, and does not prevent an
+  infrastructure-level bypass outside this process. No native hard deadline is
+  verified.
+- Focused evidence: 10 deterministic event-gated ASGI tests in
+  `tests/test_control_plane.py` cover readiness/events/export saturation, short
+  test deadlines (0.05–0.1 s via patched constants, versus the 5-second
+  production defaults), repeated cancellation retaining slots (including
+  cancellation held past a shortened deadline), no excess reader/audit dispatch,
+  authentication-before-admission, shared capacity across distinct routes at
+  capacity 2, chat/control separation, liveness responsiveness, invalid
+  `control_concurrency` bounds failing closed, recovery after late
+  success/error, and no CSV or audit after a failed, timed-out or cancelled
+  export. Every test gate is released in `finally`, and request tasks are
+  settled during cleanup.
+
 ### Focused audit repair
 
 - PostgreSQL connections use `autocommit=True` and exactly one explicit
@@ -338,7 +377,8 @@ Uvicorn 0.54.0, psycopg 3.3.6, HTTPX 0.28.1, PyYAML 6.0.3):
 
 | Command | Result |
 |---|---|
-| `.\.venv\Scripts\python.exe -m unittest discover -s tests -v` | **284 tests run, 282 passed, 2 skipped, exit 0, 14.139s** — the final caller run and the current figure (the earlier 283/281, 271/269, 249/247 and 226/224 figures are historical; the two skips are the existing optional `TEST_AUDIT_DSN`-gated PostgreSQL tests) |
+| `.\.venv\Scripts\python.exe -m unittest discover -s tests -v` | **315 tests run, 313 passed, 2 skipped, exit 0, 17.900s** — this worker's local run, not a final caller run; the earlier 312/310 run was also worker evidence and already included the user's 21 global-installer tests (the earlier 284/282, 283/281, 271/269, 249/247 and 226/224 figures are historical; the two skips are the existing optional `TEST_AUDIT_DSN`-gated PostgreSQL tests) |
+| `.\.venv\Scripts\python.exe -m unittest tests.test_control_plane -v` | **10 focused event-gated control-plane tests OK** (short-deadline readiness/events/export saturation, cancellation held past a shortened deadline with no late audit/CSV, shared capacity 2 across distinct routes, invalid `control_concurrency` bounds fail closed, no excess dispatch, auth-before-admission, chat separation, liveness, late success/error recovery, no CSV on failed/timed-out export audit) |
 | `.\.venv\Scripts\python.exe -m unittest tests.test_pii tests.test_pii_eval -v` | **34 focused PII/span/evaluator tests OK** (metric math, strict spans, terminal-period and punctuation boundaries, invalid dotted suffixes, Unicode `\d` preservation, invalid fixtures, manifest freeze, v1 hash preservation, v2 single-label adjudication, CLI exit 0/1/2, reproducibility, no raw text) |
 | `.\.venv\Scripts\python.exe -m unittest tests.test_operator -v` | **23 operator/API tests OK** (real SQLite audit rows + real ASGI; PostgreSQL SQL/params via driver double only) |
 | `.\.venv\Scripts\python.exe -m unittest tests.test_export -v` | **23 export tests OK** (real ASGI app + real SQLite audit rows; PostgreSQL export-audit SQL via driver double only) |
@@ -429,6 +469,11 @@ but this is **not** `docker compose config`, image-build or runtime validation.
   BM/Chinese sentences is not semantic guard evidence; English semantic guard
   acceptance remains unverified and BM/Chinese semantic protection is
   unsupported for pilot acceptance.
+- The bounded control-plane admission is partial local hardening only: it
+  cannot terminate a running thread, cancel an upstream call, impose a native
+  model/driver hard deadline, or stop an infrastructure-level bypass outside
+  this process. Cancellation is deferred until the worker finishes or the
+  original deadline, whichever comes first. Tasks 16-20 remain pending.
 - Any acceptance of the full day-2 milestone or live pilot.
 
 ## Backlog disposition
@@ -444,13 +489,16 @@ but this is **not** `docker compose config`, image-build or runtime validation.
 | 11: operator events | Read-only authenticated HTML/API, separate SQLite reader boundary and PostgreSQL SQL doubles implemented and locally tested; live PostgreSQL reader role pending |
 | 12: bounded CSV export | Authenticated `/admin/export.csv`, append-only prepared-export audit and UI flow implemented and locally verified (23 ASGI export tests + 10 Node.js cases); PostgreSQL SQL via double, caller synthetic browser download confirmed, no Docker run |
 | 13/14: PII quality and language boundary | Frozen synthetic fixtures/manifest, deterministic evaluator, focused tests and docs delivered; narrow reviewed EMAIL boundary regression fixed and verified through ASGI and loopback HTTP; reviewed v2 passes EMAIL and MY_PHONE but the MyKad gate still fails, so the overall quality gate remains FAIL; original v1 EMAIL score is annotation-conflicted; caller-review pass is known regression evidence, not unseen/independent; native English guard proof and BM/Chinese semantic support remain open |
-| 15-20 | Not implemented or accepted |
+| 15 | Bounded control-plane admission: partial local hardening delivered (non-queuing shared capacity for readiness/operator reads and export audit, short test deadlines, cancellation deferred until worker completion or the original deadline); infrastructure bypass and native hard deadlines unverified |
+| 16-20 | Not implemented or accepted |
 
 Tasks 13/14 deliver an authored synthetic evaluation, a narrow reviewed
 privacy regression repair and a documented language boundary, not customer
-acceptance. The current full local suite figure is `284 tests run, 282 passed,
-2 skipped in 14.139s`, where both skips are the existing optional PostgreSQL
-tests; older counts quoted elsewhere are historical.
+acceptance. The current full local suite figure from this worker's run is
+`315 tests run, 313 passed, 2 skipped in 17.900s` (final caller confirmation
+pending), where both skips are the existing optional PostgreSQL tests. The
+earlier 312/310 run was worker evidence that already included the user's 21
+global-installer tests; older counts quoted elsewhere are historical.
 The caller-review corpus's post-fix pass is not an accuracy or independent
 hold-out claim. Native inference, independent held-out PII labels, English
 semantic-guard acceptance, BM/Chinese semantic protection, real PostgreSQL

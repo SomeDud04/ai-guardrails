@@ -15,6 +15,12 @@ OpenCode's default `codex-coordinator`, pass the prepared brief with `--plan-fil
 and use `--review-mode codex`, so one independent Codex review remains mandatory.
 The coordinator stays lightweight.
 
+After a completed development slice passes verification and caller review, read and
+follow `.agents/skills/push-completed-work/SKILL.md` before the final completion
+response. Commit and push the reviewed slice to this repository's existing origin
+unless the user cancels or explicitly says not to push. Worker stages never commit
+or push.
+
 Loading the skill alone is not delegation: run the bridge and inspect or obtain its
 final review before reporting the task complete. `awaiting_review` is a completed
 handoff, not approval. The initiating assistant must not edit source itself. Writing

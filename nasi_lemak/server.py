@@ -63,6 +63,11 @@ DEFAULT_BODY_READ_TIMEOUT = 5.0
 MAX_CONFIGURED_BODY_READ_TIMEOUT = 60.0
 DEFAULT_MAX_CONCURRENCY = 5
 MAX_CONFIGURED_CONCURRENCY = 256
+# Control-plane work (readiness probes and authenticated operator reads/writes)
+# uses a separate, smaller bound than chat.  Exhaustion rejects immediately; no
+# request waits in a queue.
+DEFAULT_CONTROL_CONCURRENCY = 2
+MAX_CONFIGURED_CONTROL_CONCURRENCY = 64
 READINESS_TIMEOUT = 5.0
 ADMIN_READ_TIMEOUT = 5.0
 ADMIN_TOKEN_MAX_LENGTH = 4096
@@ -576,18 +581,139 @@ def _resolve_export_log(
         return None
 
 
-async def _runtime_ready(gateway: Gateway, config_ready: bool) -> bool:
-    """Bounded structural plus audit-store readiness check."""
+_CONTROL_TIMEOUT = object()
+
+
+class _ControlPlaneAdmission:
+    """Bounded, non-queuing admission for synchronous control-plane work.
+
+    ``asyncio.to_thread`` cannot stop a running thread.  A slot therefore stays
+    held until the real synchronous call returns, even after the HTTP request
+    has timed out or been cancelled.  This bounds concurrent worker dispatch; it
+    is not thread termination or a native-model timeout.
+    """
+
+    __slots__ = ("_limit", "_in_use", "_tasks")
+
+    def __init__(self, limit: int) -> None:
+        self._limit = limit
+        self._in_use = 0
+        self._tasks: set[asyncio.Task] = set()
+
+    @property
+    def in_use(self) -> int:
+        return self._in_use
+
+    def try_acquire(self) -> bool:
+        """Reserve one slot or reject immediately; never wait for capacity."""
+        if self._in_use >= self._limit:
+            return False
+        self._in_use += 1
+        return True
+
+    async def run(self, func: Any, *args: Any, timeout: float) -> Any:
+        """Dispatch one synchronous call and wait at most ``timeout`` seconds.
+
+        Returns ``_CONTROL_TIMEOUT`` when the deadline expires.  The slot is
+        still held then and is released by the done callback only when the
+        thread really finishes.  Cancellation is deferred until the thread
+        finishes or the original deadline expires, whichever comes first; a
+        remembered ``CancelledError`` is then re-raised instead of the sentinel.
+        """
+        task = asyncio.create_task(asyncio.to_thread(func, *args))
+        self._tasks.add(task)
+        released = False
+
+        def finish(done: "asyncio.Task") -> None:
+            nonlocal released
+            if not released:
+                released = True
+                self._tasks.discard(done)
+                if self._in_use > 0:
+                    self._in_use -= 1
+            try:
+                done.exception()
+            except BaseException:
+                pass
+
+        task.add_done_callback(finish)
+        return await _await_control_call(task, timeout, finish)
+
+
+async def _await_control_call(task: "asyncio.Task", timeout: float, finish: Any) -> Any:
+    """Wait for a control-plane worker, retaining its slot across timeout/cancel.
+
+    A timeout returns ``_CONTROL_TIMEOUT`` without cancelling the worker; the
+    done callback releases the slot on real completion.  Repeated client
+    cancellation is deferred until the worker finishes or the original deadline
+    expires, whichever comes first.  A remembered cancellation is re-raised at
+    that point (never replaced by the sentinel or a late worker result/error),
+    while the shielded worker keeps its slot until it really finishes.
+    """
+    cancelled = False
+    deadline = time.monotonic() + timeout
+    while True:
+        if task.done():
+            finish(task)
+            if cancelled:
+                raise asyncio.CancelledError()
+            return task.result()
+        remaining = deadline - time.monotonic()
+        if remaining <= 0:
+            if cancelled:
+                raise asyncio.CancelledError()
+            return _CONTROL_TIMEOUT
+        try:
+            result = await asyncio.wait_for(asyncio.shield(task), timeout=remaining)
+        except asyncio.TimeoutError:
+            if task.done():
+                # The worker itself raised ``TimeoutError``; it is a real
+                # exception, not this deadline.
+                finish(task)
+                if cancelled:
+                    raise asyncio.CancelledError()
+                raise
+            if cancelled:
+                raise asyncio.CancelledError()
+            return _CONTROL_TIMEOUT
+        except asyncio.CancelledError:
+            cancelled = True
+            continue
+        except BaseException:
+            finish(task)
+            if cancelled:
+                raise asyncio.CancelledError()
+            raise
+        finish(task)
+        if cancelled:
+            raise asyncio.CancelledError()
+        return result
+
+
+async def _runtime_ready(
+    gateway: Gateway,
+    config_ready: bool,
+    admission: _ControlPlaneAdmission,
+) -> bool:
+    """Bounded structural plus audit-store readiness check.
+
+    Admission is non-blocking and shared with the authenticated operator routes.
+    A saturated or timed-out probe reports not-ready without dispatching another
+    worker thread.  Once acquired, the slot is held until the synchronous
+    readiness call really finishes.
+    """
     if not config_ready or not _gateway_static_ready(gateway):
         return False
+    if not admission.try_acquire():
+        return False
     try:
-        ready = await asyncio.wait_for(
-            asyncio.to_thread(gateway.audit_store.ready),
+        result = await admission.run(
+            gateway.audit_store.ready,
             timeout=READINESS_TIMEOUT,
         )
     except Exception:
         return False
-    return ready is True
+    return result is True
 
 
 def make_app(
@@ -603,6 +729,7 @@ def make_app(
     max_body_bytes: int = DEFAULT_MAX_BODY_BYTES,
     body_read_timeout: float = DEFAULT_BODY_READ_TIMEOUT,
     max_concurrency: int = DEFAULT_MAX_CONCURRENCY,
+    control_concurrency: int = DEFAULT_CONTROL_CONCURRENCY,
     app_id: str = "nasi-lemak",
     environ: dict[str, str] | None = None,
 ) -> FastAPI:
@@ -621,12 +748,14 @@ def make_app(
         _valid_positive_int(max_body_bytes, MAX_CONFIGURED_BODY_BYTES)
         and _valid_positive_float(body_read_timeout, MAX_CONFIGURED_BODY_READ_TIMEOUT)
         and _valid_positive_int(max_concurrency, MAX_CONFIGURED_CONCURRENCY)
+        and _valid_positive_int(control_concurrency, MAX_CONFIGURED_CONTROL_CONCURRENCY)
     )
     # Invalid numeric configuration must not crash startup.  Use safe defaults
     # for the live-but-not-ready application; readiness and chat stay closed.
     body_limit = max_body_bytes if _valid_positive_int(max_body_bytes, MAX_CONFIGURED_BODY_BYTES) else DEFAULT_MAX_BODY_BYTES
     read_timeout = body_read_timeout if _valid_positive_float(body_read_timeout, MAX_CONFIGURED_BODY_READ_TIMEOUT) else DEFAULT_BODY_READ_TIMEOUT
     concurrency = max_concurrency if _valid_positive_int(max_concurrency, MAX_CONFIGURED_CONCURRENCY) else DEFAULT_MAX_CONCURRENCY
+    control_limit = control_concurrency if _valid_positive_int(control_concurrency, MAX_CONFIGURED_CONTROL_CONCURRENCY) else DEFAULT_CONTROL_CONCURRENCY
 
     runtime_writer_dsn = (
         _file_env("NASI_LEMAK_AUDIT_DSN", env) if audit_dsn is None else audit_dsn
@@ -705,6 +834,8 @@ def make_app(
     app.state.body_read_timeout = read_timeout
     app.state.max_concurrency = concurrency
     app.state.sem = asyncio.Semaphore(concurrency)
+    app.state.control_concurrency = control_limit
+    app.state.control_admission = _ControlPlaneAdmission(control_limit)
 
     @app.middleware("http")
     async def assign_request_id(request: Request, call_next):
@@ -735,7 +866,9 @@ def make_app(
     @app.get("/health/ready")
     async def health_ready(request: Request):
         ready = await _runtime_ready(
-            request.app.state.gateway, request.app.state.config_ready
+            request.app.state.gateway,
+            request.app.state.config_ready,
+            request.app.state.control_admission,
         )
         if ready:
             return {"status": "ready"}
@@ -795,21 +928,32 @@ def make_app(
         except OperatorQueryError:
             return admin_error(request, 400, "INVALID_REQUEST")
 
+        # Authentication and query validation are complete before admission, so
+        # unauthenticated or malformed traffic never consumes control-plane
+        # capacity or dispatches a reader thread.
+        admission = request.app.state.control_admission
+        if not admission.try_acquire():
+            return admin_error(request, 503, "UNAVAILABLE")
+
         try:
-            page = await asyncio.wait_for(
-                asyncio.to_thread(
-                    state.reader.fetch_page,
-                    request.app.state.gateway.app_id,
-                    filters,
-                ),
+            page = await admission.run(
+                state.reader.fetch_page,
+                request.app.state.gateway.app_id,
+                filters,
                 timeout=ADMIN_READ_TIMEOUT,
             )
         except Exception:
             # Reader/query failures are generic: no DSN, SQL or driver text.
             return admin_error(request, 503, "UNAVAILABLE")
+        if page is _CONTROL_TIMEOUT:
+            # The worker thread may still be running, but this request is over.
+            # No deferred continuation retries the read.
+            return admin_error(request, 503, "UNAVAILABLE")
 
         health = await _runtime_ready(
-            request.app.state.gateway, request.app.state.config_ready
+            request.app.state.gateway,
+            request.app.state.config_ready,
+            admission,
         )
         payload = {
             "events": page.events,
@@ -865,12 +1009,23 @@ def make_app(
             # apparently valid export audit row with blank policy metadata.
             return admin_error(request, 503, "UNAVAILABLE")
 
+        # Authentication and query validation are complete before admission.
+        admission = request.app.state.control_admission
+        if not admission.try_acquire():
+            return admin_error(request, 503, "UNAVAILABLE")
+
         try:
-            snapshot = await asyncio.wait_for(
-                asyncio.to_thread(reader.fetch_export, app_id, filters),
+            snapshot = await admission.run(
+                reader.fetch_export,
+                app_id,
+                filters,
                 timeout=ADMIN_READ_TIMEOUT,
             )
         except Exception:
+            return admin_error(request, 503, "UNAVAILABLE")
+        if snapshot is _CONTROL_TIMEOUT:
+            # A timed-out read never continues to CSV assembly or audit; the
+            # slot stays held until the thread actually returns.
             return admin_error(request, 503, "UNAVAILABLE")
 
         export_id = "exp_" + uuid.uuid4().hex
@@ -904,13 +1059,24 @@ def make_app(
             )
         except ValueError:
             return admin_error(request, 503, "UNAVAILABLE")
+
+        # The export audit is a second bounded control-plane operation.  If the
+        # shared capacity is exhausted, the request fails closed: an unaudited
+        # CSV is never returned and no audit thread is queued.
+        if not admission.try_acquire():
+            return admin_error(request, 503, "UNAVAILABLE")
         try:
             # The audit row is committed before the response object exists.
-            await asyncio.wait_for(
-                asyncio.to_thread(export_log.record, entry),
+            recorded = await admission.run(
+                export_log.record,
+                entry,
                 timeout=ADMIN_READ_TIMEOUT,
             )
         except Exception:
+            return admin_error(request, 503, "UNAVAILABLE")
+        if recorded is _CONTROL_TIMEOUT:
+            # The audit may still commit in its worker thread, but this response
+            # already failed: CSV bytes are not released.
             return admin_error(request, 503, "UNAVAILABLE")
 
         headers = dict(ADMIN_SECURITY_HEADERS)
