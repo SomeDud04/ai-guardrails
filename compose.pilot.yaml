@@ -1,0 +1,119 @@
+# Optional guard-enabled pilot overlay for compose.yaml.
+#
+# This file is inert configuration scaffolding, not runtime proof.  It selects
+# the opt-in ``guards`` Dockerfile target and mounts one operator-approved
+# policy file plus two operator-supplied local model directories read-only.
+# No model ID is invented, no model or license is supplied, and no image is
+# built, started or benchmarked by this file.
+#
+# Always apply it ON TOP of the default stack (never alone):
+#
+#   docker compose \
+#     --env-file .secrets/compose.env \
+#     --env-file .secrets/compose.pilot.env \
+#     -f compose.yaml -f compose.pilot.yaml config
+#
+# See docs/compose.pilot.env.example.  Start the base PostgreSQL service first
+# (before any heavy guard build), bootstrap roles, then start this profile.
+#
+# Bind mounts use the long syntax with ``create_host_path: false``: a missing
+# host policy/model path aborts the start instead of silently creating an empty
+# directory that would look configured but fail later.  All host paths are
+# mandatory ``:?`` interpolation values; nothing is defaulted.
+#
+# The gateway keeps the base file's non-root UID/GID 10001, read-only root
+# filesystem, dropped capabilities, no-new-privileges, localhost-only published
+# port and private database network.  Local Compose file secrets are host files
+# and must be readable by UID 10001; this file does not claim that Compose
+# uid/gid/mode remapping works for them.
+
+services:
+  gateway:
+    build:
+      context: .
+      dockerfile: Dockerfile
+      # Guard-enabled image.  The default Dockerfile stage remains ``server``.
+      target: guards
+    image: nasi-lemak-gateway:0.1.0-pilot
+    environment:
+      # Container paths must match the read-only bind targets below.
+      NASI_LEMAK_POLICY_FILE: /run/pilot/policy/policy.yaml
+      NASI_LEMAK_PROMPT_GUARD_MODEL_DIR: /models/prompt-guard-2
+      NASI_LEMAK_LLAMA_GUARD_MODEL_DIR: /models/llama-guard-3
+      # Explicit provisional settings.  The threshold is uncalibrated and the
+      # context budget must be reviewed against the actual approved artifact;
+      # neither value is benchmark evidence.
+      NASI_LEMAK_PROMPT_GUARD_THRESHOLD: ${NASI_LEMAK_PROMPT_GUARD_THRESHOLD:-0.5}
+      NASI_LEMAK_LLAMA_GUARD_CONTEXT_LIMIT: ${NASI_LEMAK_LLAMA_GUARD_CONTEXT_LIMIT:-4096}
+      # Distinct operator credentials.  The runtime writer keeps the base
+      # file's existing NASI_LEMAK_AUDIT_DSN_FILE/audit_dsn secret.
+      NASI_LEMAK_OPERATOR_KEY_DIGEST_FILE: /run/secrets/operator_key_digest
+      NASI_LEMAK_OPERATOR_AUDIT_DSN_FILE: /run/secrets/operator_audit_dsn
+      # Never resolve or download model weights at runtime.
+      HF_HUB_OFFLINE: "1"
+      TRANSFORMERS_OFFLINE: "1"
+      HF_DATASETS_OFFLINE: "1"
+    volumes:
+      - type: bind
+        source: ${PILOT_POLICY_FILE:?Set PILOT_POLICY_FILE to an approved policy-file path}
+        target: /run/pilot/policy/policy.yaml
+        read_only: true
+        bind:
+          create_host_path: false
+      - type: bind
+        source: ${PILOT_PROMPT_GUARD_MODEL_DIR:?Set PILOT_PROMPT_GUARD_MODEL_DIR to a local Prompt Guard 2 directory}
+        target: /models/prompt-guard-2
+        read_only: true
+        bind:
+          create_host_path: false
+      - type: bind
+        source: ${PILOT_LLAMA_GUARD_MODEL_DIR:?Set PILOT_LLAMA_GUARD_MODEL_DIR to a local Llama Guard 3 directory}
+        target: /models/llama-guard-3
+        read_only: true
+        bind:
+          create_host_path: false
+    secrets:
+      - operator_key_digest
+      - operator_audit_dsn
+    # Provisionally sized for CPU-only native adapters; separate from the
+    # lightweight 512 MiB/1 CPU default.  These values are not benchmarked.
+    mem_limit: ${GUARD_MEM_LIMIT:-8g}
+    cpus: ${GUARD_CPUS:-4.0}
+    pids_limit: ${GUARD_PIDS_LIMIT:-512}
+    healthcheck:
+      # Probes the application's real structural readiness endpoint with the
+      # Python standard library and a finite request timeout.  ``/health/ready``
+      # checks configuration, policy activation and audit-store readiness; it
+      # is NOT classifier accuracy, native model warmup or a deployment proof.
+      # A non-200 response (for example 503 pending configuration) fails the
+      # probe.  The 7 s client request timeout exceeds the server's 5 s
+      # readiness deadline and stays inside the 8 s healthcheck timeout, so a
+      # slow but successful readiness check is not cut off by the probe while
+      # every wait remains finite.  The start period allows for slow local model
+      # loading.
+      test:
+        - CMD
+        - python
+        - -c
+        - |
+          import urllib.request
+
+          try:
+              with urllib.request.urlopen(
+                  "http://127.0.0.1:8000/health/ready", timeout=7
+              ) as response:
+                  healthy = response.status == 200
+          except Exception:
+              healthy = False
+
+          raise SystemExit(0 if healthy else 1)
+      interval: 30s
+      timeout: 8s
+      retries: 3
+      start_period: 10m
+
+secrets:
+  operator_key_digest:
+    file: ${OPERATOR_KEY_DIGEST_FILE:?Set OPERATOR_KEY_DIGEST_FILE to an absolute secret-file path}
+  operator_audit_dsn:
+    file: ${OPERATOR_AUDIT_DSN_FILE:?Set OPERATOR_AUDIT_DSN_FILE to an absolute secret-file path}

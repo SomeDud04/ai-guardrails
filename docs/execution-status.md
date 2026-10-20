@@ -401,7 +401,46 @@ the official FastAPI Docker deployment guide
 documentation
 (<https://www.psycopg.org/psycopg3/docs/basic/transactions.html>) and the Docker
 Compose startup-order/healthcheck documentation
-(<https://docs.docker.com/compose/how-tos/startup-order/>).
+(<https://docs.docker.com/compose/how-tos/startup-order/>). The optional pilot
+overlay's long-bind `create_host_path: false` and service healthcheck fields
+follow the official Compose services reference
+(<https://docs.docker.com/reference/compose-file/services/>); Compose merge
+semantics were **not** reimplemented in tests.
+
+### Guard-enabled pilot image overlay (task 19, packaging partial)
+
+Added `compose.pilot.yaml` and `docs/compose.pilot.env.example`, and converted
+the `Dockerfile` to four stages: `base` (server extra), `guards-deps` (existing
+pinned guards extra, root only for pip), `guards` (opt-in guard runtime) and the
+final `server` stage (default, no ML dependencies). The overlay selects the
+`guards` target and adds:
+
+- read-only long-syntax bind mounts for an approved policy and two local model
+  directories, all required via `:?` interpolation and all with
+  `create_host_path: false` so a missing host path aborts rather than being
+  auto-created;
+- matching `NASI_LEMAK_POLICY_FILE`, prompt/llama guard directory, threshold and
+  context variables (provisional 0.5 and 4096 defaults, explicitly
+  uncalibrated/unreviewed);
+- distinct `operator_key_digest` and `operator_audit_dsn` file secrets for the
+  admin/export reader, while the runtime writer keeps the existing `audit_dsn`;
+- HF/Transformers offline flags; model weights are never copied into an image;
+- a provisional 8g/4 CPU/512 PID budget, separate from the lightweight
+  512 MiB/1 CPU default and not benchmarked; native adapters remain CPU-only;
+- a stdlib Python healthcheck against the actual `/health/ready` endpoint with
+  a 7 s request timeout inside an 8 s healthcheck timeout and a 10 m
+  model-loading start period; the probe outlasts the server's 5 s
+  `READINESS_TIMEOUT` while every wait stays finite.
+
+The base non-root UID 10001, read-only filesystem, dropped capabilities,
+`no-new-privileges`, localhost-published port and private database network are
+inherited unchanged. No model ID was invented; `NASI_LEMAK_GENERATION_MODEL`
+stays blank and `/v1` remains assumed. This is configuration scaffolding only:
+the image was not built, `docker compose config` was not run, no stack was
+started, no model was downloaded and no native guard inference was exercised.
+The healthcheck therefore reports structural readiness, not classifier accuracy
+or warmup.
+
 
 ## Verification
 
@@ -410,7 +449,7 @@ Uvicorn 0.54.0, psycopg 3.3.6, HTTPX 0.28.1, PyYAML 6.0.3):
 
 | Command | Result |
 |---|---|
-| `.\.venv\Scripts\python.exe -m unittest discover -s tests` | **324 tests run, 322 passed, 2 skipped, exit 0, 21.847s** (22.843 s wall) — this worker's local run, not a final caller run; the two skips are the existing optional `TEST_AUDIT_DSN`-gated PostgreSQL tests; earlier 315/313, 312/310, 284/282, 283/281, 271/269, 249/247 and 226/224 figures are historical |
+| `.\.venv\Scripts\python.exe -m unittest discover -s tests` | **340 tests run, 338 passed, 2 skipped, exit 0, 18.988s** — this worker's local run, not a final caller run; the two skips are the existing optional `TEST_AUDIT_DSN`-gated PostgreSQL tests; the suite includes 16 structural/behavioural container-config tests; earlier 339/337, 324/322, 315/313, 312/310, 284/282, 283/281, 271/269, 249/247 and 226/224 figures are historical |
 | `.\.venv\Scripts\python.exe -m unittest tests.test_control_plane -v` | **10 focused event-gated control-plane tests OK** (short-deadline readiness/events/export saturation, cancellation held past a shortened deadline with no late audit/CSV, shared capacity 2 across distinct routes, invalid `control_concurrency` bounds fail closed, no excess dispatch, auth-before-admission, chat separation, liveness, late success/error recovery, no CSV on failed/timed-out export audit) |
 | `.\.venv\Scripts\python.exe -m unittest tests.test_chat_deadline -v` | **9 focused event-gated chat-deadline tests OK, exit 0, 1.453s** (stalled input/output guards, late success, retained late error with no output-guard call, repeated cancellation, overload, exact-once capacity, invalid bounds, normal chat; timed-out tasks remain strongly referenced until real completion) |
 | `.\.venv\Scripts\python.exe -m unittest tests.test_pii tests.test_pii_eval -v` | **34 focused PII/span/evaluator tests OK** (metric math, strict spans, terminal-period and punctuation boundaries, invalid dotted suffixes, Unicode `\d` preservation, invalid fixtures, manifest freeze, v1 hash preservation, v2 single-label adjudication, CLI exit 0/1/2, reproducibility, no raw text) |
@@ -423,9 +462,10 @@ Uvicorn 0.54.0, psycopg 3.3.6, HTTPX 0.28.1, PyYAML 6.0.3):
 | `.\.venv\Scripts\python.exe -m nasi_lemak.pii_eval --root evals/pii/reviewed-labels-v2` | **Exit 1**: EMAIL 17 TP / 0 FP / 0 FN (1.0000/1.0000), MY_PHONE 17/17/17, MYKAD 15 TP / 4 FP / 0 FN (0.7895/1.0000, gate fail); reports under `evals/pii/reviewed-labels-v2/results/` |
 | `.\.venv\Scripts\python.exe -m nasi_lemak.pii_eval --root evals/pii/caller-review-v1` | **Exit 0**: all six known regression cases pass; pre-fix failing report preserved as `before-email-fix-*` |
 | Local ASGI check with empty environment | live `200 {"status":"ok"}`, ready `503 {"status":"not_ready"}`, chat `503 UNAVAILABLE`, adapters `None` |
-| PyYAML parse of `compose.yaml` and `docs/api-contract.yaml` | Valid YAML; expected top-level keys |
+| PyYAML parse of `compose.yaml`, `compose.pilot.yaml` and `docs/api-contract.yaml` | Valid YAML; expected top-level keys; no home-grown Compose merge/interpolation |
+| `.\.venv\Scripts\python.exe -m unittest tests.test_container_config -v` | **16 structural/behavioural tests OK** (mount/env/secret consistency, `create_host_path: false`, offline flags, healthcheck timeout/start period, Dockerfile stage order/default, explicit fake-loader ASGI readiness; the embedded healthcheck Python is executed against a mocked `urllib.request.urlopen` and exits `0` for `200`, `1` for `503`/timeout, using the fixed localhost endpoint and a finite 7 s request timeout inside the 8 s outer timeout) |
 | `tomllib` parse of `pyproject.toml` | Build backend, explicit `nasi_lemak` package and `*.sql` package data present |
-| `docker --version` / `docker compose version` | **Unavailable**: Docker is not installed/on PATH |
+| `docker --version` / `docker compose version` | **Unavailable**: Docker is not installed/on PATH; overlay `docker compose config`, guard image build and startup remain unverified |
 
 The two skips are the existing optional PostgreSQL integration tests, skipped
 because `TEST_AUDIT_DSN` is not set; no skip was added for task 12 or tasks
@@ -471,8 +511,11 @@ but this is **not** `docker compose config`, image-build or runtime validation.
 - Production PostgreSQL runtime evidence, concurrency/failure drills and
   deployment-time log inspection.
 - Docker image build, Compose startup, secret mounting and healthcheck behavior.
-  The default image omits ML extra/weights and the Compose file has no policy
-  mount; Docker/PostgreSQL/native-guard/Qwen integration is unverified.
+  The default image omits ML extra/weights. The optional pilot overlay's guard
+  target, policy/model bind mounts, operator secrets, provisional resource
+  budgets and `/health/ready` healthcheck are authored configuration only; no
+  `docker compose config`, image build or startup was executed, so
+  Docker/PostgreSQL/native-guard/Qwen integration remains unverified.
 - TLS ingress. The gateway is localhost HTTP only; TLS is required before a
   remote pilot.
 - The operator event view is local-only and read-only. Its tests use real SQLite
@@ -509,8 +552,8 @@ but this is **not** `docker compose config`, image-build or runtime validation.
   infrastructure-level bypass outside this process. Retaining chat task
   references and releasing the slot after the thread returns is not thread
   termination or a native deadline. Cancellation is deferred until the worker
-  finishes or the original deadline, whichever comes first. Tasks 16-20 remain
-  pending.
+  finishes or the original deadline, whichever comes first. Tasks 16-18 and 20
+  remain pending; task 19 is packaging-partial only.
 - Any acceptance of the full day-2 milestone or live pilot.
 
 ## Backlog disposition
@@ -527,15 +570,16 @@ but this is **not** `docker compose config`, image-build or runtime validation.
 | 12: bounded CSV export | Authenticated `/admin/export.csv`, append-only prepared-export audit and UI flow implemented and locally verified (23 ASGI export tests + 10 Node.js cases); PostgreSQL SQL via double, caller synthetic browser download confirmed, no Docker run |
 | 13/14: PII quality and language boundary | Frozen synthetic fixtures/manifest, deterministic evaluator, focused tests and docs delivered; narrow reviewed EMAIL boundary regression fixed and verified through ASGI and loopback HTTP; reviewed v2 passes EMAIL and MY_PHONE but the MyKad gate still fails, so the overall quality gate remains FAIL; original v1 EMAIL score is annotation-conflicted; caller-review pass is known regression evidence, not unseen/independent; native English guard proof and BM/Chinese semantic support remain open |
 | 15 | Bounded control-plane admission plus the bounded HTTP chat work deadline: partial local hardening delivered (non-queuing shared capacity for readiness/operator reads and export audit; one server-owned 60 s default/300 s max chat response deadline with exact-once slot release, retained worker task references, short test deadlines, cancellation deferred until worker completion or the original deadline); infrastructure bypass and native hard deadlines unverified |
-| 16-20 | Not implemented or accepted |
+| 16-18, 20 | Not implemented or accepted |
+| 19: container pilot packaging | **Partial**: authored multi-stage `guards`/default `server` image, `compose.pilot.yaml` overlay with read-only policy/model binds (`create_host_path: false`), distinct operator secrets, provisional guard resource budget and `/health/ready` healthcheck, plus 16 tests (structural config and mocked-urlopen execution of the embedded probe); no Docker build, `docker compose config`, startup, weight download or native inference evidence |
 
 Tasks 13/14 deliver an authored synthetic evaluation, a narrow reviewed
 privacy regression repair and a documented language boundary, not customer
 acceptance. The current full local suite figure from this worker's run is
-`324 tests run, 322 passed, 2 skipped in 21.847s` (exit 0; final caller
+`340 tests run, 338 passed, 2 skipped in 18.988s` (exit 0; final caller
 confirmation pending), where both skips are the existing optional PostgreSQL
-tests. The earlier 315/313, 312/310, 284/282, 283/281, 271/269, 249/247 and
-226/224 figures are historical.
+tests. The earlier 339/337, 315/313, 312/310, 284/282, 283/281, 271/269, 249/247
+and 226/224 figures are historical.
 The caller-review corpus's post-fix pass is not an accuracy or independent
 hold-out claim. Native inference, independent held-out PII labels, English
 semantic-guard acceptance, BM/Chinese semantic protection, real PostgreSQL

@@ -11,9 +11,12 @@ operator-supplied policy file, locally supplied guard artifacts, the confirmed
 model ID and PostgreSQL audit are configured. There is no demo mode, allow-all
 adapter or environment-selected bypass.
 
-Docker Compose packaging is provided for a gateway + PostgreSQL audit stack.
-**It has not been built or run in this workspace because Docker is not
-installed.** See [Validation limits](#validation-limits).
+Docker Compose packaging is provided for a gateway + PostgreSQL audit stack,
+including an optional guard-enabled pilot overlay (`compose.pilot.yaml`) that
+selects a guard image target and mounts an approved policy plus local model
+artifacts read-only. **No image has been built and no Compose stack has been
+started in this workspace because Docker is not installed.** See
+[Validation limits](#validation-limits).
 
 ## Status
 
@@ -29,7 +32,7 @@ installed.** See [Validation limits](#validation-limits).
 | Real tokenizer / attack guard / output guard | Adapters and server wiring implemented locally; **pretrained weights not run** |
 | PII quality gate (synthetic) | Frozen agent-authored evaluation + deterministic evaluator; reviewed EMAIL terminal-period repair passes six known regression cases; v1 EMAIL fails on 1 frozen false positive and MyKad on 4; **not customer accepted**. See [docs/pii-quality.md](docs/pii-quality.md) |
 | Generation transport | Implemented; not live-verified |
-| Docker image / Compose runtime | **Not built or run here**; Compose does not install guard ML deps or mount weights |
+| Docker image / Compose runtime | Authored, **not built or run here**; default image/stack stays lightweight and safe-unavailable; optional `compose.pilot.yaml` adds the guard image target, policy and local model mounts as configuration scaffolding only |
 | LiteLLM routing | Deferred |
 | TLS ingress | Not present; localhost HTTP only |
 
@@ -190,8 +193,10 @@ CREATE ROLE nasi_lemak_operator LOGIN IN ROLE nasi_lemak_audit_reader;
 
 Write that role's DSN only through `NASI_LEMAK_OPERATOR_AUDIT_DSN_FILE` or an
 approved secret manager. Never reuse the runtime writer DSN, a chat key or a
-default password. The Compose file does not configure the operator feature, so
-the default stack leaves it disabled; no Compose deployment is claimed here.
+default password. The default `compose.yaml` leaves the operator feature
+disabled. The optional `compose.pilot.yaml` overlay supplies a distinct
+operator-key digest secret and a separate reader DSN secret; it still does not
+prove a live PostgreSQL reader deployment.
 
 ## Startup policy
 
@@ -325,9 +330,13 @@ and are not proof that the client received a response. No process isolation,
 thread termination, upstream-call cancellation or native hard deadline is added
 or claimed.
 
-**Compose limitation:** the default `Dockerfile`/`compose.yaml` install only the
-`server` extra and do not mount guard weights. Do not claim container guard
-activation works. A small optional guard-image/mount step is still needed.
+**Compose guard profile:** the default `Dockerfile`/`compose.yaml` install only
+the `server` extra and mount no guard weights, so the default stack remains
+safely unavailable. The optional `compose.pilot.yaml` overlay selects the
+`guards` Dockerfile target and mounts an operator-approved policy plus two local
+model directories read-only. That is configuration scaffolding only: no guard
+image, weight download, native inference, classifier accuracy or warmup has
+been verified here.
 
 ## PII quality evaluation (synthetic)
 
@@ -387,6 +396,173 @@ uvicorn nasi_lemak.server:app --host 0.0.0.0 --port 8000 --workers 1 --no-access
 ```
 
 No reload, debug worker, Docker socket, privileged mode or access log.
+
+The `Dockerfile` is multi-stage. `base` installs the tested `server` extra,
+copies only `pyproject.toml` and `nasi_lemak/`, and then drops to UID/GID 10001.
+`guards-deps` is the only stage that adds the existing pinned `guards` extra and
+temporarily uses root for pip; both `guards` and the final `server` runtime
+stages return to 10001. Because `server` is the last stage, a plain
+`docker build .` and the default `compose.yaml` never install the optional ML
+dependencies. No stage copies model weights; the image and pilot overlay set
+`HF_HUB_OFFLINE=1`, `TRANSFORMERS_OFFLINE=1` and `HF_DATASETS_OFFLINE=1`.
+
+`compose.pilot.yaml` is an opt-in overlay that must be applied together with
+the base file, never alone. It:
+
+- builds the `guards` target;
+- mounts an operator-approved policy at `/run/pilot/policy/policy.yaml`, plus
+  Prompt Guard 2 and Llama Guard 3 directories under `/models/`, all read-only
+  using long bind syntax with `create_host_path: false`; a missing host path
+  aborts instead of being auto-created;
+- sets the matching `NASI_LEMAK_POLICY_FILE`, guard-directory, threshold and
+  context variables. The initial threshold `0.5` and context limit `4096` are
+  explicit provisional values (overridable in the pilot env file) and are not
+  calibrated or benchmarked;
+- adds distinct `operator_key_digest` and `operator_audit_dsn` file secrets for
+  the admin/export reader. The runtime writer keeps the base `audit_dsn`;
+- sets a provisional 8 GiB / 4 CPU / 512 PID budget, separate from the
+  lightweight 512 MiB / 1 CPU default. These limits are not benchmarked, and
+  native adapters are CPU-only in this repository (no GPU claim);
+- adds a standard-library Python healthcheck against the real
+  `/health/ready` endpoint with a finite request timeout and a model-loading
+  start period. The probe uses a 7 s request timeout inside an 8 s Compose
+  healthcheck timeout, so it outlasts the server's 5 s internal readiness
+  deadline while every wait stays finite. It checks structural readiness, not
+  classifier accuracy or native warmup.
+
+### Guard-enabled pilot overlay runbook (Linux)
+
+This procedure was authored but **not executed here**; Docker is absent from
+this workspace. It is not deployment evidence. Use a reviewed commit and a
+Linux host with Docker Engine plus Compose v2 supporting long bind syntax.
+
+1. Clone the repository and enter it. Create two local env files from the
+   samples; the pilot file is additional, not a replacement:
+
+   ```bash
+   git clone <reviewed-remote> ai-guardrails
+   cd ai-guardrails
+   mkdir -p .secrets
+   cp docs/compose.env.example .secrets/compose.env
+   cp docs/compose.pilot.env.example .secrets/compose.pilot.env
+   chmod 600 .secrets/compose.env .secrets/compose.pilot.env
+   ```
+
+   Edit both files locally. Do not add the pilot file's paths to the base file
+   or copy generation/model settings into the pilot file; later `--env-file`
+   entries win and could unexpectedly override them.
+
+2. Create the five secret **files** with an approved secret manager or secure
+   editor: `db_admin_password`, `audit_dsn` (runtime writer), `app_key_digest`,
+   `operator_key_digest` and `operator_audit_dsn`. The operator digest must
+   differ from the application digest, and the reader DSN must differ from the
+   writer DSN. Never put a secret value in a shell command, chat, Git or shell
+   history. The container UID/GID 10001 must be able to read the host secret
+   files; Compose local file secrets are host files, and this project makes no
+   claim that Compose uid/gid/mode remapping works.
+
+3. Start only PostgreSQL from the base stack first, before any heavy guard
+   image build, and wait for its healthcheck:
+
+   ```bash
+   docker compose --env-file .secrets/compose.env up -d db
+   docker compose --env-file .secrets/compose.env ps
+   ```
+
+   The mounted `audit_schema.sql` and `audit_roles.sql` run only on an empty
+   data volume. They create the schema and NOLOGIN group roles, not LOGIN roles
+   or passwords. Never delete a live volume to rerun bootstrap.
+
+4. Provision separate writer and reader LOGIN roles with **interactive**
+   `\password` (never a password on the command line or in history):
+
+   ```bash
+   docker compose --env-file .secrets/compose.env exec db \
+     psql -U <admin-user> -d nasi_lemak
+   ```
+
+   ```sql
+   CREATE ROLE nasi_lemak_gateway LOGIN IN ROLE nasi_lemak_audit_writer;
+   \password nasi_lemak_gateway
+   CREATE ROLE nasi_lemak_operator LOGIN IN ROLE nasi_lemak_audit_reader;
+   \password nasi_lemak_operator
+   ```
+
+   The writer group may insert events and append export-audit metadata; the
+   reader group may select events only and deliberately has no
+   `export_audits` access. Write each role's DSN directly to its local secret
+   file with the approved editor; do not echo it. The administrator DSN is not
+   mounted into the gateway.
+
+5. Prepare the policy and model mounts. Copy an operator-approved versioned
+   policy to a preserved host path and point `PILOT_POLICY_FILE` at it. Obtain
+   license-approved Prompt Guard 2 and Llama Guard 3 artifacts independently,
+   point the two `PILOT_*_MODEL_DIR` variables at their complete directories,
+   and ensure UID/GID 10001 can read and traverse them. Also set the **actual**
+   provider model ID in `NASI_LEMAK_GENERATION_MODEL` in the base env file; it
+   remains blank by default and fails closed. `/v1` is still an assumed
+   OpenAI-compatible prefix. No model download, model license or software
+   license approval is implied by this repository.
+
+6. Render and inspect the overlay configuration. This does not start or build
+   anything:
+
+   ```bash
+   docker compose \
+     --env-file .secrets/compose.env \
+     --env-file .secrets/compose.pilot.env \
+     -f compose.yaml -f compose.pilot.yaml config
+   ```
+
+   Confirm the three read-only mounts, distinct secrets, localhost-only port,
+   private database network and provisional resource limits.
+
+7. Build and start the pilot profile:
+
+   ```bash
+   docker compose \
+     --env-file .secrets/compose.env \
+     --env-file .secrets/compose.pilot.env \
+     -f compose.yaml -f compose.pilot.yaml up -d --build gateway
+   ```
+
+8. Check liveness, readiness and negative cases:
+
+   ```bash
+   curl -fsS http://127.0.0.1:8000/health/live
+   curl -i http://127.0.0.1:8000/health/ready
+   ```
+
+   `200 {"status":"ready"}` means only that the configured structure and audit
+   store passed readiness. It is **not** classifier accuracy, native model
+   warmup or proof of guarded inference. A `503 {"status":"not_ready"}` while
+   policy, model artifacts, audit or the model ID are pending is the expected
+   safe state, not a deployment success. A missing policy/model host path
+   should abort the mount because `create_host_path: false`; it must not be
+   auto-created. When operator configuration is present, `GET /admin` is a
+   public static login page and returns `200` without credentials.
+   `GET /admin/events` and `GET /admin/export.csv` require an
+   `Authorization: Bearer` operator key and return a generic `401` when it is
+   missing or wrong.
+
+9. To update, preserve the previous approved policy under its old path, write a
+   new version to a new path, change `PILOT_POLICY_FILE` and restart the
+   gateway. To roll back, restore the previous env value/path and restart. For
+   an image rollback, rebuild the reviewed commit/tag; no database volume
+   removal is needed for either policy or image rollback.
+
+10. Stop without deleting data:
+
+    ```bash
+    docker compose \
+      --env-file .secrets/compose.env \
+      --env-file .secrets/compose.pilot.env \
+      -f compose.yaml -f compose.pilot.yaml down
+    ```
+
+    Never use `down -v` on a live system. TLS ingress is still required before
+    any remote access; this profile remains localhost-only HTTP. Do not send
+    browser or vendor cloud traffic as part of this pilot setup.
 
 ### Operator runbook
 
@@ -468,13 +644,14 @@ value in chat, shell history, Git or the repository. Use `.secrets/` locally
    ```
 
    With the default Compose file, live is `200` and ready/chat are `503`. That
-   is **intentional safe startup**, not successful guarded inference: the image
-   does not install the optional guard ML dependencies, does not mount local
-   guard model directories, no policy file is mounted or configured, and the
-   upstream model ID is still blank. The PostgreSQL DSN and app digest alone do
-   not make inference ready. A real deployment must add a read-only mount and
-   `NASI_LEMAK_POLICY_FILE` for the operator-approved policy file; that Compose
-   change is not delivered in this slice.
+   is **intentional safe startup**, not successful guarded inference: the
+   default image does not install the optional guard ML dependencies, does not
+   mount local guard model directories, no policy file is mounted or configured,
+   and the upstream model ID is still blank. The PostgreSQL DSN and app digest
+   alone do not make inference ready. The optional `compose.pilot.yaml` overlay
+   and the pilot runbook above add the guard image target, read-only policy/model
+   mounts and distinct operator secrets; that is authored configuration, not a
+   verified deployment.
 
 8. Stop without deleting data:
 
@@ -525,18 +702,28 @@ local ASGI liveness check were run from the existing virtualenv. Image tags are
 conservative version tags (`python:3.12-slim-bookworm`,
 `postgres:16.4-bookworm`); immutable image digests, registry signature
 verification and a full release security review remain pending. No digest was
-invented.
+invented. The optional `compose.pilot.yaml` overlay and the `guards` image
+target it selects are authored but unverified: the overlay has not been resolved
+by `docker compose config`, the guard image has not been built, and no Compose
+stack has been started, so Docker configuration, build and startup remain
+unverified.
 
-The full local suite now reports **324 tests run, 322 passed and 2 skipped**
-(exit 0, 21.847s; worker evidence, caller confirmation pending). The two skips
+The supplied test-host specification — Ubuntu 24.04, x86-64, 8 vCPU, 32 GiB
+RAM, 100 GB SSD — is recorded as provisional sizing information for the
+86M-parameter prompt guard plus 1B-parameter output guard running on CPU with
+remote Qwen generation. It is not a benchmark or capacity claim; nothing was
+executed on that host.
+
+The full local suite now reports **340 tests run, 338 passed and 2 skipped**
+(exit 0, 18.988s; worker evidence, caller confirmation pending). The two skips
 are the existing optional PostgreSQL
 integration tests, skipped honestly because `TEST_AUDIT_DSN` is not set; no
 PostgreSQL round-trip was run and no residual skip was added for the export or
-PII work. Earlier `315 tests run, 313 passed`, `283 tests run, 281 passed`,
-`271 tests run, 269 passed`, `249 tests run, 247 passed` and
-`226 tests run, 224 passed` counts are stale. A SQLite test-helper close race
-that intermittently raised `WinError 32` on Windows was fixed in the helper
-itself.
+PII work. Earlier `339 tests run, 337 passed`, `315 tests run, 313 passed`,
+`283 tests run, 281 passed`, `271 tests run, 269 passed`, `249 tests run, 247
+passed` and `226 tests run, 224 passed` counts are stale. A SQLite test-helper
+close race that intermittently raised `WinError 32` on Windows was fixed in the
+helper itself.
 
 The focused PII span/evaluator suites contain 33 tests; the assembled ASGI
 enforcement suite has 7. New regressions cover an email at EOF with a period,
