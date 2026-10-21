@@ -21,6 +21,36 @@ must continue to show that warning, and upstream generation uses the
 provider's HTTP API; guard adapters for that API are not implemented yet.
 Existing bearer authentication is preserved unchanged.
 
+## Updating an existing deployment
+
+Use this page in two different situations:
+
+- **UI-only update where nginx is already configured.** Do not rerun the
+  installer and do not recreate `.secrets/compose.demo.env`. Use the checkout
+  path already running on the VM, pull the reviewed commit, then rebuild only
+  the two changed services with the existing env files:
+  ```bash
+  cd /path/to/existing/ai-guardrails   # the checkout already running on this VM
+  git pull --ff-only
+
+  sudo docker compose \
+    --env-file .secrets/compose.env \
+    --env-file .secrets/compose.test.env \
+    --env-file .secrets/compose.demo.env \
+    -f compose.yaml -f compose.test.yaml -f compose.demo.yaml \
+    up -d --no-deps --build gateway nginx
+  ```
+  The database must already be running and healthy; verify it with the `ps db`
+  command in section 4 first. `--no-deps` keeps `db` out of the operation.
+- **First-time ingress setup, including an older deployment that only has the
+  loopback gateway.** Follow the full setup below, starting at section 1. An
+  older deployment without ingress has no `.secrets/compose.demo.env` yet, so
+  section 2's one-time creation step is required.
+
+A UI-only update does not change the existing policy, secrets, database volume,
+authentication or guard configuration. The installer is not involved: the
+image is built from the pulled checkout, which already packages the page module.
+
 ## What the ingress does
 
 - Browser request: `http://VM_LAN_IP:8080/<path>?<query>`.
@@ -62,6 +92,10 @@ chat deadline is 60 s. If an operator customises the gateway chat deadline above
 
 ## 1. Update the existing checkout (do not rerun the installer)
 
+This section applies to a **first-time ingress setup**, including an existing
+loopback-only deployment. If nginx is already configured, use the shorter
+repeat-update command in "Updating an existing deployment" instead.
+
 ```bash
 cd /path/to/existing/ai-guardrails   # replace with this VM's actual checkout path
 git pull --ff-only
@@ -77,10 +111,20 @@ remaining commands from that directory.
 The installer must not be rerun for this slice. Pulling the reviewed commit
 does not change the existing policy, secrets or database volume.
 
-## 2. Create the git-ignored ingress env file
+## 2. Create the git-ignored ingress env file (one time only)
 
-The file `.secrets/` is ignored by Git. Create
-`.secrets/compose.demo.env` as root, mode `0600`, with exactly these two lines
+This section is only for a deployment that does not have the ingress env file
+yet. **If `.secrets/compose.demo.env` already exists, do not run the creation
+command below**: `install` with `/dev/null` empties the existing file and would
+destroy the configured `DEMO_BIND_IP`. Check first and, if it exists, skip to
+section 3. Edit it only when the bind address deliberately changes:
+
+```bash
+sudo test -f .secrets/compose.demo.env && echo "already present - do not recreate"
+```
+
+For a new configuration, create `.secrets/compose.demo.env` as root, mode
+`0600`, with exactly these two lines
 (replace `VM_LAN_IP` with this VM's actual LAN or VPN address; do not commit it):
 
 ```dotenv

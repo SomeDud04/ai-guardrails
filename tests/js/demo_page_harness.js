@@ -86,6 +86,9 @@ function makeElement(id) {
 
 function createApp() {
   const ids = [
+    "app",
+    "sidebar-toggle",
+    "new-chat",
     "chat-key",
     "key-form",
     "load-key",
@@ -94,12 +97,16 @@ function createApp() {
     "prompt-form",
     "send",
     "clear",
+    "empty-state",
+    "exchange",
+    "last-prompt",
     "response",
     "status",
     "key-state",
     "mode-value",
     "readiness-value",
     "guards-value",
+    "topbar-guards",
     "test-banner",
     "refresh-status",
   ];
@@ -252,6 +259,10 @@ async function healthLabelsAndTestModeAreVisible() {
   assert(app.elements["mode-value"].textContent === "test", "actual mode is shown");
   assert(app.elements["readiness-value"].textContent === "ready", "readiness is shown");
   assert(app.elements["guards-value"].textContent === "inactive", "inactive guards are shown");
+  assert(
+    app.elements["topbar-guards"].textContent === "Guards inactive",
+    "the compact top bar mirrors inactive guards"
+  );
   assert(app.elements["test-banner"].hidden === false, "test-mode banner is visible");
   assert(
     app.elements["test-banner"].textContent.indexOf(
@@ -286,6 +297,7 @@ async function unreadyHealthIsReportedTruthfully() {
   assert(broken.elements["mode-value"].textContent === "unknown", "non-JSON mode is unknown");
   assert(broken.elements["readiness-value"].textContent === "unknown", "non-JSON readiness is unknown");
   assert(broken.elements["guards-value"].textContent === "unknown", "unknown guards are not claimed active");
+  assert(broken.elements["topbar-guards"].textContent === "Guards unknown", "unknown guards stay unknown in the top bar");
 }
 
 async function healthRefreshIsBoundedAndOrdered() {
@@ -303,6 +315,7 @@ async function healthRefreshIsBoundedAndOrdered() {
   assert(app.elements["mode-value"].textContent === "guarded", "current health mode is applied");
   assert(app.elements["readiness-value"].textContent === "ready", "current readiness is applied");
   assert(app.elements["guards-value"].textContent === "active", "current active guards are applied");
+  assert(app.elements["topbar-guards"].textContent === "Guards active", "the top bar follows active guards");
   assert(app.elements["test-banner"].hidden === true, "valid active status clears the stale warning");
 
   first.respond({ status: "not_ready", mode: "test", guards_active: false }, 503);
@@ -407,6 +420,8 @@ async function keyLoadClearsInputAndClaimsNoAuthentication() {
       app.elements["status"].textContent.indexOf("verified") < 0,
     "no verification claim is made before chat"
   );
+  assert(app.elements["app"]["data-nav"] === "closed", "loading a key closes the sidebar");
+  assert(app.elements["prompt"].focused === 1, "loading a key moves focus to the composer");
 }
 
 async function requestIsStrictSameOriginPayload() {
@@ -415,6 +430,13 @@ async function requestIsStrictSameOriginPayload() {
   app.elements["prompt"].value = "Hello synthetic customer demo";
   app.elements["prompt-form"].dispatch("submit");
   assert(app.calls.length === 2, "one submit starts exactly one chat request");
+  assert(app.elements["exchange"].hidden === false, "the last exchange becomes visible");
+  assert(app.elements["empty-state"].hidden === true, "the empty state yields to the exchange");
+  assert(
+    app.elements["last-prompt"].textContent === "Hello synthetic customer demo",
+    "the submitted prompt is shown as the last user turn"
+  );
+  assert(app.elements["exchange"]["data-state"] === "pending", "the exchange marks the pending request");
   const call = app.calls[1];
   assert(call.url === "/v1/chat/completions", "chat path is fixed with no query string");
   assert(call.url.indexOf("demo-chat-key") < 0, "key never appears in the URL");
@@ -450,6 +472,7 @@ async function requestIsStrictSameOriginPayload() {
   await flush();
   assert(app.elements["response"].textContent === "Synthetic answer", "response text is shown");
   assert(app.elements["status"].textContent === "Response received.", "success status is truthful");
+  assert(app.elements["exchange"]["data-state"] === "done", "the exchange marks a completed reply");
   assert(
     app.elements["key-state"].textContent === "Chat key accepted in this tab.",
     "successful chat updates the key state without a broader claim"
@@ -492,6 +515,7 @@ async function responseAndErrorStringsStayPlainText() {
 async function unauthorizedClearsBadKey() {
   const app = await readyApp();
   loadKey(app, "bad-key");
+  assert(app.elements["app"]["data-nav"] === "closed", "loading a key leaves the sidebar closed");
   app.elements["prompt"].value = "Hello";
   app.elements["prompt-form"].dispatch("submit");
   app.calls[1].respond({ error: { code: "UNAUTHORIZED" } }, 401);
@@ -502,9 +526,14 @@ async function unauthorizedClearsBadKey() {
     app.elements["status"].textContent.indexOf("chat key was cleared") >= 0,
     "401 explains that the key was cleared"
   );
+  assert(app.elements["app"]["data-nav"] === "open", "401 reveals the sidebar so the key field is visible");
+  assert(app.elements["chat-key"].focused === 1, "401 moves focus to the revealed key field");
   const before = app.calls.length;
   app.elements["prompt-form"].dispatch("submit");
   assert(app.calls.length === before, "cleared key cannot send another request");
+  loadKey(app, "fresh-key");
+  assert(app.elements["app"]["data-nav"] === "closed", "loading a replacement key closes the sidebar");
+  assert(app.elements["prompt"].focused >= 1, "loading a replacement key returns focus to the composer");
 }
 
 async function blockedAndUnavailableAreHandledWithoutRawErrors() {
@@ -553,8 +582,24 @@ async function emptyInputsNeverDispatch() {
   noKey.elements["prompt-form"].dispatch("submit");
   assert(noKey.calls.length === 1, "missing key sends nothing");
   assert(noKey.elements["status"].textContent === "Load a chat key first.", "missing key is explained");
+  assert(
+    noKey.elements["app"]["data-nav"] === "open",
+    "missing key reveals the sidebar so the key field is visible"
+  );
+  assert(noKey.elements["chat-key"].focused === 1, "missing key moves focus to the revealed key field");
 
   loadKey(noKey, "demo-chat-key");
+  assert(noKey.elements["app"]["data-nav"] === "closed", "loading the key closes the revealed sidebar");
+  assert(noKey.elements["prompt"].focused === 1, "loading the key moves focus back to the composer");
+
+  noKey.elements["chat-key"].value = "";
+  noKey.elements["key-form"].dispatch("submit");
+  assert(
+    noKey.elements["app"]["data-nav"] === "open",
+    "an empty key submission keeps the sidebar open for correction"
+  );
+  assert(noKey.elements["chat-key"].focused === 2, "an empty key submission focuses the key field");
+
   noKey.elements["prompt"].value = "   ";
   noKey.elements["prompt-form"].dispatch("submit");
   assert(noKey.calls.length === 1, "empty prompt sends nothing");
@@ -585,11 +630,19 @@ async function forgetAndClearInvalidateLateReplies() {
   forgotten.calls[2].respond(completion("should not appear"));
   await flush();
   assert(forgotten.elements["response"].textContent === "", "late reply cannot repopulate after forget");
+  assert(forgotten.elements["last-prompt"].textContent === "", "forget clears the last user turn");
+  assert(forgotten.elements["exchange"].hidden === true, "forget hides the transcript");
+  assert(forgotten.elements["empty-state"].hidden === false, "forget returns to the empty state");
   assert(
-    forgotten.elements["status"].textContent === "Chat key forgotten. Prompt and response cleared.",
+    forgotten.elements["status"].textContent === "Chat key forgotten. Conversation cleared.",
     "forget status survives"
   );
   assert(forgotten.elements["send"].disabled === false, "forget unlocks send");
+  assert(
+    forgotten.elements["app"]["data-nav"] === "open",
+    "forget reveals the sidebar so the key field is visible"
+  );
+  assert(forgotten.elements["chat-key"].focused === 1, "forget moves focus to the revealed key field");
 
   const cleared = await readyApp();
   loadKey(cleared, "demo-chat-key");
@@ -603,7 +656,63 @@ async function forgetAndClearInvalidateLateReplies() {
   await flush();
   assert(cleared.elements["prompt"].value === "", "clear empties the prompt");
   assert(cleared.elements["response"].textContent === "", "stale reply stays cleared");
-  assert(cleared.elements["status"].textContent === "Prompt and response cleared.", "clear status survives");
+  assert(cleared.elements["last-prompt"].textContent === "", "clear removes the last user turn");
+  assert(cleared.elements["exchange"].hidden === true, "clear hides the transcript");
+  assert(cleared.elements["status"].textContent === "Conversation cleared.", "clear status survives");
+}
+
+async function newChatClearsTranscriptAndInvalidatesReply() {
+  const app = await readyApp();
+  loadKey(app, "demo-chat-key");
+  app.elements["prompt"].value = "First prompt";
+  app.elements["prompt-form"].dispatch("submit");
+  app.calls[1].respond(completion("First answer"));
+  await flush();
+  app.elements["prompt"].value = "Pending prompt";
+  app.elements["prompt-form"].dispatch("submit");
+  app.elements["sidebar-toggle"].dispatch("click");
+  assert(app.elements["app"]["data-nav"] === "open", "new chat starts from an open sidebar");
+  app.elements["new-chat"].dispatch("click");
+  assert(app.elements["app"]["data-nav"] === "closed", "new chat closes the sidebar before focusing the composer");
+  assert(app.elements["prompt"].focused >= 1, "new chat returns focus to the composer");
+  assert(app.calls[2].aborted === true, "new chat aborts an in-flight request");
+  assert(app.elements["last-prompt"].textContent === "", "new chat clears the user turn");
+  assert(app.elements["response"].textContent === "", "new chat clears the response");
+  assert(app.elements["prompt"].value === "", "new chat clears the composer");
+  assert(app.elements["exchange"].hidden === true, "new chat hides the transcript");
+  assert(app.elements["empty-state"].hidden === false, "new chat restores the empty state");
+  assert(
+    app.elements["key-state"].textContent === "Chat key accepted in this tab.",
+    "new chat keeps the loaded key"
+  );
+  app.calls[2].respond(completion("late answer"));
+  await flush();
+  assert(app.elements["response"].textContent === "", "late reply cannot repopulate a new chat");
+  assert(
+    app.elements["status"].textContent === "Conversation cleared.",
+    "new chat reports that the conversation was cleared"
+  );
+}
+
+async function sidebarToggleIsKeyboardOperableState() {
+  const app = await readyApp();
+  assert(app.elements["app"]["data-nav"] === "closed", "sidebar starts collapsed for narrow screens");
+  assert(
+    app.elements["sidebar-toggle"]["aria-expanded"] === "false",
+    "toggle starts with aria-expanded=false"
+  );
+  app.elements["sidebar-toggle"].dispatch("click");
+  assert(app.elements["app"]["data-nav"] === "open", "toggle opens the sidebar");
+  assert(
+    app.elements["sidebar-toggle"]["aria-expanded"] === "true",
+    "toggle updates aria-expanded when open"
+  );
+  app.elements["sidebar-toggle"].dispatch("click");
+  assert(app.elements["app"]["data-nav"] === "closed", "toggle closes the sidebar");
+  assert(
+    app.elements["sidebar-toggle"]["aria-expanded"] === "false",
+    "toggle updates aria-expanded when closed"
+  );
 }
 
 async function pagehideClearsSensitiveState() {
@@ -616,6 +725,8 @@ async function pagehideClearsSensitiveState() {
   assert(app.elements["chat-key"].value === "", "pagehide clears the key field");
   assert(app.elements["key-state"].textContent === "No key loaded.", "pagehide clears key state");
   assert(app.elements["prompt"].value === "", "pagehide clears the prompt");
+  assert(app.elements["last-prompt"].textContent === "", "pagehide clears the last user turn");
+  assert(app.elements["exchange"].hidden === true, "pagehide hides the transcript");
   app.calls[1].respond({
     choices: [{ finish_reason: "stop", message: { role: "assistant", content: "stale" } }],
   });
@@ -660,6 +771,8 @@ async function main() {
     ["403 and 503 handling", blockedAndUnavailableAreHandledWithoutRawErrors],
     ["empty inputs never dispatch", emptyInputsNeverDispatch],
     ["forget and clear invalidate replies", forgetAndClearInvalidateLateReplies],
+    ["new chat clears the transcript", newChatClearsTranscriptAndInvalidatesReply],
+    ["sidebar toggle state", sidebarToggleIsKeyboardOperableState],
     ["pagehide clears sensitive state", pagehideClearsSensitiveState],
     ["finite timeout aborts", finiteTimeoutAbortsAndUnlocks],
   ];

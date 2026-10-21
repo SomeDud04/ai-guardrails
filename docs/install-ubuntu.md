@@ -8,6 +8,41 @@ Ubuntu 24.04 amd64 VM. It does not install or replace the operating system.
 > Ubuntu, Docker or native guard checkpoints in this workspace. Treat the steps
 > as reviewed instructions pending VM acceptance, not as deployment evidence.
 
+## Fresh install or existing deployment?
+
+Decide which path applies before running any mutating command:
+
+- **Fresh install:** the repository and Compose stack are not on this VM yet.
+  Continue with sections 1-3. Section 3 is the only path that runs `install.sh`.
+- **Existing deployment:** a checkout and stack already run on this VM, and you
+  are updating the application code (including a UI-only change). **Do not
+  rerun `install.sh`**: a rerun rewrites the operator-owned policy and
+  configuration. Pull the reviewed commit in the existing checkout and rebuild
+  the image instead:
+  ```bash
+  cd /path/to/existing/ai-guardrails   # the checkout already running on this VM
+  git pull --ff-only
+  ```
+  For a test-mode stack with the optional nginx ingress already configured, use
+  the exact repeat-update command in
+  [docs/demo-access.md](demo-access.md#updating-an-existing-deployment):
+  ```bash
+  sudo docker compose \
+    --env-file .secrets/compose.env \
+    --env-file .secrets/compose.test.env \
+    --env-file .secrets/compose.demo.env \
+    -f compose.yaml -f compose.test.yaml -f compose.demo.yaml \
+    up -d --no-deps --build gateway nginx
+  ```
+  If the stack is loopback-only, run the same `up -d --no-deps --build gateway`
+  pattern with only the two env files and two Compose files from section 5.
+  Neither path recreates the database, truncates `.secrets`, or changes policy.
+
+The UI is part of the application package copied into the image, so no
+installer flag, migration helper or extra mutation step is needed for this
+change. The installer itself is unchanged. Existing deployments keep their
+current mode, policy, guard configuration, authentication and secrets.
+
 ## Prerequisites
 
 - Ubuntu 24.04 amd64 with an existing OS installation.
@@ -173,9 +208,12 @@ intend to recreate containers.
 
 ## 6. Rerunning and guard activation
 
-The installer reuses the generated manifest, `.secrets` keys and the named
-database volume. A rerun still requires the upstream URL and exact model ID to
-be supplied again; saved generation values are not used as defaults.
+Rerun `install.sh` only to change deployment configuration, not to pick up a
+normal application or UI update; use "Fresh install or existing deployment?"
+above for the latter. The installer reuses the generated manifest, `.secrets`
+keys and the named database volume. A rerun still requires the upstream URL and
+exact model ID to be supplied again; saved generation values are not used as
+defaults.
 
 To activate the guard overlay, rerun interactively with absolute paths to
 operator-provided artifacts:

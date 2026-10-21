@@ -80,30 +80,63 @@ class DemoPageTests(unittest.TestCase):
     def test_guarded_but_unready_page_does_not_claim_guard_protection(self) -> None:
         html = self._client("guarded").get("/").text
         self.assertIn("Guards are not active", html)
-        self.assertNotIn('<p id="test-banner" class="warning" role="note">Test mode', html)
+        self.assertNotIn(
+            '<div id="test-banner" class="banner" role="note">Test mode', html
+        )
         self.assertIn(">guarded<", html)
 
-    def test_page_has_prompt_workspace_status_and_separate_admin_link(self) -> None:
+    def test_page_has_chat_shell_controls_status_and_separate_admin_link(self) -> None:
         html = self._client().get("/").text
+        # Compact sidebar with product title, new chat, key controls and status.
+        self.assertIn('class="sidebar"', html)
+        self.assertIn("<h1>Nasi Lemak</h1>", html)
+        self.assertIn('id="new-chat"', html)
         self.assertIn('id="chat-key"', html)
         self.assertIn('type="password"', html)
+        self.assertIn('autocomplete="off"', html)
+        self.assertIn('id="key-state"', html)
+        self.assertIn('id="mode-value"', html)
+        self.assertIn('id="readiness-value"', html)
+        self.assertIn('id="guards-value"', html)
+        self.assertIn('href="/admin"', html)
+        # Spacious conversation leading to a bottom composer.
+        self.assertIn('id="empty-state"', html)
+        self.assertIn('id="exchange"', html)
+        self.assertIn('id="last-prompt"', html)
         self.assertIn('id="prompt"', html)
         self.assertIn('id="response"', html)
         self.assertIn('id="status"', html)
-        self.assertIn(
-            "Try a prompt, inspect the response, and review policy decisions in the audit view.",
-            html,
-        )
+        self.assertIn('id="send"', html)
+        self.assertIn('id="clear"', html)
+        self.assertIn("Ask the gateway something", html)
+        self.assertIn("Responses come from the configured model and may be inaccurate.", html)
         self.assertIn("The key stays in this tab's memory", html)
         self.assertIn("uses a separate operator key", html)
-        self.assertIn("Keyboard: Ctrl/Command + Enter sends.", html)
-        self.assertIn("Responses come from the configured model and may be inaccurate.", html)
-        self.assertIn('href="/admin"', html)
+        self.assertIn("Ctrl/Command + Enter sends.", html)
+        self.assertIn("Each prompt is sent independently", html)
         self.assertNotIn("API-only deployment", html)
         self.assertNotIn("Model alias", html)
         self.assertNotIn("Not verified", html)
         self.assertNotIn("demo-page-chat-key", html)
         self.assertNotIn("innerHTML", html)
+
+    def test_responsive_shell_has_keyboard_sidebar_control_and_no_remote_assets(self) -> None:
+        html = self._client().get("/").text
+        self.assertIn('id="sidebar-toggle"', html)
+        self.assertIn('aria-controls="sidebar"', html)
+        self.assertIn('aria-expanded="false"', html)
+        self.assertIn("@media (max-width: 820px)", html)
+        self.assertIn("color-scheme: dark", html)
+        self.assertIn("system-ui", html)
+        self.assertIn("focus-visible", html)
+        # The shell is self-authored: no remote fonts, CDNs, frameworks or
+        # inline event handlers that would weaken the hash-based CSP.
+        self.assertNotIn("http://", html)
+        self.assertNotIn("https://", html)
+        self.assertNotIn("<link", html)
+        self.assertNotIn("onclick=", html)
+        self.assertNotIn("onload=", html)
+        self.assertNotIn("@import", html)
 
     def test_root_wrong_method_and_unknown_routes_remain_strict(self) -> None:
         client = self._client()

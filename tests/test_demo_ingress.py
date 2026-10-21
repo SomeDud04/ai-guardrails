@@ -23,6 +23,7 @@ ROOT = Path(__file__).resolve().parents[1]
 DEMO = ROOT / "compose.demo.yaml"
 NGINX = ROOT / "deploy" / "nginx-demo.conf"
 DOC = ROOT / "docs" / "demo-access.md"
+INSTALL_DOC = ROOT / "docs" / "install-ubuntu.md"
 
 
 def _load(name: str):
@@ -267,6 +268,38 @@ class DemoDocumentationTests(unittest.TestCase):
         lower = self.text.lower()
         self.assertIn("database", lower)
         self.assertIn("prerequisite", lower)
+
+    def test_repeat_update_never_recreates_the_existing_env_file(self):
+        lower = self.text.lower()
+        self.assertIn("updating an existing deployment", lower)
+        self.assertIn("already configured", lower)
+        self.assertIn("do not rerun", lower)
+        self.assertIn("already exists", lower)
+        self.assertIn("do not run the creation", lower)
+        self.assertIn("skip to", lower)
+        self.assertIn(".secrets/compose.demo.env", self.text)
+
+
+class InstallDocumentationTests(unittest.TestCase):
+    @classmethod
+    def setUpClass(cls):
+        cls.text = INSTALL_DOC.read_text(encoding="utf-8")
+        cls.lower = cls.text.lower()
+
+    def test_fresh_install_and_existing_deployment_are_distinct(self):
+        self.assertIn("Fresh install or existing deployment", self.text)
+        self.assertIn("Fresh install", self.text)
+        self.assertIn("Existing deployment", self.text)
+        self.assertIn("Do not\n  rerun `install.sh`", self.text)
+        self.assertIn("git pull --ff-only", self.text)
+
+    def test_ui_update_reuses_existing_secrets_and_policy_without_installer(self):
+        self.assertIn("installer itself is unchanged", self.text)
+        self.assertIn("policy", self.lower)
+        self.assertIn("secrets", self.lower)
+        self.assertIn("up -d --no-deps --build gateway nginx", self.text)
+        self.assertIn("demo-access.md#updating-an-existing-deployment", self.text)
+        self.assertIn("no\ninstaller flag", self.text)
 
 
 if __name__ == "__main__":
