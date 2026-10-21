@@ -497,6 +497,32 @@ def _csp_hash(text: str) -> str:
     return "'sha256-" + base64.b64encode(digest).decode("ascii") + "'"
 
 
+_MODE_BANNER_MARKER = "<!-- MODE_BANNER -->"
+
+
+def admin_html(*, mode: str, guards_active: bool) -> str:
+    """Return the static operator HTML with a server-controlled mode banner.
+
+    The banner is plain body text and introduces no new inline script or style,
+    so the existing hash-based CSP is unchanged.
+    """
+    if mode == "test":
+        banner = (
+            '<p class="status" data-kind="error">'
+            "Test mode: LLM guards are inactive. This runtime is not protected by native guard classifiers."
+            "</p>"
+        )
+    elif not guards_active:
+        banner = (
+            '<p class="status" data-kind="error">'
+            "Guards are not active. Chat is unavailable until guard configuration is valid."
+            "</p>"
+        )
+    else:
+        banner = ""
+    return ADMIN_HTML.replace(_MODE_BANNER_MARKER, banner, 1)
+
+
 ADMIN_HTML = f"""<!doctype html>
 <html lang="en">
 <head>
@@ -508,6 +534,7 @@ ADMIN_HTML = f"""<!doctype html>
 <body>
 <main class="wrap">
 <h1>Nasi Lemak operator events</h1>
+{_MODE_BANNER_MARKER}
 <p>Read-only audit events for the active application. This page contains no event data until you authenticate.</p>
 <p class="hint">The operator token stays in this tab's JavaScript memory. It is not stored, put in the address bar, or kept in a cookie.</p>
 

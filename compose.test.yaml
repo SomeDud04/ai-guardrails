@@ -1,0 +1,52 @@
+# Optional test-mode overlay for compose.yaml.
+#
+# This overlay selects the lightweight server image (no ML guard dependencies),
+# mounts one operator-approved policy file, adds distinct operator secrets and
+# explicitly enables test mode. In test mode the native guard classifiers are
+# inactive and the server uses the real generation client with a conservative
+# byte budget. It is not a guarded pilot and must not be used as one.
+#
+# Always apply it ON TOP of the default stack (never alone):
+#
+#   docker compose \
+#     --env-file .secrets/compose.env \
+#     --env-file .secrets/compose.test.env \
+#     -f compose.yaml -f compose.test.yaml config
+#
+# See docs/compose.test.env.example. The installer can generate the required
+# secrets, policy file and env file.
+
+services:
+  gateway:
+    build:
+      context: .
+      dockerfile: Dockerfile
+      # Lightweight server target; no optional guard ML dependencies.
+      target: server
+    image: nasi-lemak-gateway:0.1.0
+    environment:
+      # Explicit test mode with the required operator acknowledgement.
+      NASI_LEMAK_MODE: test
+      NASI_LEMAK_ALLOW_UNGUARDED_TEST: "true"
+      NASI_LEMAK_POLICY_FILE: /run/pilot/policy/policy.yaml
+      # Distinct operator credentials. The runtime writer keeps the base
+      # file's existing NASI_LEMAK_AUDIT_DSN_FILE/audit_dsn secret.
+      NASI_LEMAK_OPERATOR_KEY_DIGEST_FILE: /run/secrets/operator_key_digest
+      NASI_LEMAK_OPERATOR_AUDIT_DSN_FILE: /run/secrets/operator_audit_dsn
+    volumes:
+      - type: bind
+        source: ${TEST_POLICY_FILE:?Set TEST_POLICY_FILE to an approved policy-file path}
+        target: /run/pilot/policy/policy.yaml
+        read_only: true
+        bind:
+          create_host_path: false
+    secrets:
+      - operator_key_digest
+      - operator_audit_dsn
+    # Keep the base file's lightweight resource profile.
+
+secrets:
+  operator_key_digest:
+    file: ${OPERATOR_KEY_DIGEST_FILE:?Set OPERATOR_KEY_DIGEST_FILE to an absolute secret-file path}
+  operator_audit_dsn:
+    file: ${OPERATOR_AUDIT_DSN_FILE:?Set OPERATOR_AUDIT_DSN_FILE to an absolute secret-file path}

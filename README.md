@@ -388,6 +388,10 @@ provide a two-service stack:
 - PostgreSQL is attached only to an **internal** network. The gateway is also
   on the default bridge so it can reach the external model endpoint.
 
+For the step-by-step installer procedure on an existing Ubuntu 24.04 amd64 VM,
+including test-mode setup, admin access and guard activation, see
+[docs/install-ubuntu.md](docs/install-ubuntu.md).
+
 The image copies only `pyproject.toml` and `nasi_lemak/`; it installs the
 `server` extra, packages the `.sql` bootstrap files, and runs:
 

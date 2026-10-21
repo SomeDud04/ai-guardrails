@@ -34,7 +34,7 @@ from fastapi.exceptions import RequestValidationError
 from fastapi.responses import HTMLResponse, JSONResponse, Response
 from starlette.exceptions import HTTPException as StarletteHTTPException
 
-from .admin_page import ADMIN_HTML, ADMIN_SECURITY_HEADERS
+from .admin_page import ADMIN_SECURITY_HEADERS, admin_html
 from .audit import PostgresAuditStore, UnreadyAuditStore
 from .export import (
     EXPORT_FILENAME,
@@ -46,6 +46,7 @@ from .export import (
     utc_iso,
 )
 from .gateway import Gateway, Policy
+from .generation import RealGatewayAdapters, TestGatewayAdapters
 from .operator import (
     OperatorQueryError,
     PostgresAuditReader,
@@ -99,6 +100,11 @@ ENV_LLAMA_GUARD_CONTEXT_LIMIT = "NASI_LEMAK_LLAMA_GUARD_CONTEXT_LIMIT"
 ENV_POLICY_FILE = "NASI_LEMAK_POLICY_FILE"
 ENV_OPERATOR_KEY_DIGEST = "NASI_LEMAK_OPERATOR_KEY_DIGEST"
 ENV_OPERATOR_AUDIT_DSN = "NASI_LEMAK_OPERATOR_AUDIT_DSN"
+
+ENV_MODE = "NASI_LEMAK_MODE"
+ENV_ALLOW_UNGUARDED_TEST = "NASI_LEMAK_ALLOW_UNGUARDED_TEST"
+MODE_GUARDED = "guarded"
+MODE_TEST = "test"
 
 OPERATOR_DISABLED = "disabled"
 OPERATOR_READY = "ready"
@@ -323,6 +329,15 @@ def _load_generation_client(config: Any) -> Any:
     return GenerationClient(config)
 
 
+def _mode_from_env(env: dict[str, str]) -> str:
+    mode = env.get(ENV_MODE, MODE_GUARDED).strip().lower()
+    return mode if mode in (MODE_GUARDED, MODE_TEST) else ""
+
+
+def _test_acknowledged(env: dict[str, str]) -> bool:
+    return env.get(ENV_ALLOW_UNGUARDED_TEST, "").strip().lower() == "true"
+
+
 def make_adapters_from_env(
     environ: dict[str, str] | None = None,
     *,
@@ -342,43 +357,75 @@ def make_adapters_from_env(
 
     Required settings:
 
-    * ``NASI_LEMAK_GENERATION_URL`` and ``NASI_LEMAK_GENERATION_MODEL`` (plus
-      the existing auth settings; ``NASI_LEMAK_GENERATION_AUTH=none`` needs no
-      key).
-    * ``NASI_LEMAK_PROMPT_GUARD_MODEL_DIR``: existing local directory.
-    * ``NASI_LEMAK_LLAMA_GUARD_MODEL_DIR``: existing local directory.
-    * ``NASI_LEMAK_PROMPT_GUARD_THRESHOLD``: finite number in ``[0, 1]``.
-    * ``NASI_LEMAK_LLAMA_GUARD_CONTEXT_LIMIT``: integer of at least 33.
+    * ``NASI_LEMAK_MODE``: ``guarded`` (default) or ``test``.
+    * For ``test``: explicit ``NASI_LEMAK_ALLOW_UNGUARDED_TEST=true`` plus a
+      valid generation configuration.
+    * For ``guarded``: ``NASI_LEMAK_GENERATION_URL`` and
+      ``NASI_LEMAK_GENERATION_MODEL`` (plus the existing auth settings),
+      ``NASI_LEMAK_PROMPT_GUARD_MODEL_DIR``, ``NASI_LEMAK_LLAMA_GUARD_MODEL_DIR``,
+      ``NASI_LEMAK_PROMPT_GUARD_THRESHOLD`` and
+      ``NASI_LEMAK_LLAMA_GUARD_CONTEXT_LIMIT``.
     """
     env = os.environ if environ is None else environ
+    mode = _mode_from_env(env)
+    if mode == "":
+        return None
+
+    # Cheap admission checks run before any model/client loader is invoked.
+    # A missing test acknowledgement or invalid generation configuration must
+    # never touch disk- or network-backed loaders (including optional ML deps).
+    if mode == MODE_TEST and not _test_acknowledged(env):
+        return None
+
     try:
-        # Validate every cheap setting before any expensive model load. The
-        # generation settings come first, then guard paths/threshold/window.
-        from .generation import GenerationConfig, RealGatewayAdapters
+        from .generation import GenerationConfig
 
         config = GenerationConfig.from_env(env)
         if not config.model:
             raise ValueError("generation model is required")
-        prompt_dir = _existing_guard_directory(
-            _required_guard_setting(env, ENV_PROMPT_GUARD_MODEL_DIR)
-        )
-        llama_dir = _existing_guard_directory(
-            _required_guard_setting(env, ENV_LLAMA_GUARD_MODEL_DIR)
-        )
-        threshold = _guard_threshold(
-            _required_guard_setting(env, ENV_PROMPT_GUARD_THRESHOLD)
-        )
-        context_limit = _guard_context_limit(
-            _required_guard_setting(env, ENV_LLAMA_GUARD_CONTEXT_LIMIT)
-        )
+    except Exception:
+        return None
+
+    prompt_dir: str | None = None
+    llama_dir: str | None = None
+    threshold: float | None = None
+    context_limit: int | None = None
+    if mode == MODE_GUARDED:
+        # Guarded mode: every local artifact and setting is mandatory, and all
+        # of them are validated before either guard/model loader runs.
+        try:
+            prompt_dir = _existing_guard_directory(
+                _required_guard_setting(env, ENV_PROMPT_GUARD_MODEL_DIR)
+            )
+            llama_dir = _existing_guard_directory(
+                _required_guard_setting(env, ENV_LLAMA_GUARD_MODEL_DIR)
+            )
+            threshold = _guard_threshold(
+                _required_guard_setting(env, ENV_PROMPT_GUARD_THRESHOLD)
+            )
+            context_limit = _guard_context_limit(
+                _required_guard_setting(env, ENV_LLAMA_GUARD_CONTEXT_LIMIT)
+            )
+        except Exception:
+            return None
+
+    generation_loader = client_loader or _load_generation_client
+    try:
+        client = generation_loader(config)
+    except Exception:
+        return None
+
+    if mode == MODE_TEST:
+        try:
+            return TestGatewayAdapters(client)
+        except Exception:
+            return None
+
+    try:
         prompt_loader = prompt_guard_loader or _load_prompt_guard
         llama_loader = llama_guard_loader or _load_llama_guard
-        generation_loader = client_loader or _load_generation_client
         prompt_guard = prompt_loader(prompt_dir, threshold=threshold)
         llama_guard = llama_loader(llama_dir, context_limit=context_limit)
-        client = generation_loader(config)
-        # One real PromptGuard2 object serves both tokenizer and attack guard,
-        # so the budget and classifier window use the identical tokenizer.
         return RealGatewayAdapters(
             client,
             tokenizer=prompt_guard,
@@ -784,7 +831,11 @@ def make_app(
             policy,
             app_id,
         )
-    config_ready = config_ready and numeric_ok
+    # An unknown mode is never treated as guarded or test. It keeps the app
+    # live but not ready, and the header/admin surface must not imply either
+    # supported safety posture.
+    valid_mode = _mode_from_env(env)
+    config_ready = config_ready and numeric_ok and valid_mode != ""
 
     operator_state = _resolve_operator(
         env,
@@ -825,6 +876,12 @@ def make_app(
             except Exception:
                 pass
 
+    configured_mode = valid_mode or "invalid"
+    guards_active = (
+        isinstance(getattr(runtime_gateway, "adapters", None), RealGatewayAdapters)
+        and configured_mode == MODE_GUARDED
+    )
+
     app = FastAPI(
         docs_url=None,
         redoc_url=None,
@@ -848,6 +905,8 @@ def make_app(
     app.state.control_concurrency = control_limit
     app.state.control_admission = _ControlPlaneAdmission(control_limit)
     app.state.chat_work_timeout = chat_timeout
+    app.state.mode = configured_mode
+    app.state.guards_active = guards_active
     # Retain a strong reference to every dispatched chat worker task so a
     # timed-out request cannot let the task be garbage-collected while its
     # thread still runs.  The done callback removes it only on real completion.
@@ -858,11 +917,16 @@ def make_app(
         request_id = "req_" + uuid.uuid4().hex
         request.state.request_id = request_id
         try:
-            return await call_next(request)
+            response = await call_next(request)
         except Exception:
             # Convert unexpected failures before the ASGI server can log raw
             # exception text.  The response carries no body or provider detail.
-            return _error_response(request_id, "UNAVAILABLE", 503)
+            response = _error_response(request_id, "UNAVAILABLE", 503)
+        response.headers["X-Nasi-Lemak-Mode"] = request.app.state.mode
+        response.headers["X-Nasi-Lemak-Guards-Active"] = (
+            "true" if request.app.state.guards_active else "false"
+        )
+        return response
 
     @app.exception_handler(StarletteHTTPException)
     async def http_exception_handler(request: Request, exc: StarletteHTTPException):
@@ -886,9 +950,14 @@ def make_app(
             request.app.state.config_ready,
             request.app.state.control_admission,
         )
+        payload = {
+            "status": "ready" if ready else "not_ready",
+            "mode": request.app.state.mode,
+            "guards_active": request.app.state.guards_active,
+        }
         if ready:
-            return {"status": "ready"}
-        return JSONResponse({"status": "not_ready"}, status_code=503)
+            return payload
+        return JSONResponse(payload, status_code=503)
 
     def admin_error(request: Request, status_code: int, code: str) -> JSONResponse:
         response = _error_response(request.state.request_id, code, status_code)
@@ -925,7 +994,11 @@ def make_app(
             return admin_error(request, 404, "INVALID_REQUEST")
         if state.mode != OPERATOR_READY:
             return admin_error(request, 503, "UNAVAILABLE")
-        return HTMLResponse(ADMIN_HTML, headers=ADMIN_SECURITY_HEADERS)
+        html = admin_html(
+            mode=request.app.state.mode,
+            guards_active=request.app.state.guards_active,
+        )
+        return HTMLResponse(html, headers=ADMIN_SECURITY_HEADERS)
 
     @app.get("/admin/events")
     async def admin_events(request: Request):

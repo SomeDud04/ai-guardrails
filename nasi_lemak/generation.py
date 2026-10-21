@@ -515,6 +515,54 @@ class RealGatewayAdapters:
         raise ValueError("contextual output guard requires the full conversation")
 
 
+class TestGatewayAdapters:
+    """Explicit test-mode adapters: real generation, intentionally inactive guards.
+
+    This adapter is constructed only when the server-side environment selects
+    ``NASI_LEMAK_MODE=test`` together with the explicit acknowledgement
+    ``NASI_LEMAK_ALLOW_UNGUARDED_TEST=true``. It uses the real
+    :class:`GenerationClient` for upstream calls, but the native guard methods
+    are deliberately inactive and named to make that obvious.
+
+    The token budget uses a conservative UTF-8 byte estimate plus a small
+    framing allowance. This is **not** a model tokenizer and must never be
+    reported or mistaken for one.
+    """
+
+    def __init__(self, client: GenerationClient):
+        if not isinstance(client, GenerationClient):
+            raise ValueError("test adapters require a real GenerationClient")
+        self.client = client
+
+    @staticmethod
+    def _byte_budget(serialized: str) -> int:
+        body = len(serialized.encode("utf-8"))
+        messages = serialized.count("\n") + 1
+        framing = messages * 2 + 2
+        return body + framing
+
+    def count_tokens(self, serialized: str) -> int:
+        """Conservative byte budget; not a tokenizer."""
+        return self._byte_budget(serialized)
+
+    def scan_attack(self, text: str) -> dict[str, str]:
+        """Inactive in test mode: always allows."""
+        return {"decision": "allow"}
+
+    def generate(self, messages: list[dict[str, str]], model: str, max_tokens: int) -> str:
+        if model != PUBLIC_MODEL_ALIAS:
+            raise ValueError("unsupported public model alias")
+        return self.client.generate(messages, max_tokens)
+
+    def scan_response(self, messages: list[dict[str, str]], output: str) -> dict[str, bool]:
+        """Inactive in test mode: always reports safe."""
+        return {"safe": True}
+
+    def scan_output(self, text: str) -> dict[str, bool]:
+        """Inactive in test mode: always reports safe."""
+        return {"safe": True}
+
+
 def make_real_gateway(
     app_key: str,
     audit_path: Any,
