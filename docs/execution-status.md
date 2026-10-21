@@ -15,11 +15,10 @@ External originals were read without editing:
 | `C:\Users\user\Desktop\ai-workspace\tasks\todo.md` | `8C859AC0309F94D4A2E1DC0899DADC9D9478D3E8F4136892D4277FAF348F0913` |
 
 No ancestor `AGENTS.md` was found above the workspace at the time of the initial
-slice; the current project-level `AGENTS.md` governs dual-harness routing. The
-requested Sol/Luna workflow used one Sol planner/reviewer and one Luna
-implementation worker. No secrets or customer text were used. No dependencies,
-models or services were installed or deployed, and no external inference call
-was made in this packaging stage.
+slice. Agent orchestration is local tooling maintained separately from this
+application and is not part of its distribution. No secrets or customer text
+were used. No dependencies, models or services were installed or deployed, and
+no external inference call was made in this packaging stage.
 
 ## Current evidence
 

@@ -1,7 +1,0 @@
-{
-  "worker_model": "opencode-go/deepseek-v4.1-flash",
-  "complex_worker_model": "opencode-go/kimi-k2.7-code",
-  "max_repairs": 2,
-  "timeout_seconds": 900,
-  "open_live_session": true
-}

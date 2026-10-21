@@ -1,6 +1,0 @@
-interface:
-  display_name: "Codex + OpenCode Go"
-  short_description: "Codex plans and reviews; OpenCode Go builds"
-  default_prompt: "Use $dual-harness to implement this task with OpenCode Go and have Codex plan and review the changes."
-policy:
-  allow_implicit_invocation: true

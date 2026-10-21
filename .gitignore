@@ -18,6 +18,13 @@ policy.test.yaml
 # Generated local code graph database (SQLite/WAL/shm, pid and log files).
 .codegraph/
 
+# Local agent tooling (kept local only, not committed).
+/AGENTS.md
+/.agents/
+/.opencode/
+/.codex/
+/tests/test_dual_harness.py
+
 # Local build and packaging output.
 build/
 dist/
