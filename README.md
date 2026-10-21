@@ -34,7 +34,7 @@ started in this workspace because Docker is not installed.** See
 | Generation transport | Implemented; not live-verified |
 | Docker image / Compose runtime | Authored, **not built or run here**; default image/stack stays lightweight and safe-unavailable; optional `compose.pilot.yaml` adds the guard image target, policy and local model mounts as configuration scaffolding only |
 | LiteLLM routing | Deferred |
-| TLS ingress | Not present; localhost HTTP only |
+| TLS ingress | Not present; localhost HTTP by default; optional trusted-LAN demo proxy exists (`compose.demo.yaml`) |
 
 This is not a completed day-2 milestone and not a production pilot.
 
@@ -434,6 +434,19 @@ the base file, never alone. It:
   deadline while every wait stays finite. It checks structural readiness, not
   classifier accuracy or native warmup.
 
+`compose.demo.yaml` is a separate **optional** overlay for a trusted-LAN demo.
+It adds an unprivileged `nginx:stable-alpine` proxy on port `8080` that forwards
+the complete URI, query string and `Authorization` header to `gateway:8000`;
+there is no static frontend, path prefix, CORS or new authentication. It
+requires an explicit `DEMO_BIND_IP` (no `0.0.0.0` default) from a git-ignored
+`.secrets/compose.demo.env`, joins only the default bridge network, mounts no
+secrets and leaves the base `127.0.0.1:8000` publication and unpublished
+database unchanged. It is plain HTTP for a trusted LAN/VPN only, uses a mutable
+image tag, and is not TLS ingress. The synthetic tests parse configuration
+only; VM acceptance is pending. See
+[docs/demo-access.md](docs/demo-access.md) for the no-reinstall update
+procedure, firewall checks and rollback.
+
 ### Guard-enabled pilot overlay runbook (Linux)
 
 This procedure was authored but **not executed here**; Docker is absent from
@@ -673,8 +686,9 @@ variables. The administrator DSN is not used by the gateway.
 
 ## Security and operational limits
 
-- The gateway is localhost-only HTTP. **TLS ingress is required before any
-  remote pilot.**
+- The gateway is localhost-only HTTP by default. **TLS ingress is required before
+  any remote pilot.** The separate optional demo proxy is plain HTTP on a
+  trusted LAN/VPN only and does not satisfy that requirement.
 - SQLite remains a local development/test store only. The production server
   requires PostgreSQL, and its runtime role is append-only.
 - There is no background reconciler. Incomplete request records are reconciled

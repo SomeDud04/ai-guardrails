@@ -98,6 +98,11 @@ ssh -L 8000:127.0.0.1:8000 user@VM
 Then browse `http://localhost:8000/admin`. Do not change the Compose port
 mapping to a public interface and do not add a public bind.
 
+For an optional explicit trusted-LAN demo entry (`http://VM_LAN_IP:8080/`) with
+no TLS, see [docs/demo-access.md](demo-access.md). That overlay is separate from
+the installer: do **not** rerun the installer to add it, because a rerun rewrites
+the existing policy. The default stays loopback-only.
+
 The installer writes plaintext key files at `.secrets/chat_key` and
 `.secrets/operator_key` (state directory mode `0700`, key files `0600`). Never
 print, copy to chat, or commit these values. For `/admin`, the operator opens
@@ -109,7 +114,10 @@ permissions to make access easier.
 
 Runtime Compose commands need root because the env and secret files are
 root-owned. Always pass **both** env files and the base file plus exactly one
-overlay, in this order.
+overlay, in this order. If you opted into the demo ingress from section 4, that
+path additionally needs `.secrets/compose.demo.env` and
+`-f compose.demo.yaml`; the exact commands are in
+[docs/demo-access.md](demo-access.md).
 
 Test mode:
 

@@ -1,0 +1,77 @@
+# Optional unencrypted demo-ingress overlay for the existing Nasi Lemak stack.
+#
+# This file is NOT a standalone stack and adds no default exposure.  Apply it
+# ON TOP of compose.yaml plus exactly one mode overlay:
+#
+#   docker compose \
+#     --env-file .secrets/compose.env \
+#     --env-file .secrets/compose.test.env \
+#     --env-file .secrets/compose.demo.env \
+#     -f compose.yaml -f compose.test.yaml -f compose.demo.yaml config
+#
+# (Use compose.pilot.yaml instead of compose.test.yaml only if that mode is
+# already configured.)  DEMO_BIND_IP is mandatory: there is no 0.0.0.0 or
+# wildcard default.  The operator sets it in the git-ignored
+# .secrets/compose.demo.env to this VM's LAN or VPN address.  DEMO_PORT defaults
+# to 8080.  See docs/demo-access.md.
+#
+# The ingress is plain HTTP for a trusted LAN/VPN demo only.  It adds no TLS,
+# no authentication, no static frontend, no path prefix and no CORS.  It joins
+# only the default bridge network: it cannot reach db_internal directly and
+# mounts no secrets.  The gateway keeps its base 127.0.0.1:8000 publication and
+# the database stays unpublished.
+
+services:
+  nginx:
+    # Mutable convenience tag, not an immutable digest.  Digest pinning and
+    # registry signature verification remain a release/security-review task.
+    image: nginx:stable-alpine
+    restart: unless-stopped
+    depends_on:
+      gateway:
+        condition: service_started
+    ports:
+      # Explicit host address required; the container listens on unprivileged
+      # port 8080.  Never replace DEMO_BIND_IP with 0.0.0.0 in a shared example.
+      - "${DEMO_BIND_IP:?Set DEMO_BIND_IP to this VM's LAN or VPN address}:${DEMO_PORT:-8080}:8080"
+    volumes:
+      # Complete nginx.conf, read-only.  The image's default entrypoint scripts
+      # are bypassed below so they cannot rewrite configuration or templates.
+      - type: bind
+        source: ./deploy/nginx-demo.conf
+        target: /etc/nginx/nginx.conf
+        read_only: true
+        bind:
+          create_host_path: false
+    entrypoint: ["nginx", "-g", "daemon off;"]
+    # Official image's unprivileged nginx account.
+    user: "101:101"
+    read_only: true
+    tmpfs:
+      - /tmp:size=8m,mode=1777
+    cap_drop:
+      - ALL
+    security_opt:
+      - no-new-privileges:true
+    mem_limit: 64m
+    cpus: 0.5
+    pids_limit: 64
+    healthcheck:
+      # Local liveness through the ingress only.  This says nothing about guard
+      # activation, model availability or business readiness.
+      test:
+        - CMD
+        - wget
+        - -q
+        - -T
+        - "3"
+        - -O
+        - /dev/null
+        - http://127.0.0.1:8080/health/live
+      interval: 30s
+      timeout: 5s
+      retries: 3
+      start_period: 5s
+    networks:
+      # Default bridge only; no db_internal and no database secrets.
+      - default

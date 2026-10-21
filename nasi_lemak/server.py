@@ -36,6 +36,7 @@ from starlette.exceptions import HTTPException as StarletteHTTPException
 
 from .admin_page import ADMIN_SECURITY_HEADERS, admin_html
 from .audit import PostgresAuditStore, UnreadyAuditStore
+from .demo_page import DEMO_SECURITY_HEADERS, demo_html
 from .export import (
     EXPORT_FILENAME,
     ExportAuditEntry,
@@ -939,6 +940,16 @@ def make_app(
         request_id = getattr(request.state, "request_id", "req_unknown")
         return _error_response(request_id, "INVALID_REQUEST", 400)
 
+    @app.get("/")
+    async def demo_page(request: Request):
+        # The shell is available even while the gateway is unready so the page
+        # itself can report the real mode/readiness from /health/ready.
+        html = demo_html(
+            mode=request.app.state.mode,
+            guards_active=request.app.state.guards_active,
+        )
+        return HTMLResponse(html, headers=DEMO_SECURITY_HEADERS)
+
     @app.get("/health/live")
     async def health_live(request: Request):
         return {"status": "ok"}
@@ -1285,6 +1296,7 @@ def make_app(
         # Keep known paths explicit so a wrong method returns 405 rather than
         # being swallowed by the catch-all route.
         if path in (
+            "",
             "v1/chat/completions",
             "health/live",
             "health/ready",
