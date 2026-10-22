@@ -345,6 +345,25 @@ class AuthenticationAndSeparationTests(OperatorTestBase):
         self.assertIn("AbortController", html)
         self.assertNotIn("pending (incomplete)", html)
         self.assertIn("final outcome may appear in a later event or on another page", html)
+        # The default table is the five operational columns; technical metadata
+        # stays in the same DOM and is revealed by an accessible toggle.
+        self.assertIn('id="toggle-technical"', html)
+        self.assertIn('aria-controls="events-table"', html)
+        self.assertIn('aria-expanded="false"', html)
+        self.assertIn('data-technical="off"', html)
+        self.assertIn('id="events-table"', html)
+        self.assertIn('tabindex="0"', html)
+        self.assertIn('aria-label="Audit events table"', html)
+        self.assertIn('class="col-technical">Seq', html)
+        self.assertIn('class="col-technical">Policy version', html)
+        self.assertIn('class="col-technical">Policy digest', html)
+        self.assertIn('class="col-technical">Model', html)
+        self.assertEqual(html.count('class="col-technical"'), 4)
+        self.assertIn(
+            '.table-wrap[data-technical="off"] .col-technical { display: none; }', html
+        )
+        self.assertRegex(html, r"table \{[^}]*min-width: 0;")
+        self.assertIn("Show technical columns", html)
         for forbidden in ("innerHTML", "localStorage", "sessionStorage", "document.cookie"):
             self.assertNotIn(forbidden, html)
         self.assertNotIn("?token=", html)

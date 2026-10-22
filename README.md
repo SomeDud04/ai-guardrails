@@ -4,12 +4,20 @@ This repository contains a **real FastAPI HTTP gateway** plus the synthetic
 in-process foundation it grew from. The HTTP surface is local and fail-closed.
 Local guard/tokenizer wiring and one versioned YAML startup policy are
 implemented, but **no pretrained guard checkpoint has been downloaded or
-executed here**, the optional ML extra is not installed in this workspace, and
-the upstream API model ID is still unknown. The server therefore starts live and
-deliberately stays **not ready**, returning generic `503` for chat until a valid
-operator-supplied policy file, locally supplied guard artifacts, the confirmed
-model ID and PostgreSQL audit are configured. There is no demo mode, allow-all
-adapter or environment-selected bypass.
+executed here** and the optional ML extra is not installed in this workspace.
+An explicitly acknowledged test mode (`NASI_LEMAK_MODE=test` together with
+`NASI_LEMAK_ALLOW_UNGUARDED_TEST=true`) and the prompt-testing page at `GET /`
+exist; test mode keeps the model guards inactive and is not guarded mode. There
+is no allow-all adapter or environment-selected bypass of guarded mode. The
+upstream endpoint and model ID are operator configuration and were not
+independently live-verified in this workspace. In the default guarded mode the
+server therefore starts live and deliberately stays **not ready**, returning
+generic `503` for chat until a valid operator-supplied policy file, locally
+supplied guard artifacts, the configured model ID and PostgreSQL audit are
+available. The acknowledged test mode can become ready without local guard
+artifacts when policy, application auth, generation and audit configuration are
+valid. Readiness checks configuration and audit structure only; it does not
+prove model inference.
 
 Docker Compose packaging is provided for a gateway + PostgreSQL audit stack,
 including an optional guard-enabled pilot overlay (`compose.pilot.yaml`) that
@@ -30,13 +38,17 @@ started in this workspace because Docker is not installed.** See
 | Bounded CSV export | `/admin/export.csv` implemented locally with a separate append-only export audit; contract in [docs/evidence-export.md](docs/evidence-export.md); PostgreSQL SQL checked with a driver double only |
 | Versioned YAML startup policy | Strict loader, mandatory file activation, literal deny phrases and restart/rollback tests implemented locally |
 | Real tokenizer / attack guard / output guard | Adapters and server wiring implemented locally; **pretrained weights not run** |
+| Qwen3Guard output API adapter | Optional `nasi_lemak/guard_api.py` adapter prepared and loopback-fixture-tested; **not selected** by server env, installer or Compose and no live endpoint contacted. See [docs/guard-api-integration.md](docs/guard-api-integration.md) |
 | PII quality gate (synthetic) | Frozen agent-authored evaluation + deterministic evaluator; reviewed EMAIL terminal-period repair passes six known regression cases; v1 EMAIL fails on 1 frozen false positive and MyKad on 4; **not customer accepted**. See [docs/pii-quality.md](docs/pii-quality.md) |
 | Generation transport | Implemented; not live-verified |
 | Docker image / Compose runtime | Authored, **not built or run here**; default image/stack stays lightweight and safe-unavailable; optional `compose.pilot.yaml` adds the guard image target, policy and local model mounts as configuration scaffolding only |
 | LiteLLM routing | Deferred |
 | TLS ingress | Not present; localhost HTTP by default; optional trusted-LAN demo proxy exists (`compose.demo.yaml`) |
 
-This is not a completed day-2 milestone and not a production pilot.
+This is not a completed day-2 milestone and not a production pilot. Dated
+progress by timeline item, including code-versus-deployment evidence and the
+latest test baseline, is in
+[docs/development-progress.md](docs/development-progress.md).
 
 ## Local development
 
@@ -49,7 +61,7 @@ Use the workspace virtualenv:
 ```
 
 Run the server locally (it will be live but not ready without an explicitly
-configured policy file, locally supplied guard artifacts and a confirmed
+configured policy file, locally supplied guard artifacts and a configured
 upstream model ID):
 
 ```powershell
@@ -66,6 +78,7 @@ Only these routes exist:
 
 | Method | Path | Meaning |
 |---|---|---|
+| `GET` | `/` | Static prompt-testing page; served while the app is live and reports mode/readiness from `/health/ready` |
 | `GET` | `/health/live` | Process liveness; `200 {"status":"ok"}` |
 | `GET` | `/health/ready` | `200 {"status":"ready"}` only when configuration and audit readiness pass; otherwise `503 {"status":"not_ready"}` |
 | `POST` | `/v1/chat/completions` | Bounded OpenAI-compatible chat request |
@@ -260,14 +273,21 @@ http://82haf69n.flexinfra.com.my/v1
 
 Here `/v1` is an **assumed** OpenAI-compatible prefix, not a live-verified fact.
 The supplied endpoint uses **no authentication** (`NASI_LEMAK_GENERATION_AUTH=none`),
-requires the explicit insecure-HTTP opt-in, and its exact API model ID is
-**still unknown**. `NASI_LEMAK_GENERATION_MODEL` therefore remains blank;
-generation and probes fail closed while it is blank. Do not use the display name
-`Qwen3.8 27B FP8` as an API model ID.
+requires the explicit insecure-HTTP opt-in, and the exact served model ID is
+operator configuration. Set `NASI_LEMAK_GENERATION_MODEL` to the confirmed
+upstream identifier before generation or probes can succeed; do not use the
+display name `Qwen3.8 27B FP8` as an API model ID. No successful serving, model
+listing or inference has been demonstrated in this workspace; operator-reported
+VM generation was not independently verified here.
 
-An earlier `GET .../v1/models` attempt timed out on port 80. No successful
-serving, model listing or inference has been demonstrated, and no further live
+An earlier `GET .../v1/models` attempt timed out on port 80. No further live
 network checks are made in this workspace.
+
+An optional Qwen3Guard output API adapter is prepared in
+`nasi_lemak/guard_api.py`, but it is not selected by server startup and cannot
+activate guarded mode by itself. See
+[docs/guard-api-integration.md](docs/guard-api-integration.md) for its
+synthetic-fixture evidence and the still-pending input classifier work.
 
 ## Local guard wiring
 
@@ -664,7 +684,8 @@ value in chat, shell history, Git or the repository. Use `.secrets/` locally
    is **intentional safe startup**, not successful guarded inference: the
    default image does not install the optional guard ML dependencies, does not
    mount local guard model directories, no policy file is mounted or configured,
-   and the upstream model ID is still blank. The PostgreSQL DSN and app digest
+   and the upstream model ID and local guard artifacts are not configured in
+   that example. The PostgreSQL DSN and app digest
    alone do not make inference ready. The optional `compose.pilot.yaml` overlay
    and the pilot runbook above add the guard image target, read-only policy/model
    mounts and distinct operator secrets; that is authored configuration, not a
@@ -732,14 +753,15 @@ RAM, 100 GB SSD — is recorded as provisional sizing information for the
 remote Qwen generation. It is not a benchmark or capacity claim; nothing was
 executed on that host.
 
-The full local suite now reports **340 tests run, 338 passed and 2 skipped**
-(exit 0, 18.988s; worker evidence, caller confirmation pending). The two skips
+The prior-slice baseline was **414 tests: 412 passed and 2 skipped** (dated
+prior slice; `TEST_AUDIT_DSN` unset). The final release suite is run before push
+and its result is recorded in `docs/development-progress.md`; this README does
+not claim a current total. The two skips
 are the existing optional PostgreSQL
 integration tests, skipped honestly because `TEST_AUDIT_DSN` is not set; no
 PostgreSQL round-trip was run and no residual skip was added for the export or
-PII work. Earlier `339 tests run, 337 passed`, `315 tests run, 313 passed`,
-`283 tests run, 281 passed`, `271 tests run, 269 passed`, `249 tests run, 247
-passed` and `226 tests run, 224 passed` counts are stale. A SQLite test-helper
+PII work. Older `340`, `339`, `315`, `283`, `271`, `249` and `226` counts are
+stale. A SQLite test-helper
 close race that intermittently raised `WinError 32` on Windows was fixed in the
 helper itself.
 

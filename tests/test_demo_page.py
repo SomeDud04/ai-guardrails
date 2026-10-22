@@ -72,10 +72,11 @@ class DemoPageTests(unittest.TestCase):
     def test_test_mode_page_clearly_reports_inactive_guards(self) -> None:
         html = self._client("test").get("/").text
         self.assertIn("Test mode", html)
-        self.assertIn("model-based injection and output checks are inactive", html)
+        self.assertIn("model-based checks are inactive", html)
         self.assertIn(">test<", html)
         self.assertNotIn("native guard", html.lower())
         self.assertNotIn("guards are active", html.lower())
+        self.assertNotIn("configure the model guard adapters", html)
 
     def test_guarded_but_unready_page_does_not_claim_guard_protection(self) -> None:
         html = self._client("guarded").get("/").text
@@ -108,12 +109,16 @@ class DemoPageTests(unittest.TestCase):
         self.assertIn('id="status"', html)
         self.assertIn('id="send"', html)
         self.assertIn('id="clear"', html)
-        self.assertIn("Ask the gateway something", html)
+        self.assertIn("Test a prompt", html)
+        self.assertIn("Each request is sent independently", html)
+        self.assertNotIn("Ask the gateway something", html)
+        self.assertNotIn('class="steps"', html)
+        self.assertNotIn("no saved conversation", html)
+        self.assertNotIn("model selector", html)
         self.assertIn("Responses come from the configured model and may be inaccurate.", html)
         self.assertIn("The key stays in this tab's memory", html)
         self.assertIn("uses a separate operator key", html)
         self.assertIn("Ctrl/Command + Enter sends.", html)
-        self.assertIn("Each prompt is sent independently", html)
         self.assertNotIn("API-only deployment", html)
         self.assertNotIn("Model alias", html)
         self.assertNotIn("Not verified", html)
@@ -129,6 +134,9 @@ class DemoPageTests(unittest.TestCase):
         self.assertIn("color-scheme: dark", html)
         self.assertIn("system-ui", html)
         self.assertIn("focus-visible", html)
+        # The shell keeps a bounded viewport so the composer stays visible.
+        self.assertRegex(html, r"\.app \{[^}]*height: 100dvh;")
+        self.assertRegex(html, r"\.main \{[^}]*min-height: 0;")
         # The shell is self-authored: no remote fonts, CDNs, frameworks or
         # inline event handlers that would weaken the hash-based CSP.
         self.assertNotIn("http://", html)

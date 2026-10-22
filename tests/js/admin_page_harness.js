@@ -95,6 +95,9 @@ function createApp() {
     "status",
     "events-body",
     "page-info",
+    "events-state",
+    "events-state-title",
+    "events-state-text",
     "policy-version",
     "policy-digest",
     "health-status",
@@ -103,6 +106,8 @@ function createApp() {
     "request-id-filter",
     "apply-filters",
     "export-csv",
+    "table-wrap",
+    "toggle-technical",
     "previous-page",
     "next-page",
   ];
@@ -279,6 +284,11 @@ async function staleSuccessAfterDisconnect() {
       app.elements["next-page"].disabled,
     "filters and navigation lock while a page is loading"
   );
+  assert(app.elements["events-state"].hidden === false, "loading state is visible while a page loads");
+  assert(
+    app.elements["events-state-title"].textContent === "Loading events",
+    "loading state names the current task"
+  );
 
   app.elements["disconnect"].dispatch("click");
   assert(app.calls[0].aborted === true, "disconnect aborts the in-flight request");
@@ -290,6 +300,7 @@ async function staleSuccessAfterDisconnect() {
   assert(rows(app).length === 0, "stale success must not repopulate a disconnected view");
   assert(app.elements["policy-version"].textContent === "", "stale metadata stays cleared");
   assert(app.elements["page-info"].textContent === "", "stale page info stays cleared");
+  assert(app.elements["events-state"].hidden === true, "stale success cannot reveal an empty state");
   assert(app.elements["status"].textContent === "Disconnected.", "stale success cannot replace status");
   assert(app.elements["view-panel"].hidden === true, "view stays hidden");
 }
@@ -368,6 +379,34 @@ async function filtersAreCapturedAndUnlockAfterSuccess() {
     app.elements["page-info"].textContent === "No events match the current filters.",
     "empty result explanation"
   );
+  assert(app.elements["events-state"].hidden === false, "filtered empty result shows a state");
+  assert(
+    app.elements["events-state-title"].textContent === "No matching events",
+    "filtered empty state names the cause"
+  );
+  assert(
+    app.elements["events-state-text"].textContent.indexOf("Widen") >= 0,
+    "filtered empty state explains recovery"
+  );
+}
+
+async function emptyStreamTeachesTheWorkspace() {
+  const app = createApp();
+  connect(app, "secret-empty");
+  app.calls[0].respond(payload([]));
+  await flush();
+  assert(app.elements["status"].textContent === "No events loaded.", "empty stream status");
+  assert(app.elements["page-info"].textContent === "No events recorded yet.", "empty stream page info");
+  assert(app.elements["events-state"].hidden === false, "empty stream shows a state");
+  assert(
+    app.elements["events-state-title"].textContent === "No events yet",
+    "empty stream state avoids claiming activity"
+  );
+  assert(
+    app.elements["events-state-text"].textContent.indexOf("after the gateway handles requests") >= 0,
+    "empty stream explains when events appear"
+  );
+  assert(app.elements["apply-filters"].disabled === false, "empty stream unlocks filters");
 }
 
 async function currentFailureClearsAndUnlocks() {
@@ -501,6 +540,61 @@ async function exportStaleCompletionCannotDownload() {
   assert(pagehidden.elements["status"].textContent === "", "pagehide status stays empty");
 }
 
+async function technicalColumnsToggleAndReset() {
+  const app = createApp();
+  connect(app, "secret-columns");
+  app.calls[0].respond(payload([event(1, "req_columns")]));
+  await flush();
+
+  assert(rows(app).length === 1, "event row renders");
+  assert(rows(app)[0].length === 9, "every metadata cell stays in the DOM");
+  assert(rows(app)[0][0] === "1", "sequence metadata is retained");
+  assert(rows(app)[0][6] === "v-test", "policy version metadata is retained");
+  assert(rows(app)[0][7] === "d".repeat(64), "policy digest metadata is retained");
+  assert(rows(app)[0][8] === "pilot-local", "model metadata is retained");
+
+  assert(
+    app.elements["table-wrap"]["data-technical"] === "off",
+    "technical columns start hidden"
+  );
+  assert(
+    app.elements["toggle-technical"]["aria-expanded"] === "false",
+    "toggle starts collapsed"
+  );
+  assert(
+    app.elements["toggle-technical"].textContent === "Show technical columns",
+    "toggle names the reveal action"
+  );
+
+  app.elements["toggle-technical"].dispatch("click");
+  assert(
+    app.elements["table-wrap"]["data-technical"] === "on",
+    "toggle reveals technical columns"
+  );
+  assert(
+    app.elements["toggle-technical"]["aria-expanded"] === "true",
+    "toggle reports the expanded state"
+  );
+  assert(
+    app.elements["toggle-technical"].textContent === "Hide technical columns",
+    "toggle names the hide action"
+  );
+
+  app.elements["disconnect"].dispatch("click");
+  assert(
+    app.elements["table-wrap"]["data-technical"] === "off",
+    "disconnect resets the technical view"
+  );
+  assert(
+    app.elements["toggle-technical"]["aria-expanded"] === "false",
+    "disconnect collapses the toggle state"
+  );
+  assert(
+    app.elements["toggle-technical"].textContent === "Show technical columns",
+    "disconnect restores the reveal label"
+  );
+}
+
 async function lateExportCannotCrossSessions() {
   const app = createApp();
   connect(app, "secret-export-first");
@@ -535,10 +629,12 @@ async function main() {
     ["pagehide clears and cannot repopulate", pagehideClearsAndCannotRepopulate],
     ["abort rejection is silent", abortRejectionDoesNotBecomeAnError],
     ["filters captured and controls unlock", filtersAreCapturedAndUnlockAfterSuccess],
+    ["empty stream teaches the workspace", emptyStreamTeachesTheWorkspace],
     ["current failure clears and unlocks", currentFailureClearsAndUnlocks],
     ["export uses filters without page cursor", exportUsesFiltersWithoutPageCursor],
     ["export failure never downloads", exportFailureShowsMessageAndNeverDownloads],
     ["stale export cannot download", exportStaleCompletionCannotDownload],
+    ["technical columns toggle and reset", technicalColumnsToggleAndReset],
     ["late export cannot cross sessions", lateExportCannotCrossSessions],
   ];
   for (const [name, scenario] of scenarios) {

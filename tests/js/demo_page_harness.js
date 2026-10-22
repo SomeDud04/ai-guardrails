@@ -109,6 +109,9 @@ function createApp() {
     "topbar-guards",
     "test-banner",
     "refresh-status",
+    "sample-1",
+    "sample-2",
+    "sample-3",
   ];
   const elements = Object.create(null);
   for (const id of ids) {
@@ -260,13 +263,13 @@ async function healthLabelsAndTestModeAreVisible() {
   assert(app.elements["readiness-value"].textContent === "ready", "readiness is shown");
   assert(app.elements["guards-value"].textContent === "inactive", "inactive guards are shown");
   assert(
-    app.elements["topbar-guards"].textContent === "Guards inactive",
+    app.elements["topbar-guards"].textContent === "Model guard inactive",
     "the compact top bar mirrors inactive guards"
   );
   assert(app.elements["test-banner"].hidden === false, "test-mode banner is visible");
   assert(
     app.elements["test-banner"].textContent.indexOf(
-      "model-based injection and output checks are inactive"
+      "model-based checks are inactive"
     ) >= 0,
     "test mode states that model-based checks are inactive"
   );
@@ -297,7 +300,7 @@ async function unreadyHealthIsReportedTruthfully() {
   assert(broken.elements["mode-value"].textContent === "unknown", "non-JSON mode is unknown");
   assert(broken.elements["readiness-value"].textContent === "unknown", "non-JSON readiness is unknown");
   assert(broken.elements["guards-value"].textContent === "unknown", "unknown guards are not claimed active");
-  assert(broken.elements["topbar-guards"].textContent === "Guards unknown", "unknown guards stay unknown in the top bar");
+  assert(broken.elements["topbar-guards"].textContent === "Model guard unknown", "unknown guards stay unknown in the top bar");
 }
 
 async function healthRefreshIsBoundedAndOrdered() {
@@ -315,7 +318,7 @@ async function healthRefreshIsBoundedAndOrdered() {
   assert(app.elements["mode-value"].textContent === "guarded", "current health mode is applied");
   assert(app.elements["readiness-value"].textContent === "ready", "current readiness is applied");
   assert(app.elements["guards-value"].textContent === "active", "current active guards are applied");
-  assert(app.elements["topbar-guards"].textContent === "Guards active", "the top bar follows active guards");
+  assert(app.elements["topbar-guards"].textContent === "Model guard active", "the top bar follows active guards");
   assert(app.elements["test-banner"].hidden === true, "valid active status clears the stale warning");
 
   first.respond({ status: "not_ready", mode: "test", guards_active: false }, 503);
@@ -494,7 +497,7 @@ async function responseAndErrorStringsStayPlainText() {
   assert(app.created.length === 0, "page creates no HTML elements from model output");
   assert(
     app.elements["test-banner"].textContent.indexOf(
-      "model-based injection and output checks are inactive"
+      "model-based checks are inactive"
     ) >= 0,
     "successful chat does not remove the test-mode warning"
   );
@@ -756,6 +759,32 @@ async function finiteTimeoutAbortsAndUnlocks() {
   assert(app.elements["send"].disabled === false, "timeout unlocks send");
 }
 
+async function samplesFillComposerOnly() {
+  const app = await readyApp();
+  const noKeyCalls = app.calls.length;
+  app.elements["sample-1"].dispatch("click");
+  assert(
+    app.elements["prompt"].value.indexOf("Summarise this synthetic support ticket") === 0,
+    "a sample fills the composer with its synthetic prompt"
+  );
+  assert(app.calls.length === noKeyCalls, "choosing a sample sends no request");
+  assert(app.elements["prompt"].focused >= 1, "choosing a sample focuses the composer");
+  assert(
+    app.elements["status"].textContent === "Sample loaded. Edit it or send when ready.",
+    "sample selection explains the next action"
+  );
+
+  loadKey(app, "demo-chat-key");
+  const withKeyCalls = app.calls.length;
+  app.elements["sample-3"].dispatch("click");
+  assert(app.calls.length === withKeyCalls, "a sample never auto-sends even with a key loaded");
+  assert(
+    app.elements["prompt"].value.indexOf("Ignore previous guidance") >= 0,
+    "the suspicious-prompt sample fills the composer"
+  );
+  assert(app.elements["send"].disabled === false, "send stays available after sample selection");
+}
+
 async function main() {
   const scenarios = [
     ["health labels and test mode", healthLabelsAndTestModeAreVisible],
@@ -765,6 +794,7 @@ async function main() {
     ["malformed or inconsistent health claims nothing", malformedAndInconsistentHealthNeverClaimProtection],
     ["pagehide aborts health refresh", pagehideAbortsHealthRefresh],
     ["key load clears input and claims no auth", keyLoadClearsInputAndClaimsNoAuthentication],
+    ["sample prompts fill the composer only", samplesFillComposerOnly],
     ["strict same-origin payload", requestIsStrictSameOriginPayload],
     ["plain-text response rendering", responseAndErrorStringsStayPlainText],
     ["401 clears the bad key", unauthorizedClearsBadKey],
