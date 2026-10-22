@@ -1,9 +1,10 @@
 # Execution ledger
 
 Date: 20 October 2026. Mode: local foundation with real generation transport,
-local guard wiring, strict YAML policy activation and a bounded HTTP server;
-live-data pilot: **disabled / not approved**. Docker packaging is authored but
-**not built or run here**.
+local guard wiring, strict YAML policy activation and a bounded HTTP server. API
+guard adapters, runtime/installer selection and the guard-evaluation harness are
+implemented and fixture-tested locally; live-data pilot: **disabled / not
+approved**. Docker packaging is authored but **not built or run here**.
 
 ## Source provenance
 
@@ -448,7 +449,7 @@ Uvicorn 0.54.0, psycopg 3.3.6, HTTPX 0.28.1, PyYAML 6.0.3):
 
 | Command | Result |
 |---|---|
-| `.\.venv\Scripts\python.exe -m unittest discover -s tests` | **340 tests run, 338 passed, 2 skipped, exit 0, 18.988s** — this worker's local run, not a final caller run; the two skips are the existing optional `TEST_AUDIT_DSN`-gated PostgreSQL tests; the suite includes 16 structural/behavioural container-config tests; earlier 339/337, 324/322, 315/313, 312/310, 284/282, 283/281, 271/269, 249/247 and 226/224 figures are historical |
+| `.\\.venv\\Scripts\\python.exe -m unittest discover -s tests` | Full-suite count intentionally omitted pending the caller's clean export; the two optional `TEST_AUDIT_DSN`-gated PostgreSQL tests may skip. Earlier 339/337, 324/322, 315/313, 312/310, 284/282, 283/281, 271/269, 249/247 and 226/224 figures are historical |
 | `.\.venv\Scripts\python.exe -m unittest tests.test_control_plane -v` | **10 focused event-gated control-plane tests OK** (short-deadline readiness/events/export saturation, cancellation held past a shortened deadline with no late audit/CSV, shared capacity 2 across distinct routes, invalid `control_concurrency` bounds fail closed, no excess dispatch, auth-before-admission, chat separation, liveness, late success/error recovery, no CSV on failed/timed-out export audit) |
 | `.\.venv\Scripts\python.exe -m unittest tests.test_chat_deadline -v` | **9 focused event-gated chat-deadline tests OK, exit 0, 1.453s** (stalled input/output guards, late success, retained late error with no output-guard call, repeated cancellation, overload, exact-once capacity, invalid bounds, normal chat; timed-out tasks remain strongly referenced until real completion) |
 | `.\.venv\Scripts\python.exe -m unittest tests.test_pii tests.test_pii_eval -v` | **34 focused PII/span/evaluator tests OK** (metric math, strict spans, terminal-period and punctuation boundaries, invalid dotted suffixes, Unicode `\d` preservation, invalid fixtures, manifest freeze, v1 hash preservation, v2 single-label adjudication, CLI exit 0/1/2, reproducibility, no raw text) |
@@ -496,6 +497,10 @@ files. Dockerfile and Compose were reviewed statically and their YAML parsed,
 but this is **not** `docker compose config`, image-build or runtime validation.
 
 ## Not implemented or validated
+
+Live guard API endpoint acceptance, actual guard model quality and held-out
+capacity remain pending even though the API adapters, installer/Compose
+selection and evaluation harness are implemented locally.
 
 - Native guard adapters and the contextual adapter factory are implemented and
   wired through `make_adapters_from_env`, but pretrained weights were not
@@ -560,7 +565,7 @@ but this is **not** `docker compose config`, image-build or runtime validation.
 | Supplied work package | Current disposition |
 |---|---|
 | 1: pilot contract | Local draft documents; customer scope/resources/data-boundary approval open |
-| 2: model/guard serving | Transport and packaging scaffolding; real serving/hardware/license evidence blocked |
+| 2: model/guard serving | Local API adapters, runtime selection, installer/Compose wiring and the `guard_eval` harness implemented and fixture-tested; real guard API acceptance, model quality, held-out capacity and hardware/license evidence remain pending |
 | 3-5: auth, request surface, audit | HTTP/auth/audit foundation implemented locally; production PostgreSQL run pending |
 | 6/13: PII | Three ASCII format recognizers share production spans with a frozen agent-authored synthetic evaluator (61 evaluation cases, 58 scored, 3 unsupported); reviewed v2 measures EMAIL and MY_PHONE at 17 TP / 0 FP / 0 FN each and MYKAD at 15 TP / 4 FP / 0 FN so that gate still fails, the original v1 EMAIL raw score is annotation-conflicted, and the narrow terminal-period repair was verified through ASGI and loopback HTTP; true independent held-out labels/review, passport/bank and semantic PII open |
 | 7: full coverage | Adapter boundary and bounded tests; real tokenizer/window proof open |
@@ -574,11 +579,9 @@ but this is **not** `docker compose config`, image-build or runtime validation.
 
 Tasks 13/14 deliver an authored synthetic evaluation, a narrow reviewed
 privacy regression repair and a documented language boundary, not customer
-acceptance. The current full local suite figure from this worker's run is
-`340 tests run, 338 passed, 2 skipped in 18.988s` (exit 0; final caller
-confirmation pending), where both skips are the existing optional PostgreSQL
-tests. The earlier 339/337, 315/313, 312/310, 284/282, 283/281, 271/269, 249/247
-and 226/224 figures are historical.
+acceptance. A current full-suite count is intentionally not recorded here until
+the caller runs a clean export; earlier 339/337, 315/313, 312/310, 284/282,
+283/281, 271/269, 249/247 and 226/224 figures are historical.
 The caller-review corpus's post-fix pass is not an accuracy or independent
 hold-out claim. Native inference, independent held-out PII labels, English
 semantic-guard acceptance, BM/Chinese semantic protection, real PostgreSQL

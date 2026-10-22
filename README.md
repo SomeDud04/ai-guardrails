@@ -38,7 +38,8 @@ started in this workspace because Docker is not installed.** See
 | Bounded CSV export | `/admin/export.csv` implemented locally with a separate append-only export audit; contract in [docs/evidence-export.md](docs/evidence-export.md); PostgreSQL SQL checked with a driver double only |
 | Versioned YAML startup policy | Strict loader, mandatory file activation, literal deny phrases and restart/rollback tests implemented locally |
 | Real tokenizer / attack guard / output guard | Adapters and server wiring implemented locally; **pretrained weights not run** |
-| Qwen3Guard output API adapter | Optional `nasi_lemak/guard_api.py` adapter prepared and loopback-fixture-tested; **not selected** by server env, installer or Compose and no live endpoint contacted. See [docs/guard-api-integration.md](docs/guard-api-integration.md) |
+| API guard backend (input + output) | `NASI_LEMAK_GUARD_BACKEND=api` selects the API adapters in `nasi_lemak/guard_api.py`; the installer's `--guard-backend api` and the `compose.api.yaml` overlay expose the same explicit choice. Implemented and loopback-fixture-tested locally; **no live guard endpoint was contacted**, and real endpoint acceptance, model quality, latency and held-out capacity remain external work. See [docs/guard-api-integration.md](docs/guard-api-integration.md) |
+| Guard evaluation harness | `nasi_lemak/guard_eval.py` validates a synthetic dataset by default and calls the configured adapters only with `--execute`; implemented and fixture-tested locally. This is plumbing evidence, **not** held-out model quality or OWASP coverage. See [docs/guard-evaluation.md](docs/guard-evaluation.md) |
 | PII quality gate (synthetic) | Frozen agent-authored evaluation + deterministic evaluator; reviewed EMAIL terminal-period repair passes six known regression cases; v1 EMAIL fails on 1 frozen false positive and MyKad on 4; **not customer accepted**. See [docs/pii-quality.md](docs/pii-quality.md) |
 | Generation transport | Implemented; not live-verified |
 | Docker image / Compose runtime | Authored, **not built or run here**; default image/stack stays lightweight and safe-unavailable; optional `compose.pilot.yaml` adds the guard image target, policy and local model mounts as configuration scaffolding only |
@@ -283,11 +284,15 @@ VM generation was not independently verified here.
 An earlier `GET .../v1/models` attempt timed out on port 80. No further live
 network checks are made in this workspace.
 
-An optional Qwen3Guard output API adapter is prepared in
-`nasi_lemak/guard_api.py`, but it is not selected by server startup and cannot
-activate guarded mode by itself. See
-[docs/guard-api-integration.md](docs/guard-api-integration.md) for its
-synthetic-fixture evidence and the still-pending input classifier work.
+The optional API guard backend in `nasi_lemak/guard_api.py` is selected only by
+`NASI_LEMAK_GUARD_BACKEND=api` in guarded mode; the installer and the
+`compose.api.yaml` overlay expose the same explicit choice. It is implemented and
+loopback-fixture-tested locally, but no live guard endpoint or pretrained API
+model was contacted here. Real endpoint acceptance, model quality, latency and
+held-out capacity remain external work. See
+[docs/guard-api-integration.md](docs/guard-api-integration.md) for the contract
+and [docs/guard-evaluation.md](docs/guard-evaluation.md) for the synthetic
+evaluation harness.
 
 ## Local guard wiring
 

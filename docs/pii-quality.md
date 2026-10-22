@@ -213,6 +213,9 @@ unseen evidence and not an independent hold-out set.
 - MYKAD: any 12-digit ASCII value with optional hyphens in the current
   `6-2-4` grouping, regardless of field label. This intentionally over-matches
   order IDs and SKUs; that limitation is measured above rather than hidden.
+  **User decision (22 October 2026): ambiguous 12-digit order/SKU values stay
+  masked.** The gold labels and recognizers are unchanged; this is an accepted
+  privacy-over-precision trade-off, not an accuracy pass.
 - A match proves only that a structured format matched. It does not prove that
   a value is a real identity document or that surrounding text is semantically
   benign.

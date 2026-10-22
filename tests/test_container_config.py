@@ -274,6 +274,165 @@ class ComposeConfigTests(unittest.TestCase):
         self.assertNotIn("NASI_LEMAK_GENERATION_API_KEY", self.pilot_text)
 
 
+def _environment_map(value):
+    if isinstance(value, dict):
+        return dict(value)
+    result = {}
+    for item in value:
+        name, _, setting = item.partition("=")
+        result[name] = setting
+    return result
+
+
+class ApiComposeOverlayTests(unittest.TestCase):
+    """Structural checks for the API guard backend packaging.
+
+    These parse YAML only.  Docker is absent, so this is not a merged
+    ``docker compose config`` result or a runtime claim.
+    """
+
+    @classmethod
+    def setUpClass(cls):
+        if yaml is None:
+            raise unittest.SkipTest("PyYAML is not installed")
+        cls.base = _load("compose.yaml")
+        cls.api = _load("compose.api.yaml")
+        cls.ca = _load("compose.api-ca.yaml")
+        cls.api_text = (ROOT / "compose.api.yaml").read_text(encoding="utf-8")
+        cls.example = (ROOT / "docs" / "compose.api.env.example").read_text(
+            encoding="utf-8"
+        )
+
+    def test_overlay_selects_lightweight_server_and_keeps_base_security(self):
+        gateway = self.api["services"]["gateway"]
+        self.assertEqual(gateway["build"]["target"], "server")
+        self.assertEqual(
+            gateway["image"], self.base["services"]["gateway"]["image"]
+        )
+        # The overlay must not reset the inherited non-root/read-only posture.
+        for key in (
+            "read_only",
+            "user",
+            "cap_drop",
+            "security_opt",
+            "ports",
+            "networks",
+            "mem_limit",
+            "cpus",
+            "pids_limit",
+        ):
+            with self.subTest(key=key):
+                self.assertNotIn(key, gateway)
+        self.assertEqual(self.base["services"]["gateway"]["ports"], ["127.0.0.1:${GATEWAY_PORT:-8000}:8000"])
+        self.assertNotIn("ports", self.base["services"]["db"])
+
+    def test_overlay_is_guarded_api_with_test_ack_false(self):
+        env = _environment_map(self.api["services"]["gateway"]["environment"])
+        self.assertEqual(env["NASI_LEMAK_MODE"], "guarded")
+        self.assertEqual(env["NASI_LEMAK_ALLOW_UNGUARDED_TEST"], "false")
+        self.assertEqual(env["NASI_LEMAK_GUARD_BACKEND"], "api")
+        self.assertEqual(
+            env["NASI_LEMAK_INPUT_GUARD_CONTRACT"],
+            "nasi-lemak-input-classifier-v1",
+        )
+        self.assertNotIn("NASI_LEMAK_GENERATION_MODEL", env)
+
+    def test_overlay_mounts_only_approved_policy_not_model_artifacts(self):
+        volumes = self.api["services"]["gateway"]["volumes"]
+        self.assertEqual(len(volumes), 1)
+        policy = volumes[0]
+        self.assertEqual(policy["type"], "bind")
+        self.assertEqual(policy["target"], "/run/pilot/policy/policy.yaml")
+        self.assertIs(policy["read_only"], True)
+        self.assertIs(policy["bind"]["create_host_path"], False)
+        self.assertIn(":?", policy["source"])
+        for volume in volumes:
+            self.assertNotIn("/models", volume["target"])
+        self.assertNotIn("PROMPT_GUARD_MODEL_DIR", self.api_text)
+        self.assertNotIn("LLAMA_GUARD_MODEL_DIR", self.api_text)
+
+    def test_overlay_operator_and_guard_secrets_are_file_backed(self):
+        gateway = self.api["services"]["gateway"]
+        self.assertEqual(
+            set(gateway["secrets"]),
+            {
+                "operator_key_digest",
+                "operator_audit_dsn",
+                "input_guard_key",
+                "output_guard_key",
+            },
+        )
+        self.assertEqual(
+            set(self.api["secrets"]),
+            {
+                "operator_key_digest",
+                "operator_audit_dsn",
+                "input_guard_key",
+                "output_guard_key",
+            },
+        )
+        for name, secret in self.api["secrets"].items():
+            with self.subTest(secret=name):
+                self.assertIn(":?", secret["file"])
+                self.assertIn("_FILE", secret["file"])
+        operator_files = {
+            self.api["secrets"]["operator_key_digest"]["file"],
+            self.api["secrets"]["operator_audit_dsn"]["file"],
+        }
+        self.assertEqual(len(operator_files), 2)
+        self.assertFalse(
+            operator_files
+            & {secret["file"] for secret in self.base["secrets"].values()}
+        )
+
+    def test_bearer_key_variables_are_conditional_container_paths(self):
+        env = _environment_map(self.api["services"]["gateway"]["environment"])
+        # Bare list entries in the source are not materialized into key=value
+        # pairs until interpolation; the static parser reports an empty value,
+        # which is exactly the "not passed unless the operator sets it" shape.
+        self.assertEqual(env["NASI_LEMAK_INPUT_GUARD_API_KEY_FILE"], "")
+        self.assertEqual(env["NASI_LEMAK_OUTPUT_GUARD_API_KEY_FILE"], "")
+        self.assertIn("- NASI_LEMAK_INPUT_GUARD_API_KEY_FILE", self.api_text)
+        self.assertIn("- NASI_LEMAK_OUTPUT_GUARD_API_KEY_FILE", self.api_text)
+        self.assertNotIn("NASI_LEMAK_INPUT_GUARD_API_KEY=", self.api_text)
+        self.assertNotIn("NASI_LEMAK_OUTPUT_GUARD_API_KEY=", self.api_text)
+
+    def test_private_ca_overlay_is_an_explicit_readonly_mount(self):
+        gateway = self.ca["services"]["gateway"]
+        env = _environment_map(gateway["environment"])
+        volume = gateway["volumes"][0]
+        self.assertEqual(volume["type"], "bind")
+        self.assertEqual(volume["target"], "/run/pilot/guard-ca/ca.pem")
+        self.assertIs(volume["read_only"], True)
+        self.assertIs(volume["bind"]["create_host_path"], False)
+        self.assertIn(":?", volume["source"])
+        self.assertEqual(
+            env["NASI_LEMAK_INPUT_GUARD_CA_FILE"], volume["target"]
+        )
+        self.assertEqual(
+            env["NASI_LEMAK_OUTPUT_GUARD_CA_FILE"], volume["target"]
+        )
+        self.assertFalse(
+            [key for key in env if key.endswith("_ALLOW_INSECURE_HTTP")]
+        )
+
+    def test_packaging_contains_no_embedded_secret_values(self):
+        for name, document in (
+            ("compose.yaml", self.base),
+            ("compose.api.yaml", self.api),
+            ("compose.api-ca.yaml", self.ca),
+        ):
+            for value in _string_values(document):
+                with self.subTest(file=name, value=str(value)[:40]):
+                    self.assertNotRegex(str(value), _HEX_DIGEST_RE)
+                    self.assertNotIn("postgresql://", str(value))
+                    self.assertNotIn("BEGIN PRIVATE KEY", str(value))
+        self.assertNotIn("API_KEY=", self.example)
+        for line in self.example.splitlines():
+            if "API_KEY_FILE" in line and not line.lstrip().startswith("#"):
+                self.assertIn("/run/secrets/", line)
+
+
 class DockerfileTests(unittest.TestCase):
     @classmethod
     def setUpClass(cls):

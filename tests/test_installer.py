@@ -63,11 +63,13 @@ class FakeStat:
         uid: int = 0,
         gid: int = 0,
         nlink: int = 1,
+        size: int = 0,
     ):
         self.st_mode = mode
         self.st_uid = uid
         self.st_gid = gid
         self.st_nlink = nlink
+        self.st_size = size
 
 
 class FakePlatformOps:
@@ -88,6 +90,7 @@ class FakePlatformOps:
         self.mkdir_calls: list[str] = []
         self.sleeps: list[float] = []
         self.read_text_overrides: dict[str, str] = {}
+        self.read_text_calls: list[str] = []
         self._lock_paths: dict[int, str] = {}
         self.held_locks: set[str] = set()
         self.env: dict[str, str] = {"PATH": os.environ.get("PATH", "")}
@@ -113,7 +116,12 @@ class FakePlatformOps:
             raise
         mode = self.modes.get(key, stat.S_IMODE(st.st_mode))
         uid, gid = self.ownership.get(key, (st.st_uid, st.st_gid))
-        return FakeStat(mode=(stat.S_IFMT(st.st_mode) | mode), uid=uid, gid=gid)
+        return FakeStat(
+            mode=(stat.S_IFMT(st.st_mode) | mode),
+            uid=uid,
+            gid=gid,
+            size=st.st_size,
+        )
 
     def mkdir(
         self, path: Path, *, parents: bool = False, exist_ok: bool = False, mode: int = 0o777
@@ -195,6 +203,7 @@ class FakePlatformOps:
 
     def read_text(self, path: Path) -> str:
         key = str(self._abs(path))
+        self.read_text_calls.append(key)
         if key in self.read_text_overrides:
             return self.read_text_overrides[key]
         return path.read_text(encoding="utf-8")
@@ -1641,6 +1650,397 @@ class MainFlagsTests(unittest.TestCase):
         with self.assertRaises(ValidationError):
             self._run_main([])
         self.assertFalse(self.state.exists())
+
+
+class GuardApiBackendTests(unittest.TestCase):
+    """Installer packaging for the API guard backend.
+
+    All Docker commands are mocked; these tests prove configuration and command
+    composition only.  They are not image-build, VM, endpoint or latency
+    evidence.
+    """
+
+    def setUp(self) -> None:
+        self.tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(self.tmp.cleanup)
+        self.project = Path(self.tmp.name) / "project"
+        self.project.mkdir()
+        self.state = self.project / ".secrets"
+        self.clock = FakeClock()
+        self.ops = FakePlatformOps(self.project, self.clock)
+        self.ops.uid = 0
+        set_platform_ops(self.ops)
+        self.ops.read_text_overrides[str(Path("/etc/os-release").resolve())] = (
+            "ID=ubuntu\nVERSION_CODENAME=noble\n"
+        )
+        self.runner = FakeRunner()
+        self.policy = self.project / "policy.yaml"
+        self.policy.write_text("app_id: approved-operator-policy\n", encoding="utf-8")
+
+    def _key(self, name: str) -> Path:
+        path = self.project / name
+        path.write_text("synthetic-not-a-real-key\n", encoding="utf-8")
+        # Approved runtime-owned mode: readable only by runtime UID 10001.
+        self.ops.modes[str(path.resolve())] = 0o400
+        self.ops.ownership[str(path.resolve())] = (
+            install.RUNTIME_UID,
+            install.RUNTIME_GID,
+        )
+        return path
+
+    def _owned_key(
+        self,
+        name: str,
+        *,
+        mode: int,
+        uid: int = install.RUNTIME_UID,
+        gid: int = install.RUNTIME_GID,
+    ) -> Path:
+        path = self._key(name)
+        self.ops.modes[str(path.resolve())] = mode
+        self.ops.ownership[str(path.resolve())] = (uid, gid)
+        return path
+
+    def _config(
+        self,
+        *,
+        auth: str = "bearer",
+        input_key: Path | None = None,
+        output_key: Path | None = None,
+        ca_file: Path | None = None,
+        extra_input: dict[str, Any] | None = None,
+    ) -> Path:
+        input_section: dict[str, Any] = {
+            "url": "https://input-guard.example.invalid/v1",
+            "model": "meta-llama/Llama-Prompt-Guard-2-86M",
+            "auth": auth,
+            "threshold": 0.5,
+        }
+        output_section: dict[str, Any] = {
+            "url": "https://output-guard.example.invalid/v1",
+            "model": "Qwen/Qwen3Guard-Gen-4B",
+            "auth": auth,
+        }
+        if auth == "bearer":
+            input_section["api_key_file"] = str(
+                input_key or self._key("input_guard_key")
+            )
+            output_section["api_key_file"] = str(
+                output_key or self._key("output_guard_key")
+            )
+        if extra_input is not None:
+            input_section.update(extra_input)
+        document: dict[str, Any] = {
+            "version": 1,
+            "input": input_section,
+            "output": output_section,
+        }
+        if ca_file is not None:
+            document["ca_file"] = str(ca_file)
+        path = self.project / "guard-api.json"
+        path.write_text(json.dumps(document), encoding="utf-8")
+        self.ops.modes[str(path.resolve())] = 0o600
+        return path
+
+    def _make_runner(self, *, guards_active: bool = True) -> FakeRunner:
+        runner = FakeRunner()
+        runner.add(["docker", "version"], CommandResult(0, "", ""))
+        runner.add(["docker", "compose", "version"], CommandResult(0, "", ""))
+        runner.add(["uname", "-m"], CommandResult(0, install.REQUIRED_ARCH, ""))
+        runner.add(
+            ["docker", "volume", "inspect", install.compose_volume_name()],
+            CommandResult(1, "", ""),
+        )
+        runner.add(_volume_create_cmd(), CommandResult(0, "", ""))
+        runner.add("config --quiet", CommandResult(0, "", ""))
+        runner.add("up -d --wait --wait-timeout 120 db", CommandResult(0, "", ""))
+        runner.add("ps --format json db", CommandResult(0, '{"Health": "healthy"}', ""))
+        runner.add("exec -T db psql", CommandResult(0, "", ""))
+        runner.add(
+            "up -d --build --wait --wait-timeout 300 gateway",
+            CommandResult(0, "", ""),
+        )
+        runner.add(
+            "/health/ready",
+            CommandResult(
+                0,
+                json.dumps(
+                    {
+                        "status": "ready",
+                        "mode": "guarded",
+                        "guards_active": guards_active,
+                    }
+                ),
+                "",
+            ),
+        )
+        return runner
+
+    def _installer(self, **kwargs: Any) -> Installer:
+        defaults: dict[str, Any] = {
+            "project_dir": self.project,
+            "state_dir": self.state,
+            "mode": "guarded",
+            "port": "8000",
+            "generation_url": "https://example.com/v1",
+            "generation_model": "model-1",
+            "generation_auth": "none",
+            "policy_file": str(self.policy),
+            "prompt_guard_dir": None,
+            "llama_guard_dir": None,
+            "interactive": True,
+            "ack_test_unguarded": False,
+            "allow_insecure_http": False,
+            "runner": self.runner,
+            "prompt_fn": lambda _: "yes",
+            "guard_backend": "api",
+        }
+        defaults.update(kwargs)
+        return Installer(**defaults)
+
+    def test_guarded_api_mode_needs_no_native_model_directories(self) -> None:
+        config = self._config()
+        inst = self._installer(guard_api_config=str(config))
+        with redirect_stdout(io.StringIO()):
+            self.assertEqual(inst.plan(), 0)
+        text = inst._preview()
+        self.assertIn("Guard backend:      api", text)
+        self.assertNotIn("Prompt Guard dir", text)
+
+    def test_missing_config_fails_before_any_change(self) -> None:
+        with self.assertRaises(ValidationError):
+            self._installer(guard_api_config=None)
+        self.assertFalse(self.state.exists())
+
+    def test_inline_credentials_and_missing_bearer_files_are_rejected(self) -> None:
+        inline = self._config()
+        document = json.loads(inline.read_text(encoding="utf-8"))
+        document["input"]["api_key"] = "inline-not-allowed"
+        inline.write_text(json.dumps(document), encoding="utf-8")
+        with self.assertRaises(ValidationError):
+            self._installer(guard_api_config=str(inline))
+
+        missing = self._config(input_key=self.project / "absent-key")
+        with self.assertRaises(ValidationError):
+            self._installer(guard_api_config=str(missing))
+
+    def test_auth_none_accepts_no_key_files(self) -> None:
+        config = self._config(auth="none")
+        inst = self._installer(guard_api_config=str(config))
+        with redirect_stdout(io.StringIO()):
+            self.assertEqual(inst.plan(), 0)
+        api_env = install.write_api_compose_env(
+            self.state,
+            self.policy,
+            inst.guard_api_config,
+            install.ensure_empty_guard_key(self.state),
+        )
+        text = api_env.read_text(encoding="utf-8")
+        self.assertNotIn("NASI_LEMAK_INPUT_GUARD_API_KEY_FILE", text)
+        self.assertNotIn("NASI_LEMAK_OUTPUT_GUARD_API_KEY_FILE", text)
+        self.assertIn("INPUT_GUARD_KEY_SOURCE_FILE=", text)
+        self.assertIn("OUTPUT_GUARD_KEY_SOURCE_FILE=", text)
+
+    def test_plan_is_read_only_and_never_reads_key_file_contents(self) -> None:
+        input_key = self._key("input_guard_key")
+        output_key = self._key("output_guard_key")
+        config = self._config(input_key=input_key, output_key=output_key)
+        inst = self._installer(guard_api_config=str(config))
+        before_chmod = list(self.ops.chmod_calls)
+        before_chown = list(self.ops.chown_calls)
+        with redirect_stdout(io.StringIO()):
+            self.assertEqual(inst.plan(), 0)
+        self.assertFalse(self.state.exists())
+        self.assertEqual(self.ops.chmod_calls, before_chmod)
+        self.assertEqual(self.ops.chown_calls, before_chown)
+        self.assertIn(str(config.resolve()), self.ops.read_text_calls)
+        self.assertNotIn(str(input_key.resolve()), self.ops.read_text_calls)
+        self.assertNotIn(str(output_key.resolve()), self.ops.read_text_calls)
+        self.assertEqual(self.runner.commands, [])
+
+    def test_successful_api_install_uses_api_overlay_and_guarded_readiness(self) -> None:
+        input_key = self._key("input_guard_key")
+        output_key = self._key("output_guard_key")
+        config = self._config(input_key=input_key, output_key=output_key)
+        inst = self._installer(
+            guard_api_config=str(config), runner=self._make_runner()
+        )
+        with redirect_stdout(io.StringIO()):
+            self.assertEqual(inst.install(), 0)
+
+        commands = [" ".join(cmd) for cmd, _ in inst.runner.commands]
+        self.assertTrue(any("compose.api.yaml" in cmd for cmd in commands))
+        self.assertTrue(any("compose.api.env" in cmd for cmd in commands))
+        self.assertFalse(any("compose.pilot.yaml" in cmd for cmd in commands))
+        self.assertFalse(any("compose.test.yaml" in cmd for cmd in commands))
+        self.assertTrue(
+            any(
+                "up -d --build --wait --wait-timeout 300 gateway" in cmd
+                for cmd in commands
+            )
+        )
+        self.assertEqual(
+            (self.state / ".active_mode").read_text(encoding="utf-8").strip(),
+            "guarded",
+        )
+
+        api_env = (self.state / "compose.api.env").read_text(encoding="utf-8")
+        self.assertIn("NASI_LEMAK_INPUT_GUARD_CONTRACT='nasi-lemak-input-classifier-v1'", api_env)
+        self.assertIn(
+            f"INPUT_GUARD_KEY_SOURCE_FILE='{input_key}'", api_env
+        )
+        self.assertIn(
+            "NASI_LEMAK_INPUT_GUARD_API_KEY_FILE='/run/secrets/input_guard_key'",
+            api_env,
+        )
+        self.assertIn(
+            "NASI_LEMAK_OUTPUT_GUARD_API_KEY_FILE='/run/secrets/output_guard_key'",
+            api_env,
+        )
+        self.assertNotIn("PROMPT_GUARD_MODEL_DIR", api_env)
+        self.assertNotIn("LLAMA_GUARD_MODEL_DIR", api_env)
+        self.assertNotIn("synthetic-not-a-real-key", api_env)
+        self.assertEqual(self.ops.modes[str((self.state / "compose.api.env").resolve())], 0o600)
+
+    def test_auth_none_install_creates_dedicated_unreferenced_empty_secret(self) -> None:
+        config = self._config(auth="none")
+        inst = self._installer(
+            guard_api_config=str(config), runner=self._make_runner()
+        )
+        with redirect_stdout(io.StringIO()):
+            self.assertEqual(inst.install(), 0)
+        empty = self.state / "guard_api_empty_key"
+        self.assertTrue(empty.exists())
+        self.assertEqual(empty.read_bytes(), b"")
+        api_env = (self.state / "compose.api.env").read_text(encoding="utf-8")
+        self.assertNotIn("NASI_LEMAK_INPUT_GUARD_API_KEY_FILE", api_env)
+        self.assertNotIn("NASI_LEMAK_OUTPUT_GUARD_API_KEY_FILE", api_env)
+
+    def test_configured_api_backend_cannot_fall_back(self) -> None:
+        config = self._config()
+        inst = self._installer(
+            guard_api_config=str(config),
+            runner=self._make_runner(guards_active=False),
+        )
+        with self.assertRaises(InstallError), redirect_stderr(io.StringIO()), \
+                redirect_stdout(io.StringIO()):
+            inst.install()
+        self.assertFalse((self.state / ".active_mode").exists())
+        commands = [" ".join(cmd) for cmd, _ in inst.runner.commands]
+        self.assertTrue(any("compose.api.yaml" in cmd for cmd in commands))
+        self.assertFalse(any("compose.pilot.yaml" in cmd for cmd in commands))
+        self.assertFalse(any("compose.test.yaml" in cmd for cmd in commands))
+
+    def test_operator_policy_is_preserved(self) -> None:
+        original = self.policy.read_text(encoding="utf-8")
+        config = self._config()
+        inst = self._installer(
+            guard_api_config=str(config), runner=self._make_runner()
+        )
+        with redirect_stdout(io.StringIO()):
+            self.assertEqual(inst.install(), 0)
+        self.assertEqual(self.policy.read_text(encoding="utf-8"), original)
+        self.assertEqual(
+            (self.state / "compose.api.env").read_text(encoding="utf-8").count(
+                "API_POLICY_FILE="
+            ),
+            1,
+        )
+
+    def test_configured_private_ca_adds_readonly_overlay(self) -> None:
+        ca = self.project / "private-ca.pem"
+        ca.write_text("-----BEGIN CERTIFICATE-----\nplaceholder\n", encoding="utf-8")
+        config = self._config(ca_file=ca)
+        inst = self._installer(
+            guard_api_config=str(config), runner=self._make_runner()
+        )
+        with redirect_stdout(io.StringIO()):
+            self.assertEqual(inst.install(), 0)
+        commands = [" ".join(cmd) for cmd, _ in inst.runner.commands]
+        self.assertTrue(any("compose.api-ca.yaml" in cmd for cmd in commands))
+        api_env = (self.state / "compose.api.env").read_text(encoding="utf-8")
+        self.assertIn(f"GUARD_CA_BUNDLE='{ca}'", api_env)
+        self.assertNotIn("ALLOW_INSECURE_HTTP", api_env)
+
+    def test_max_response_bytes_rejects_below_generation_minimum(self) -> None:
+        for value in (1, 1023):
+            config = self._config(extra_input={"max_response_bytes": value})
+            with self.subTest(value=value), self.assertRaises(ValidationError):
+                self._installer(guard_api_config=str(config))
+            self.assertFalse(self.state.exists())
+
+    def test_max_response_bytes_accepts_generation_minimum(self) -> None:
+        config = self._config(extra_input={"max_response_bytes": 1024})
+        inst = self._installer(guard_api_config=str(config))
+        with redirect_stdout(io.StringIO()):
+            self.assertEqual(inst.plan(), 0)
+        api_env = install.write_api_compose_env(
+            self.state,
+            self.policy,
+            inst.guard_api_config,
+            install.ensure_empty_guard_key(self.state),
+        )
+        self.assertIn(
+            "NASI_LEMAK_INPUT_GUARD_MAX_RESPONSE_BYTES='1024'",
+            api_env.read_text(encoding="utf-8"),
+        )
+
+    def test_root_owned_bearer_key_with_0600_is_refused_with_safe_hint(self) -> None:
+        bad_key = self._owned_key("root-only-key", mode=0o600, uid=0, gid=0)
+        config = self._config(input_key=bad_key)
+        with self.assertRaises(ValidationError) as ctx:
+            self._installer(guard_api_config=str(config))
+        message = str(ctx.exception)
+        self.assertIn("not readable by runtime UID 10001", message)
+        self.assertIn("chown 10001:10001", message)
+        self.assertIn("chmod 0400", message)
+        self.assertNotIn("a+r", message)
+        self.assertFalse(self.state.exists())
+        self.assertNotIn(str(bad_key.resolve()), self.ops.read_text_calls)
+
+    def test_world_readable_or_group_writable_bearer_key_is_refused(self) -> None:
+        for mode in (0o644, 0o660, 0o604):
+            bad_key = self._owned_key(f"unsafe-{mode:o}-key", mode=mode)
+            config = self._config(input_key=bad_key)
+            with self.subTest(mode=oct(mode)), self.assertRaises(ValidationError) as ctx:
+                self._installer(guard_api_config=str(config))
+            message = str(ctx.exception)
+            self.assertNotIn("a+r", message)
+            self.assertIn("chmod 0400", message)
+            self.assertFalse(self.state.exists())
+            self.assertNotIn(str(bad_key.resolve()), self.ops.read_text_calls)
+
+    def test_approved_runtime_owner_or_group_bearer_key_modes_are_accepted(self) -> None:
+        approved = (
+            (install.RUNTIME_UID, install.RUNTIME_GID, 0o400),
+            (install.RUNTIME_UID, 0, 0o600),
+            (0, install.RUNTIME_GID, 0o440),
+            (0, install.RUNTIME_GID, 0o640),
+        )
+        for uid, gid, mode in approved:
+            key = self._owned_key(
+                f"approved-{mode:o}-key", mode=mode, uid=uid, gid=gid
+            )
+            config = self._config(input_key=key)
+            inst = self._installer(guard_api_config=str(config))
+            with self.subTest(mode=oct(mode), uid=uid, gid=gid), \
+                    redirect_stdout(io.StringIO()):
+                self.assertEqual(inst.plan(), 0)
+            self.assertNotIn(str(key.resolve()), self.ops.read_text_calls)
+
+    def test_empty_or_symlinked_bearer_key_is_refused(self) -> None:
+        empty = self._key("empty-key")
+        empty.write_bytes(b"")
+        with self.assertRaises(ValidationError):
+            self._installer(guard_api_config=str(self._config(input_key=empty)))
+
+        symlinked = self._owned_key("symlink-key", mode=0o400)
+        self.ops.symlinks.add(str(symlinked.resolve()))
+        with self.assertRaises(ValidationError):
+            self._installer(
+                guard_api_config=str(self._config(input_key=symlinked))
+            )
+        self.assertNotIn(str(symlinked.resolve()), self.ops.read_text_calls)
 
 
 if __name__ == "__main__":

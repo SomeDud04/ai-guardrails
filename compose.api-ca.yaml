@@ -1,0 +1,28 @@
+# Optional private-CA overlay for compose.api.yaml.
+#
+# Apply only when the approved guard endpoints use a private certificate
+# authority.  This is an explicit read-only mount; it does not disable TLS
+# verification and it never sets NASI_LEMAK_*_ALLOW_INSECURE_HTTP.
+#
+#   docker compose \
+#     --env-file .secrets/compose.env \
+#     --env-file .secrets/compose.api.env \
+#     -f compose.yaml -f compose.api.yaml -f compose.api-ca.yaml config
+#
+# GUARD_CA_BUNDLE must name an absolute PEM bundle path readable by the gateway
+# runtime UID.  The server reads the mounted file through each guard client's
+# documented ``_CA_FILE`` setting.  Without this overlay the system trust store
+# is used.  A private CA must never be handled by disabling certificate checks.
+
+services:
+  gateway:
+    environment:
+      - NASI_LEMAK_INPUT_GUARD_CA_FILE=/run/pilot/guard-ca/ca.pem
+      - NASI_LEMAK_OUTPUT_GUARD_CA_FILE=/run/pilot/guard-ca/ca.pem
+    volumes:
+      - type: bind
+        source: ${GUARD_CA_BUNDLE:?Set GUARD_CA_BUNDLE to an absolute PEM bundle path}
+        target: /run/pilot/guard-ca/ca.pem
+        read_only: true
+        bind:
+          create_host_path: false

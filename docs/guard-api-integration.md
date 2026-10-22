@@ -1,18 +1,17 @@
 # Guard API integration status (22 October 2026)
 
-This note covers the **optional** Qwen3Guard output API adapter in
-`nasi_lemak/guard_api.py`. It is a real adapter against the documented
-OpenAI-compatible serving contract, verified only with loopback HTTP fixtures.
-No Qwen3Guard endpoint, credential or pretrained model was contacted or run in
-this workspace, so this is not evidence of model quality, latency or
-availability.
+This note covers the **optional** API guard backend in
+`nasi_lemak/guard_api.py` and its explicit server selection. It is verified only
+with synthetic loopback HTTP fixtures. No guard endpoint, credential or
+pretrained model was contacted or run in this workspace, so this is not evidence
+of model quality, latency or availability.
 
 ## Selected roles
 
 | Role | Selected model | Current state |
 |---|---|---|
-| Input / attack screening | `meta-llama/Llama-Prompt-Guard-2-86M` | Local adapter exists; hosted API contract not confirmed |
-| Output screening | `Qwen/Qwen3Guard-Gen-4B` | Optional API adapter prepared and fixture-tested; not runtime-wired |
+| Input / attack screening | `meta-llama/Llama-Prompt-Guard-2-86M` | API adapter and gateway-owned `/classify` contract v1 implemented and fixture-tested; live endpoint pending |
+| Output screening | `Qwen/Qwen3Guard-Gen-4B` | API adapter runtime-wired for `NASI_LEMAK_GUARD_BACKEND=api`; live endpoint pending |
 
 Official references:
 
@@ -21,6 +20,70 @@ Official references:
   `Safety` / `Categories` / `Refusal` verdict fields.
 - <https://huggingface.co/meta-llama/Llama-Prompt-Guard-2-86M> — binary
   benign/malicious classifier with a 512-token window.
+
+## Input classifier API contract v1
+
+`NASI_LEMAK_INPUT_GUARD_CONTRACT` must be exactly
+`nasi-lemak-input-classifier-v1` for the API backend. This is a gateway-owned
+contract implemented by the gateway's input adapter; it is **not** a claim that
+a stock Prompt Guard endpoint exposes this shape.
+
+Request: `POST <NASI_LEMAK_INPUT_GUARD_URL>/classify`, JSON body with exactly:
+
+```json
+{"model": "<configured served model>", "input": "<complete serialized input>",
+ "truncation": false, "max_input_tokens": 512}
+```
+
+Response: HTTP 200, JSON object with exactly these four fields:
+
+```json
+{"model": "<same configured served model>", "malicious_probability": 0.05,
+ "input_tokens": 12, "truncated": false}
+```
+
+The adapter requires an exact key set (extra, missing or unknown fields fail
+closed), the exact configured model, a finite non-boolean
+`malicious_probability` in `[0, 1]`, a strict integer `input_tokens` in
+`[1, 512]`, and `truncated` exactly `false`. Duplicate keys and non-finite JSON
+numbers are rejected by the strict transport. A probability at or above the
+explicit threshold blocks. Any HTTP error, timeout, redirect, invalid UTF-8,
+oversize response, invalid JSON or contract mismatch raises a generic
+`GuardError` with no retry and no endpoint/key detail. `count_tokens` returns
+`conservative_byte_budget`, a UTF-8 byte bound for the gateway budget; it is
+**not** a model tokenizer count and the remote contract enforces the 512-token
+window itself.
+
+## API backend settings
+
+Default remains `NASI_LEMAK_GUARD_BACKEND=local`. Select the API backend only
+with `NASI_LEMAK_GUARD_BACKEND=api` under `NASI_LEMAK_MODE=guarded`; unknown or
+partial settings leave the app not ready and never fall back to local or test
+adapters. All settings are validated before any client is constructed, and no
+inference request is made during startup or readiness.
+
+| Setting | Required | Notes |
+|---|---|---|
+| `NASI_LEMAK_INPUT_GUARD_URL` / `_MODEL` / `_AUTH` | yes | Base URL, exact served model, `bearer` or `none` |
+| `NASI_LEMAK_INPUT_GUARD_API_KEY` or `_API_KEY_FILE` | bearer only | Exactly one; unreadable file is an error, no inline fallback |
+| `NASI_LEMAK_INPUT_GUARD_THRESHOLD` | yes | Finite inclusive `[0, 1]` |
+| `NASI_LEMAK_INPUT_GUARD_CONTRACT` | yes | Must be `nasi-lemak-input-classifier-v1` |
+| `NASI_LEMAK_OUTPUT_GUARD_URL` / `_MODEL` / `_AUTH` | yes | Qwen3Guard chat-completions endpoint, exact model, auth mode |
+| `NASI_LEMAK_OUTPUT_GUARD_API_KEY` or `_API_KEY_FILE` | bearer only | Exactly one; same file rules |
+| `<PREFIX>_TIMEOUT`, `_CA_FILE`, `_MAX_RESPONSE_BYTES`, `_ALLOW_INSECURE_HTTP` | no | Same validated bounds and explicit HTTP opt-in as generation |
+
+Guard keys are distinct from the generation/chat key and there is no credential
+fallback. Local guard artifact directories and ML dependencies are not read or
+imported in API mode.
+
+## Data flow through the gateway
+
+The input classifier receives the **raw** serialized conversation before the
+existing PII masking step. The generation request then receives the PII-masked
+conversation. The output guard receives that same masked conversation plus the
+complete **buffered raw** generated output; PII masking of released output
+happens only after the output verdict, so the guard endpoint can see sensitive
+generated text. Select endpoints whose data handling accepts that flow.
 
 ## Qwen verdict contract
 
@@ -50,22 +113,6 @@ missing lines, reordered lines, unknown labels, and contradictions such as
 timeout, HTTP error or truncated/non-`stop` completion also becomes a generic
 `GuardError`; the gateway then returns `503` without releasing buffered output.
 The error text contains no endpoint, key, prompt or output.
-
-## Data flow through the gateway
-
-`Qwen3GuardOutputAdapter.scan_response(messages, output)` validates and copies
-the supplied `messages` list and appends `output` as one assistant turn; it does
-not mask, rewrite or truncate either argument. When composed through
-`RealGatewayAdapters`, the gateway supplies the PII-masked generation messages
-and the complete **buffered raw** generated output. PII masking of released
-output happens only after output screening, so the guard endpoint can receive
-sensitive generated text that has not yet been masked. Select an endpoint whose
-data handling accepts that content.
-
-The selected deployment plan uses internal guard APIs under the operator's
-control. Public or third-party hosted alternatives require an explicitly
-accepted data flow before real content is sent; the free/hosted options below
-are not an approved choice.
 
 ## Programmatic construction
 
@@ -103,23 +150,32 @@ non-`stop`, missing or refusal completions.
 
 ## Activation and remaining work
 
-The adapter is **not** selected by the current server environment, installer or
-Compose files, and constructing it alone cannot activate guarded mode. The
-current legacy guarded startup still requires existing local PromptGuard2 and
-LlamaGuard3 artifacts plus a valid generation configuration until API wiring
-exists; those local artifacts are not a target-deployment dependency. The
-selected target deployment uses internal guard APIs. The existing gateway already accepts
-`output_guard.scan_response(messages, output)` through
-`RealGatewayAdapters`, so runtime wiring is a small, explicit later step once
-the endpoint is confirmed.
+API mode is selected only by `NASI_LEMAK_GUARD_BACKEND=api` under guarded mode;
+the default local backend and the acknowledged test mode are unchanged. Backend,
+contract, threshold and both dedicated configs are validated before any client
+loader runs, and construction or readiness makes no inference HTTP call. The
+composition reuses `RealGatewayAdapters`: the same `InputGuardApiAdapter` is the
+tokenizer and attack guard, and `Qwen3GuardOutputAdapter` screens the output.
 
-For the input classifier, the Prompt Guard model card describes a binary
-classifier, not an OpenAI generative chat API. Before writing an input adapter,
-confirm one actual response shape, the exact served model ID, truncation/window
-handling at 512 tokens, score/threshold semantics, authentication and timeouts.
-Until then, input API serving and environment wiring remain pending. The next
-step is that input adapter plus explicit runtime configuration, followed by a
-supervised live check; there is no silent test-mode fallback.
+The API backend and contract are verified **only** against synthetic loopback
+fixtures in `tests/test_guard_api_modes.py`. Live
+endpoint behaviour, Prompt Guard quality, latency, availability and data-flow
+approval remain pending. Do not claim live API quality or availability from this
+slice.
+
+Local versus API: the default local backend still needs local Prompt Guard and
+Llama Guard artifacts. The API backend imports no local ML stack and instead
+needs operator-supplied endpoints, served model IDs and credentials; neither
+backend has live model-quality evidence here. The installer flow is documented
+in [install-ubuntu.md](install-ubuntu.md) and the overlay is
+[../compose.api.yaml](../compose.api.yaml). The selected deployment plan uses internal guard APIs under the
+operator's control; public or third-party hosted alternatives require an
+explicitly accepted data flow before real content is sent, and the free/hosted
+options below are not an approved choice.
+
+The local backend still requires PromptGuard2 and LlamaGuard3 artifacts plus a
+valid generation configuration. Those local artifacts are not a
+target-deployment dependency for the API backend, which imports no ML stack.
 
 ## Free/evaluation options (not selected models)
 

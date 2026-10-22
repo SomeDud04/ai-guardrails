@@ -119,6 +119,27 @@ class SharedPiiSpanTests(unittest.TestCase):
                 self.assertEqual(find_redactions(text), [])
                 self.assertEqual(mask_text(text), text)
 
+    def test_labelled_order_and_sku_12_digit_values_still_masked(self):
+        # Documented format-only tradeoff: any 12-digit MyKad-shaped value is
+        # masked even when a nearby label says order/SKU. These are the known
+        # MyKad false positives recorded in docs/pii-quality.md; no evaluation
+        # label or recognizer changes are made here and no precision claim is
+        # repaired.
+        cases = {
+            "order 900101123456": "order [MYKAD]",
+            "order_id=900101123456": "order_id=[MYKAD]",
+            "SKU: 900101123456": "SKU: [MYKAD]",
+            "sku 880202105678": "sku [MYKAD]",
+        }
+        for text, expected in cases.items():
+            with self.subTest(text=text):
+                self.assertEqual(mask_text(text), expected)
+                self.assertEqual(mask_pii(text), expected)
+                self.assertEqual(
+                    [item.entity_type for item in find_redactions(text)],
+                    ["MYKAD"],
+                )
+
     def test_email_phone_mykad_order_is_preserved(self):
         text = "a@example.invalid 0123456789 900101-12-3456"
         self.assertEqual(mask_pii(text), "[EMAIL] [MY_PHONE] [MYKAD]")

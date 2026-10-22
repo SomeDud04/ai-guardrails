@@ -78,6 +78,20 @@ class GenerationError(RuntimeError):
     """
 
 
+def conservative_byte_budget(serialized: str) -> int:
+    """Conservative UTF-8 byte budget, never a model tokenizer count.
+
+    The small framing allowance covers per-message overhead.  Callers must not
+    report this number as a tokenizer result or as a model-window claim.
+    """
+    if not isinstance(serialized, str):
+        raise ValueError("serialized input is invalid")
+    body = len(serialized.encode("utf-8"))
+    messages = serialized.count("\n") + 1
+    framing = messages * 2 + 2
+    return body + framing
+
+
 def _has_control_characters(value: str) -> bool:
     return any(ord(character) < 0x20 or ord(character) == 0x7F for character in value)
 
@@ -293,6 +307,32 @@ class _NoRedirect(urllib.request.HTTPRedirectHandler):
         return None
 
 
+def _reject_duplicate_json_keys(pairs: list[tuple[str, Any]]) -> dict[str, Any]:
+    mapping: dict[str, Any] = {}
+    for key, value in pairs:
+        if key in mapping:
+            raise ValueError("duplicate JSON key")
+        mapping[key] = value
+    return mapping
+
+
+def _reject_json_constant(_value: str) -> Any:
+    raise ValueError("non-finite JSON number")
+
+
+def _validate_json_path(path: Any) -> str:
+    if not isinstance(path, str) or not path.startswith("/") or len(path) > 128:
+        raise ValueError("generation request path is invalid")
+    if path == "/" or "//" in path or ".." in path:
+        raise ValueError("generation request path is invalid")
+    if any(
+        not (character.isalnum() or character in "-._/")
+        for character in path
+    ):
+        raise ValueError("generation request path is invalid")
+    return path
+
+
 def _validate_messages(messages: Any) -> list[dict[str, str]]:
     if not isinstance(messages, list) or not 1 <= len(messages) <= MAX_MESSAGES:
         raise ValueError("generation messages are invalid")
@@ -359,7 +399,14 @@ class GenerationClient:
             _NoRedirect(),
         )
 
-    def _request_json(self, url: str, *, method: str, payload: dict[str, Any] | None = None) -> Any:
+    def _request_json(
+        self,
+        url: str,
+        *,
+        method: str,
+        payload: dict[str, Any] | None = None,
+        strict_json: bool = False,
+    ) -> Any:
         headers = {"Accept": "application/json"}
         if self.config.auth_mode == AUTH_BEARER:
             headers["Authorization"] = "Bearer " + self.config.api_key
@@ -407,8 +454,14 @@ class GenerationClient:
         if len(body) > limit:
             raise GenerationError("generation endpoint response exceeded the size limit")
         try:
+            if strict_json:
+                return json.loads(
+                    body.decode("utf-8"),
+                    object_pairs_hook=_reject_duplicate_json_keys,
+                    parse_constant=_reject_json_constant,
+                )
             return json.loads(body.decode("utf-8"))
-        except (UnicodeDecodeError, json.JSONDecodeError):
+        except (UnicodeDecodeError, json.JSONDecodeError, ValueError):
             raise GenerationError("generation endpoint returned invalid JSON") from None
 
     def _require_model(self) -> None:
@@ -443,6 +496,31 @@ class GenerationClient:
                 raise GenerationError("generation endpoint returned an invalid model list")
             models.add(model_id)
         return sorted(models)
+
+    def post_json(
+        self,
+        path: str,
+        payload: dict[str, Any],
+        *,
+        strict_json: bool = False,
+    ) -> Any:
+        """POST one bounded JSON object to a configured relative path.
+
+        This is a narrow shared transport for guard adapters.  It uses the same
+        TLS context, no-redirect policy, proxy suppression, timeout and response
+        size bound as generation, and does not add retries.  Callers remain
+        responsible for the payload and response schema.  ``strict_json``
+        additionally rejects duplicate keys and non-finite numbers.
+        """
+        relative = _validate_json_path(path)
+        if not isinstance(payload, dict):
+            raise ValueError("generation request payload is invalid")
+        return self._request_json(
+            self.config.api_base + relative,
+            method="POST",
+            payload=payload,
+            strict_json=strict_json,
+        )
 
     def probe(self) -> dict[str, Any]:
         """One fixed synthetic connectivity check; returns metadata only.

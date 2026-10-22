@@ -47,7 +47,21 @@ from .export import (
     utc_iso,
 )
 from .gateway import Gateway, Policy
-from .generation import RealGatewayAdapters, TestGatewayAdapters
+from .generation import (
+    ENV_ALLOW_INSECURE_HTTP,
+    ENV_API_KEY,
+    ENV_AUTH,
+    ENV_MODEL,
+    ENV_URL,
+    RealGatewayAdapters,
+    TestGatewayAdapters,
+)
+from .guard_api import (
+    INPUT_GUARD_CONTRACT_V1,
+    InputGuardApiAdapter,
+    Qwen3GuardOutputAdapter,
+    guard_client_config,
+)
 from .operator import (
     OperatorQueryError,
     PostgresAuditReader,
@@ -97,6 +111,30 @@ ENV_PROMPT_GUARD_MODEL_DIR = "NASI_LEMAK_PROMPT_GUARD_MODEL_DIR"
 ENV_LLAMA_GUARD_MODEL_DIR = "NASI_LEMAK_LLAMA_GUARD_MODEL_DIR"
 ENV_PROMPT_GUARD_THRESHOLD = "NASI_LEMAK_PROMPT_GUARD_THRESHOLD"
 ENV_LLAMA_GUARD_CONTEXT_LIMIT = "NASI_LEMAK_LLAMA_GUARD_CONTEXT_LIMIT"
+
+# Explicit guard backend selection.  ``local`` preserves the existing native
+# artifacts; ``api`` uses the versioned input contract plus the Qwen3Guard
+# output adapter over dedicated guard clients.  No mixed backend and no silent
+# fallback between them is supported.
+ENV_GUARD_BACKEND = "NASI_LEMAK_GUARD_BACKEND"
+GUARD_BACKEND_LOCAL = "local"
+GUARD_BACKEND_API = "api"
+GUARD_BACKENDS = (GUARD_BACKEND_LOCAL, GUARD_BACKEND_API)
+
+INPUT_GUARD_ENV_PREFIX = "NASI_LEMAK_INPUT_GUARD"
+OUTPUT_GUARD_ENV_PREFIX = "NASI_LEMAK_OUTPUT_GUARD"
+ENV_INPUT_GUARD_URL = f"{INPUT_GUARD_ENV_PREFIX}_URL"
+ENV_INPUT_GUARD_MODEL = f"{INPUT_GUARD_ENV_PREFIX}_MODEL"
+ENV_INPUT_GUARD_AUTH = f"{INPUT_GUARD_ENV_PREFIX}_AUTH"
+ENV_INPUT_GUARD_API_KEY = f"{INPUT_GUARD_ENV_PREFIX}_API_KEY"
+ENV_INPUT_GUARD_API_KEY_FILE = f"{INPUT_GUARD_ENV_PREFIX}_API_KEY_FILE"
+ENV_INPUT_GUARD_THRESHOLD = f"{INPUT_GUARD_ENV_PREFIX}_THRESHOLD"
+ENV_INPUT_GUARD_CONTRACT = f"{INPUT_GUARD_ENV_PREFIX}_CONTRACT"
+ENV_OUTPUT_GUARD_URL = f"{OUTPUT_GUARD_ENV_PREFIX}_URL"
+ENV_OUTPUT_GUARD_MODEL = f"{OUTPUT_GUARD_ENV_PREFIX}_MODEL"
+ENV_OUTPUT_GUARD_AUTH = f"{OUTPUT_GUARD_ENV_PREFIX}_AUTH"
+ENV_OUTPUT_GUARD_API_KEY = f"{OUTPUT_GUARD_ENV_PREFIX}_API_KEY"
+ENV_OUTPUT_GUARD_API_KEY_FILE = f"{OUTPUT_GUARD_ENV_PREFIX}_API_KEY_FILE"
 
 ENV_POLICY_FILE = "NASI_LEMAK_POLICY_FILE"
 ENV_OPERATOR_KEY_DIGEST = "NASI_LEMAK_OPERATOR_KEY_DIGEST"
@@ -330,6 +368,27 @@ def _load_generation_client(config: Any) -> Any:
     return GenerationClient(config)
 
 
+def _guard_backend(env: dict[str, str]) -> str:
+    backend = env.get(ENV_GUARD_BACKEND, GUARD_BACKEND_LOCAL)
+    if not isinstance(backend, str):
+        return ""
+    backend = backend.strip().lower()
+    return backend if backend in GUARD_BACKENDS else ""
+
+
+def _api_guard_config(env: dict[str, str]) -> tuple[Any, Any, float]:
+    """Validate every API guard setting before any client is constructed."""
+    contract = env.get(ENV_INPUT_GUARD_CONTRACT)
+    if not isinstance(contract, str) or contract.strip() != INPUT_GUARD_CONTRACT_V1:
+        raise ValueError("input guard contract is not supported")
+    threshold = _guard_threshold(
+        _required_guard_setting(env, ENV_INPUT_GUARD_THRESHOLD)
+    )
+    input_config = guard_client_config(env, INPUT_GUARD_ENV_PREFIX)
+    output_config = guard_client_config(env, OUTPUT_GUARD_ENV_PREFIX)
+    return input_config, output_config, threshold
+
+
 def _mode_from_env(env: dict[str, str]) -> str:
     mode = env.get(ENV_MODE, MODE_GUARDED).strip().lower()
     return mode if mode in (MODE_GUARDED, MODE_TEST) else ""
@@ -361,15 +420,25 @@ def make_adapters_from_env(
     * ``NASI_LEMAK_MODE``: ``guarded`` (default) or ``test``.
     * For ``test``: explicit ``NASI_LEMAK_ALLOW_UNGUARDED_TEST=true`` plus a
       valid generation configuration.
-    * For ``guarded``: ``NASI_LEMAK_GENERATION_URL`` and
+    * ``NASI_LEMAK_GUARD_BACKEND``: ``local`` (default) or ``api``. Unknown or
+      partial values return ``None``; there is no fallback between backends.
+    * For ``guarded`` + ``local``: ``NASI_LEMAK_GENERATION_URL`` and
       ``NASI_LEMAK_GENERATION_MODEL`` (plus the existing auth settings),
       ``NASI_LEMAK_PROMPT_GUARD_MODEL_DIR``, ``NASI_LEMAK_LLAMA_GUARD_MODEL_DIR``,
       ``NASI_LEMAK_PROMPT_GUARD_THRESHOLD`` and
       ``NASI_LEMAK_LLAMA_GUARD_CONTEXT_LIMIT``.
+    * For ``guarded`` + ``api``: the same generation settings plus explicit
+      ``NASI_LEMAK_INPUT_GUARD_{URL,MODEL,AUTH,THRESHOLD,CONTRACT}`` and
+      ``NASI_LEMAK_OUTPUT_GUARD_{URL,MODEL,AUTH}``, each with exactly one of
+      ``..._API_KEY`` or ``..._API_KEY_FILE`` when auth is ``bearer``. No local
+      guard directories or ML dependencies are required or loaded.
     """
     env = os.environ if environ is None else environ
     mode = _mode_from_env(env)
     if mode == "":
+        return None
+    backend = _guard_backend(env)
+    if backend == "":
         return None
 
     # Cheap admission checks run before any model/client loader is invoked.
@@ -386,6 +455,27 @@ def make_adapters_from_env(
             raise ValueError("generation model is required")
     except Exception:
         return None
+
+    generation_loader = client_loader or _load_generation_client
+
+    if mode == MODE_GUARDED and backend == GUARD_BACKEND_API:
+        # API backend: validate the contract, threshold and both dedicated
+        # configs (including explicit key files) before any client loader runs.
+        # It requires no local guard artifact directories or ML imports.
+        try:
+            input_config, output_config, threshold = _api_guard_config(env)
+            input_client = generation_loader(input_config)
+            output_client = generation_loader(output_config)
+            client = generation_loader(config)
+            input_guard = InputGuardApiAdapter(input_client, threshold=threshold)
+            return RealGatewayAdapters(
+                client,
+                tokenizer=input_guard,
+                attack_guard=input_guard,
+                output_guard=Qwen3GuardOutputAdapter(output_client),
+            )
+        except Exception:
+            return None
 
     prompt_dir: str | None = None
     llama_dir: str | None = None
