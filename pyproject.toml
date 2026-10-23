@@ -18,6 +18,8 @@ server = [
     "psycopg[binary]==3.3.6",
     # Required by the runtime startup policy loader.
     "pyyaml==6.0.3",
+    # Authenticated encryption for the opt-in employee workspace store.
+    "cryptography==50.0.2",
 ]
 test = [
     "fastapi==0.147.0",
@@ -25,6 +27,7 @@ test = [
     "psycopg[binary]==3.3.6",
     "httpx==0.28.1",
     "pyyaml==6.0.3",
+    "cryptography==50.0.2",
 ]
 # Optional local guard inference (Meta Prompt Guard 2 and Meta Llama Guard 3).
 # Both exact versions were verified as existing on the official PyPI metadata at

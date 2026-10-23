@@ -16,6 +16,7 @@ verified in this workspace**. No overall completion percentage is claimed.
 | 8 | Accuracy / latency / concurrency | Synthetic regression and concurrency-isolation tests pass for the adapter, including a loopback transport-timeout regression; `nasi_lemak/guard_eval.py` adds a dry-run/execute synthetic smoke harness. | No live accuracy, latency, throughput or availability claim; the guard evaluation is plumbing evidence, not a held-out benchmark. Long-prompt `503` unresolved. |
 | 9 | Tuning | Thresholds remain operator-supplied and uncalibrated; no model tuning was performed. | Prompt Guard threshold and Llama Guard context limit require approved artifacts and data. |
 | 10 | Handover | README, guard wiring docs, environment examples, installer/runbooks and this dated progress note are present. | External acceptance, credentials and live evidence are still required. |
+| 11 | Employee workspace | 23 October 2026: opt-in `/workspace` local subset implemented for one organisation — username/password accounts, departments, encrypted conversation originals until owner deletion, explicit-only review grants, fixed PostgreSQL privilege SQL, optional Compose overlay and operator runbook. | Workspace store/HTTP/page/CLI and configuration-contract tests pass locally with SQLite or driver doubles. Real PostgreSQL/Docker/VM deployment and guard acceptance are pending; multi-customer tenancy, RAG, SSO and advanced department policy remain deferred. No efficacy or production claim. See [workspace-setup.md](workspace-setup.md). |
 
 ## Verification baseline
 

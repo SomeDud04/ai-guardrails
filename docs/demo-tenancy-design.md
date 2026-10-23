@@ -2,6 +2,14 @@
 
 **Status:** design for review only. Nothing here is implemented at source `ac6b5d1`. No tenancy registry, per-user quota, tenant-scoped operator key or new authentication mode exists; the legacy single-application gateway is the only runtime mode. This is a customer-demo design, not a production identity, billing or capacity platform.
 
+**Implementation note (23 October 2026):** A separate opt-in employee workspace
+implements a local, single-organisation subset only: username/password accounts,
+departments, encrypted saved conversations and explicit reviewer grants. It does
+not implement the multi-tenant registry, per-tenant policies/quotas or
+tenant-scoped operator keys described below. Real PostgreSQL/Docker/VM
+deployment and guard acceptance remain pending, and the multi-customer, RAG, SSO
+and advanced department policy deferrals in this design are preserved.
+
 **Date:** 22 October 2026. **Scope:** opt-in demo multi-user/multi-tenant authorization with bounded per-user chat admission. Guard wiring, supply-chain gates, live acceptance, factual verification and the reported MyKad/long-prompt issues remain separate subprojects.
 
 ## 1. Existing baseline

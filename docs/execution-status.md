@@ -46,6 +46,28 @@ UTF-8, wrong media type, multiple/absent authorization headers, unknown fields
 and policy overrides fail before any adapter or audit call. Raw exception text,
 request content, credentials and DSNs are not returned or logged.
 
+### Opt-in employee workspace (local subset)
+
+An opt-in `/workspace` surface now implements a deliberately narrow local
+subset: one organisation, username/password accounts, departments, encrypted
+saved conversations whose originals remain until the owner manually deletes
+them, and reviewer access only through explicit persisted grants. An admin has
+no implicit review grant. The runtime opens PostgreSQL with `migrate=False` and
+fails closed; SQLite is used only by local tests through explicit injection.
+
+Supporting files are `nasi_lemak/workspace_cli.py`, `workspace_store.py`,
+`workspace_http.py`, `workspace_page.py`, `workspace_schema.sql`,
+`workspace_roles.sql`, `compose.workspace.yaml` and
+[docs/workspace-setup.md](workspace-setup.md). The fixed SQL creates a NOLOGIN
+group and grants only explicit `ws_*` privileges; the operator creates a
+separate unprivileged LOGIN and credential.
+
+Evidence remains local: focused CLI, container-configuration, store, HTTP and
+Node page tests pass with SQLite or driver doubles. Real PostgreSQL, Docker and
+VM deployment, production HTTPS ingress and guard acceptance are **pending**.
+Multi-customer tenancy, RAG, SSO, advanced department policy and retention
+automation remain deferred; no guard efficacy or production claim is made.
+
 ### Complex timeout and cancellation repair
 
 The complex HTTP stage combines body streaming, admission control, worker-thread

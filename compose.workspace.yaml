@@ -1,0 +1,42 @@
+# Optional employee-workspace overlay for the existing Nasi Lemak stack.
+#
+# This file is NOT a standalone stack.  Apply it on top of compose.yaml and the
+# already-configured mode overlay, for example:
+#
+#   docker compose \
+#     --env-file .secrets/compose.env \
+#     --env-file .secrets/compose.test.env \
+#     --env-file .secrets/compose.workspace.env \
+#     -f compose.yaml -f compose.test.yaml -f compose.workspace.yaml config
+#
+# It activates the opt-in `/workspace` routes and mounts the restricted runtime
+# DSN and encryption key as mandatory, read-only Docker secrets.  It adds no
+# port, database, network, build target, ML dependency or root process.  The
+# privileged migration DSN is mounted only for the one-off `init` command, never
+# for this long-running service.
+#
+# `NASI_LEMAK_WORKSPACE_ALLOW_HTTP` defaults to false.  The current trusted-LAN
+# demo explicitly sets it true in docs/compose.workspace.env.example; any
+# production or remote deployment must use reviewed HTTPS ingress instead.
+#
+# The encryption key is stable.  Back it up separately from the database, never
+# regenerate it during an update, and never print it.
+
+services:
+  gateway:
+    environment:
+      NASI_LEMAK_WORKSPACE_ENABLED: "true"
+      NASI_LEMAK_WORKSPACE_DSN_FILE: /run/secrets/workspace_dsn
+      NASI_LEMAK_WORKSPACE_KEY_FILE: /run/secrets/workspace_key
+      NASI_LEMAK_WORKSPACE_ALLOW_HTTP: ${NASI_LEMAK_WORKSPACE_ALLOW_HTTP:-false}
+    secrets:
+      - workspace_dsn
+      - workspace_key
+
+secrets:
+  # Both paths are mandatory.  An unset path aborts Compose instead of starting
+  # the workspace with a missing credential or key.
+  workspace_dsn:
+    file: ${WORKSPACE_DSN_FILE:?Set WORKSPACE_DSN_FILE to an absolute secret-file path}
+  workspace_key:
+    file: ${WORKSPACE_KEY_FILE:?Set WORKSPACE_KEY_FILE to an absolute secret-file path}

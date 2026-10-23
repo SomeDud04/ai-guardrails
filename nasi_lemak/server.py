@@ -37,6 +37,7 @@ from starlette.exceptions import HTTPException as StarletteHTTPException
 from .admin_page import ADMIN_SECURITY_HEADERS, admin_html
 from .audit import PostgresAuditStore, UnreadyAuditStore
 from .demo_page import DEMO_SECURITY_HEADERS, demo_html
+from .workspace_page import WORKSPACE_SECURITY_HEADERS, workspace_html
 from .export import (
     EXPORT_FILENAME,
     ExportAuditEntry,
@@ -69,6 +70,7 @@ from .operator import (
     parse_export_query,
 )
 from .policy import load_policy
+from .workspace_http import load_workspace_runtime, register_workspace_routes
 
 
 # HTTP surface bounds.  The gateway itself has a 4096-character conversation
@@ -879,6 +881,7 @@ def make_app(
     chat_work_timeout: float = DEFAULT_CHAT_WORK_TIMEOUT,
     app_id: str = "nasi-lemak",
     environ: dict[str, str] | None = None,
+    workspace_store: Any = None,
 ) -> FastAPI:
     """Create the FastAPI application.
 
@@ -940,6 +943,14 @@ def make_app(
         runtime_writer_dsn,
         allow_runtime_postgres=gateway is None,
     )
+    workspace_runtime = load_workspace_runtime(
+        env,
+        store=workspace_store,
+        gateway=runtime_gateway,
+        audit_writer_dsn=runtime_writer_dsn,
+        audit_reader_dsn=_file_env(ENV_OPERATOR_AUDIT_DSN, env),
+        chat_work_timeout=chat_timeout,
+    )
 
     @asynccontextmanager
     async def lifespan(_app: FastAPI):
@@ -964,6 +975,14 @@ def make_app(
         if callable(export_close):
             try:
                 await asyncio.to_thread(export_close)
+            except Exception:
+                pass
+        workspace = getattr(_app.state, "workspace", None)
+        workspace_store = getattr(workspace, "store", None)
+        workspace_close = getattr(workspace_store, "close", None)
+        if callable(workspace_close):
+            try:
+                await asyncio.to_thread(workspace_close)
             except Exception:
                 pass
 
@@ -1002,6 +1021,8 @@ def make_app(
     # timed-out request cannot let the task be garbage-collected while its
     # thread still runs.  The done callback removes it only on real completion.
     app.state.chat_tasks: set[asyncio.Task] = set()
+    app.state.workspace = workspace_runtime
+    app.state.workspace_tasks: set[asyncio.Task] = set()
 
     @app.middleware("http")
     async def assign_request_id(request: Request, call_next):
@@ -1056,6 +1077,15 @@ def make_app(
             "mode": request.app.state.mode,
             "guards_active": request.app.state.guards_active,
         }
+        workspace = getattr(request.app.state, "workspace", None)
+        if workspace is not None and workspace.enabled:
+            workspace_ready = await workspace.check_ready(
+                request.app.state.control_admission
+            )
+            payload["workspace"] = "ready" if workspace_ready else "not_ready"
+            if not workspace_ready:
+                ready = False
+                payload["status"] = "not_ready"
         if ready:
             return payload
         return JSONResponse(payload, status_code=503)
@@ -1378,6 +1408,19 @@ def make_app(
             if not dispatched:
                 release_once()
 
+    if workspace_runtime.enabled:
+        @app.get("/workspace")
+        @app.get("/workspace/")
+        async def workspace_page(request: Request):
+            # The shell is deliberately static.  The API remains the authority
+            # and reports readiness/denial on each request.
+            return HTMLResponse(
+                workspace_html(ready=workspace_runtime.ready),
+                headers=WORKSPACE_SECURITY_HEADERS,
+            )
+
+    register_workspace_routes(app, workspace_runtime)
+
     @app.api_route(
         "/{path:path}",
         methods=["GET", "POST", "PUT", "DELETE", "PATCH", "HEAD", "OPTIONS", "TRACE"],
@@ -1393,6 +1436,10 @@ def make_app(
             "admin",
             "admin/events",
             "admin/export.csv",
+        ):
+            return _error_response(request.state.request_id, "INVALID_REQUEST", 405)
+        if workspace_runtime.enabled and (
+            path == "workspace" or path.startswith("workspace/")
         ):
             return _error_response(request.state.request_id, "INVALID_REQUEST", 405)
         return _error_response(request.state.request_id, "INVALID_REQUEST", 404)

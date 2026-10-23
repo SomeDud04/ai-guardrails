@@ -43,6 +43,7 @@ started in this workspace because Docker is not installed.** See
 | PII quality gate (synthetic) | Frozen agent-authored evaluation + deterministic evaluator; reviewed EMAIL terminal-period repair passes six known regression cases; v1 EMAIL fails on 1 frozen false positive and MyKad on 4; **not customer accepted**. See [docs/pii-quality.md](docs/pii-quality.md) |
 | Generation transport | Implemented; not live-verified |
 | Docker image / Compose runtime | Authored, **not built or run here**; default image/stack stays lightweight and safe-unavailable; optional `compose.pilot.yaml` adds the guard image target, policy and local model mounts as configuration scaffolding only |
+| Employee workspace (`/workspace`) | Opt-in local subset for one organisation: username/password accounts, departments, encrypted saved conversations and explicit review grants. Store/HTTP/page tests pass locally; **real PostgreSQL, Docker, VM and guard acceptance remain pending**, and multi-customer/RAG/SSO/advanced department policy are deferred. Setup: [docs/workspace-setup.md](docs/workspace-setup.md) |
 | LiteLLM routing | Deferred |
 | TLS ingress | Not present; localhost HTTP by default; optional trusted-LAN demo proxy exists (`compose.demo.yaml`) |
 

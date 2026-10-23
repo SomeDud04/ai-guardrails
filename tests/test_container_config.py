@@ -586,5 +586,149 @@ class PilotSettingsAcceptanceTests(unittest.TestCase):
                 client.close()
 
 
+class WorkspaceComposeTests(unittest.TestCase):
+    """Structural checks for the optional workspace overlay and role SQL.
+
+    These parse YAML/text only.  Docker and PostgreSQL are absent, so this is
+    configuration-contract evidence, not a compose merge or database run.
+    """
+
+    @classmethod
+    def setUpClass(cls):
+        if yaml is None:
+            raise unittest.SkipTest("PyYAML is not installed")
+        cls.base = _load("compose.yaml")
+        cls.workspace = _load("compose.workspace.yaml")
+        cls.workspace_text = (ROOT / "compose.workspace.yaml").read_text(
+            encoding="utf-8"
+        )
+        cls.example = (ROOT / "docs" / "compose.workspace.env.example").read_text(
+            encoding="utf-8"
+        )
+
+    def test_overlay_adds_only_workspace_environment_and_secrets(self) -> None:
+        self.assertEqual(set(self.workspace), {"services", "secrets"})
+        self.assertEqual(set(self.workspace["services"]), {"gateway"})
+        gateway = self.workspace["services"]["gateway"]
+        self.assertEqual(set(gateway), {"environment", "secrets"})
+        self.assertEqual(
+            set(gateway["environment"]),
+            {
+                "NASI_LEMAK_WORKSPACE_ENABLED",
+                "NASI_LEMAK_WORKSPACE_DSN_FILE",
+                "NASI_LEMAK_WORKSPACE_KEY_FILE",
+                "NASI_LEMAK_WORKSPACE_ALLOW_HTTP",
+            },
+        )
+        self.assertEqual(gateway["environment"]["NASI_LEMAK_WORKSPACE_ENABLED"], "true")
+        self.assertEqual(
+            gateway["environment"]["NASI_LEMAK_WORKSPACE_DSN_FILE"],
+            "/run/secrets/workspace_dsn",
+        )
+        self.assertEqual(
+            gateway["environment"]["NASI_LEMAK_WORKSPACE_KEY_FILE"],
+            "/run/secrets/workspace_key",
+        )
+        self.assertTrue(
+            gateway["environment"]["NASI_LEMAK_WORKSPACE_ALLOW_HTTP"].endswith(
+                ":-false}"
+            )
+        )
+        self.assertEqual(gateway["secrets"], ["workspace_dsn", "workspace_key"])
+        self.assertNotIn("build", gateway)
+        self.assertNotIn("volumes", gateway)
+        self.assertNotIn("ports", gateway)
+        self.assertNotIn("networks", gateway)
+        self.assertNotIn("read_only", gateway)
+        self.assertNotIn("user", gateway)
+        self.assertNotIn("db", self.workspace["services"])
+        for key in self.base["services"]["gateway"]["environment"]:
+            self.assertNotIn(key, gateway["environment"])
+
+    def test_overlay_secret_files_are_mandatory_readonly_mounts(self) -> None:
+        secrets = self.workspace["secrets"]
+        self.assertEqual(set(secrets), {"workspace_dsn", "workspace_key"})
+        for name, secret in secrets.items():
+            with self.subTest(secret=name):
+                self.assertIn(":?", secret["file"])
+                self.assertTrue(secret["file"].startswith("${"))
+                self.assertIn("_FILE", secret["file"])
+        # Docker mounts service secrets read-only under /run/secrets; the
+        # overlay declares no privileged container or writable bind.
+        self.assertNotIn("privileged", self.workspace["services"]["gateway"])
+
+    def test_example_uses_absolute_paths_and_explicit_http_decision(self) -> None:
+        self.assertIn(
+            "WORKSPACE_DSN_FILE=/ABSOLUTE/PATH/TO/.secrets/workspace/workspace_dsn",
+            self.example,
+        )
+        self.assertIn(
+            "WORKSPACE_KEY_FILE=/ABSOLUTE/PATH/TO/.secrets/workspace/workspace_key",
+            self.example,
+        )
+        self.assertIn("NASI_LEMAK_WORKSPACE_ALLOW_HTTP=true", self.example)
+        self.assertNotIn("postgresql://", self.example)
+        for value in _string_values(self.workspace):
+            with self.subTest(value=str(value)[:40]):
+                self.assertNotIn("postgresql://", str(value))
+                self.assertNotRegex(str(value), _HEX_DIGEST_RE)
+
+    def test_role_sql_is_fixed_nologin_and_explicitly_scoped(self) -> None:
+        text = (ROOT / "nasi_lemak" / "workspace_roles.sql").read_text(
+            encoding="utf-8"
+        )
+        self.assertIn("CREATE ROLE nasi_lemak_workspace NOLOGIN", text)
+        self.assertIn("RAISE EXCEPTION", text)
+        self.assertIn("rolcanlogin", text)
+        self.assertIn("rolsuper", text)
+        self.assertIn("pg_auth_members", text)
+        self.assertIn("GRANT USAGE ON SCHEMA public", text)
+        self.assertIn("REVOKE CREATE ON SCHEMA public", text)
+        self.assertNotIn("GRANT ALL", text)
+        self.assertNotIn("ALL TABLES", text)
+        self.assertNotIn("ALTER DEFAULT PRIVILEGES", text)
+        self.assertNotIn("nasi_lemak_audit", text)
+        self.assertNotIn("export_audits", text)
+        self.assertNotRegex(text, r"(?i)\b(events|owners)\b")
+        self.assertNotRegex(text, r"(?i)PASSWORD\s+'")
+        for table in (
+            "ws_schema_migrations",
+            "ws_meta",
+            "ws_departments",
+            "ws_users",
+            "ws_sessions",
+            "ws_review_grants",
+            "ws_conversations",
+            "ws_messages",
+            "ws_access_log",
+        ):
+            with self.subTest(table=table):
+                self.assertIn(f"public.{table}", text)
+
+        self.assertIn(
+            "GRANT SELECT ON TABLE public.ws_schema_migrations", text
+        )
+        self.assertIn("GRANT SELECT ON TABLE public.ws_meta", text)
+        self.assertIn(
+            "GRANT SELECT, INSERT ON TABLE public.ws_access_log", text
+        )
+        self.assertNotRegex(
+            text,
+            r"GRANT[^;]*(UPDATE|DELETE)[^;]*public\.ws_access_log",
+        )
+        self.assertNotRegex(
+            text,
+            r"GRANT[^;]*(INSERT|UPDATE|DELETE)[^;]*public\.ws_schema_migrations",
+        )
+        self.assertNotRegex(
+            text,
+            r"GRANT[^;]*(INSERT|UPDATE|DELETE)[^;]*public\.ws_meta",
+        )
+
+    def test_sql_files_remain_part_of_the_package(self) -> None:
+        pyproject = (ROOT / "pyproject.toml").read_text(encoding="utf-8")
+        self.assertIn('nasi_lemak = ["*.sql"]', pyproject)
+
+
 if __name__ == "__main__":
     unittest.main()
