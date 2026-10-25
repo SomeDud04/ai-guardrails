@@ -13,10 +13,13 @@ Commands::
         --full-name "Full Name" --department "Department"
 
 ``init`` is the only command that opens the database with ``migrate=True`` and
-must use an operator-privileged migration DSN. ``bootstrap-admin`` uses the
-restricted runtime DSN (``migrate=False``) and reads the password only from an
-interactive terminal with confirmation. Passwords are never accepted from argv,
-the environment or a default value.
+must use an operator-privileged migration DSN. ``bootstrap-admin`` also uses an
+operator-privileged, one-time provisioning DSN with ``migrate=False``: the
+one-time bootstrap writes the ``bootstrap_admin`` marker to ``ws_meta``, which
+the restricted runtime role deliberately cannot modify. The runtime DSN is for
+the gateway and must not be used for bootstrap. Passwords are read only from an
+interactive terminal with confirmation and are never accepted from argv, the
+environment or a default value.
 
 Tests may inject a ``store_factory`` and ``password_reader``; SQLite is accepted
 only through that explicit injection and is never a product fallback.
@@ -259,7 +262,10 @@ def _build_parser() -> argparse.ArgumentParser:
 
     bootstrap = subcommands.add_parser(
         "bootstrap-admin",
-        help="create the first administrator with the restricted runtime DSN",
+        help=(
+            "create the first administrator with the one-time privileged "
+            "provisioning DSN (not the restricted runtime DSN)"
+        ),
     )
     bootstrap.add_argument("--dsn-file", required=True)
     bootstrap.add_argument("--key-file", required=True)

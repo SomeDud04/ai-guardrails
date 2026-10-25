@@ -100,7 +100,12 @@ class WorkspacePageHTTPTests(WorkspaceHTTPBase):
             "Your history is private to your account and authorised reviewers.", html
         )
         self.assertNotIn("Only you can read your conversations", html)
-        self.assertIn("Your original prompt is saved", html)
+        self.assertIn(
+            "Your original prompt and the delivered assistant reply are saved encrypted "
+            "on the server until you delete the conversation. A blocked or failed prompt "
+            "is saved with its outcome; no blocked assistant reply is stored.",
+            html,
+        )
         self.assertIn("#workspace-view {", html)
         self.assertIn("flex-direction: column;", html)
 

@@ -429,8 +429,12 @@ class PostgresAuditIntegrationTests(unittest.TestCase):
         conn = psycopg.connect(self.dsn)
         try:
             schema = Path("nasi_lemak/audit_schema.sql").read_text(encoding="utf-8")
+            # Prose comments contain semicolons, so strip them before splitting.
+            without_comments = "\n".join(
+                line.split("--", 1)[0] for line in schema.splitlines()
+            )
             with conn.cursor() as cur:
-                for statement in schema.split(";"):
+                for statement in without_comments.split(";"):
                     if statement.strip():
                         cur.execute(statement)
             conn.commit()

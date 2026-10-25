@@ -38,6 +38,7 @@ import secrets
 import stat
 import threading
 import time
+from http.cookies import SimpleCookie
 from pathlib import Path
 from typing import Any
 from urllib.parse import urlsplit
@@ -48,6 +49,7 @@ from fastapi.responses import JSONResponse
 from .gateway import Gateway
 from .workspace_store import (
     LEASE_TTL_SECONDS,
+    SESSION_TTL_SECONDS,
     AccessDenied,
     AuthError,
     Conflict,
@@ -68,6 +70,9 @@ MAX_MESSAGES = 16
 MAX_TEXT_CHARS = 4096
 MAX_TOKENS = 256
 LOGIN_WINDOW_SECONDS = 60.0
+SESSION_COOKIE = "nasi_lemak_workspace"
+COOKIE_PATH = "/workspace"
+COOKIE_MAX_BYTES = 4096
 LOGIN_MAX_ATTEMPTS = 5
 LOGIN_CACHE_MAX = 512
 USER_WINDOW_SECONDS = 60.0
@@ -89,6 +94,7 @@ _ERROR_MESSAGES = {
     "CONFLICT": "The resource is busy.",
     "INPUT_LIMIT": "Request exceeds the supported input limit.",
     "RATE_LIMIT": "Too many attempts; retry later.",
+    "IDENTITY_CONFLICT": "This browser session belongs to a different account.",
     "UNAVAILABLE": "Required workspace control is unavailable.",
 }
 
@@ -103,6 +109,13 @@ class _BodyProblem(Exception):
     def __init__(self, status: int) -> None:
         super().__init__("workspace body rejected")
         self.status = status
+
+
+class _AuthProblem(Exception):
+    def __init__(self, status: int = 401, code: str = "UNAUTHORIZED") -> None:
+        super().__init__(code)
+        self.status = status
+        self.code = code
 
 
 class _LoginLimiter:
@@ -441,6 +454,118 @@ def _same_origin(request: Request) -> bool:
     return True
 
 
+def _strict_same_origin(request: Request) -> bool:
+    """CSRF check for cookie-authenticated writes: exactly one real Origin.
+
+    Missing, ``null``, duplicate, malformed, credential-bearing or path-bearing
+    Origin values are rejected.  A real Origin never contains a path, not even
+    ``/``.  Only the uvicorn request scope is compared;
+    ``Forwarded``/``X-Forwarded-*`` headers are never trusted.
+    """
+    values = request.headers.getlist("origin")
+    if len(values) != 1:
+        return False
+    raw = values[0].strip()
+    if not raw or raw.lower() == "null":
+        return False
+    try:
+        parsed = urlsplit(raw)
+    except ValueError:
+        return False
+    if (
+        not parsed.scheme
+        or not parsed.netloc
+        or parsed.username is not None
+        or parsed.password is not None
+        or parsed.path != ""
+        or parsed.query
+        or parsed.fragment
+    ):
+        return False
+    expected = f"{request.url.scheme}://{request.url.netloc}"
+    return f"{parsed.scheme}://{parsed.netloc}".lower() == expected.lower()
+
+
+def _json_content_type(request: Request) -> bool:
+    values = request.headers.getlist("content-type")
+    if len(values) != 1:
+        return False
+    return values[0].split(";", 1)[0].strip().lower() == "application/json"
+
+
+def _cookie_token(request: Request) -> str | None:
+    """Return exactly one unambiguous workspace cookie value, else ``None``."""
+    headers = request.headers.getlist("cookie")
+    if not headers:
+        return None
+    if len(headers) != 1:
+        raise _AuthProblem(401, "UNAUTHORIZED")
+    raw = headers[0]
+    if not isinstance(raw, str) or not raw or len(raw) > COOKIE_MAX_BYTES:
+        raise _AuthProblem(401, "UNAUTHORIZED")
+    count = 0
+    value = ""
+    for part in raw.split(";"):
+        name, separator, candidate = part.strip().partition("=")
+        if name != SESSION_COOKIE:
+            continue
+        count += 1
+        value = candidate
+    if count == 0:
+        return None
+    if count != 1:
+        raise _AuthProblem(401, "UNAUTHORIZED")
+    token = value.strip()
+    if token.startswith('"') and token.endswith('"') and len(token) >= 2:
+        token = token[1:-1]
+    try:
+        parsed = SimpleCookie()
+        parsed.load(f"{SESSION_COOKIE}={token}")
+        token = parsed[SESSION_COOKIE].value
+    except Exception:
+        raise _AuthProblem(401, "UNAUTHORIZED") from None
+    if (
+        not isinstance(token, str)
+        or not 1 <= len(token) <= 512
+        or any(ord(char) < 0x21 or ord(char) > 0x7E for char in token)
+    ):
+        raise _AuthProblem(401, "UNAUTHORIZED")
+    return token
+
+
+def _set_session_cookie(
+    response: JSONResponse, request: Request, token: str, expires_at: float
+) -> None:
+    remaining = int(max(0.0, min(expires_at - time.time(), SESSION_TTL_SECONDS)))
+    response.set_cookie(
+        key=SESSION_COOKIE,
+        value=token,
+        max_age=remaining,
+        path=COOKIE_PATH,
+        httponly=True,
+        samesite="strict",
+        secure=request.url.scheme == "https",
+    )
+
+
+def _clear_session_cookie(response: JSONResponse, request: Request) -> None:
+    response.delete_cookie(
+        key=SESSION_COOKIE,
+        path=COOKIE_PATH,
+        httponly=True,
+        samesite="strict",
+        secure=request.url.scheme == "https",
+    )
+
+
+def _cookie_mutation_guard(request: Request, source: str):
+    if source != "cookie":
+        return None
+    if not _strict_same_origin(request) or not _json_content_type(request):
+        return _ws_error(request, "FORBIDDEN", 403)
+    return None
+
+
 def _request_guard(request: Request, runtime: WorkspaceRuntime):
     if not _same_origin(request):
         return _ws_error(request, "FORBIDDEN", 403)
@@ -567,16 +692,47 @@ def _store_error(request: Request, exc: BaseException):
 
 
 async def _resolve_principal(request: Request, app: FastAPI, runtime: WorkspaceRuntime):
-    token = _bearer_token(request)
+    authorization = request.headers.getlist("authorization")
+    try:
+        cookie = _cookie_token(request)
+    except _AuthProblem as exc:
+        return None, None, None, _ws_error(request, exc.code, exc.status)
+    if authorization and cookie is not None:
+        # Never prefer one credential over another: reject ambiguous requests.
+        return None, None, None, _ws_error(request, "UNAUTHORIZED", 401)
+    if authorization:
+        token = _bearer_token(request)
+        source = "bearer"
+    elif cookie is not None:
+        token = cookie
+        source = "cookie"
+    else:
+        token = None
+        source = None
     if token is None:
-        return None, None, _ws_error(request, "UNAUTHORIZED", 401)
+        return None, None, None, _ws_error(request, "UNAUTHORIZED", 401)
     try:
         user = await _db_call(app, runtime.store.resolve_session, token)
     except (AuthError, AccessDenied):
-        return None, None, _ws_error(request, "UNAUTHORIZED", 401)
+        return None, None, None, _ws_error(request, "UNAUTHORIZED", 401)
     except Exception as exc:
-        return None, None, _store_error(request, exc)
-    return token, user, None
+        return None, None, None, _store_error(request, exc)
+    if source == "cookie":
+        # A cookie is shared by every tab in a browser profile.  Requiring the
+        # expected user id stops a stale tab from silently reading or mutating
+        # the account that replaced its cookie.  /me is the bootstrap call.
+        expected = request.headers.getlist("x-workspace-user")
+        if len(expected) > 1:
+            return None, None, None, _ws_error(request, "IDENTITY_CONFLICT", 403)
+        expected_user = expected[0].strip() if expected else ""
+        if expected_user:
+            if expected_user != user["id"]:
+                return None, None, None, _ws_error(
+                    request, "IDENTITY_CONFLICT", 403
+                )
+        elif request.url.path != "/workspace/api/me":
+            return None, None, None, _ws_error(request, "IDENTITY_CONFLICT", 403)
+    return token, user, source, None
 
 
 def _page_query(request: Request) -> tuple[int, str | None]:
@@ -631,9 +787,14 @@ def register_workspace_routes(app: FastAPI, runtime: WorkspaceRuntime) -> None:
             return guard
         try:
             body = await _read_json(request, app)
-            _body_fields(body, {"username", "password"}, {"username", "password"})
+            _body_fields(
+                body, {"username", "password", "cookie"}, {"username", "password"}
+            )
             username = body["username"]
             password = body["password"]
+            cookie_mode = body.get("cookie", False)
+            if not isinstance(cookie_mode, bool):
+                raise ValueError("cookie option is invalid")
             if not isinstance(username, str) or not isinstance(password, str):
                 raise ValueError("credentials are invalid")
             if len(username) > 128 or len(password) > 128:
@@ -647,6 +808,12 @@ def register_workspace_routes(app: FastAPI, runtime: WorkspaceRuntime) -> None:
         except ValueError:
             return _ws_error(request, "INVALID_REQUEST", 400)
 
+        if cookie_mode and not _strict_same_origin(request):
+            # A cookie login creates a persistent shared-browser credential, so
+            # it needs the same strict CSRF origin check as every cookie write.
+            # Missing/null/path-bearing Origins fail before authentication runs.
+            return _ws_error(request, "FORBIDDEN", 403)
+
         limiter_key = _LoginLimiter.key(_client_ip(request), username)
         if runtime._login_limiter.blocked(limiter_key):
             return _ws_error(request, "RATE_LIMIT", 429)
@@ -657,34 +824,54 @@ def register_workspace_routes(app: FastAPI, runtime: WorkspaceRuntime) -> None:
             return _ws_error(request, "UNAUTHORIZED", 401)
         except Exception as exc:
             return _store_error(request, exc)
-        return _ok(
-            {
-                "token": result["token"],
-                "expires": result["expires_at"],
-                "user": result["user"],
-            }
-        )
+        payload = {
+            "expires": result["expires_at"],
+            "user": result["user"],
+        }
+        if not cookie_mode:
+            # Default API behaviour is unchanged: the caller receives the
+            # opaque bearer token and manages it itself.
+            payload["token"] = result["token"]
+        response = _ok(payload)
+        if cookie_mode:
+            # The page opts into an HttpOnly cookie, so the raw token never
+            # reaches JavaScript.  Its lifetime is bounded by the database
+            # session expiry, which is enforced on every request.
+            _set_session_cookie(
+                response, request, result["token"], result["expires_at"]
+            )
+        return response
 
     @app.post("/workspace/api/logout")
     async def workspace_logout(request: Request):
         guard = _request_guard(request, runtime)
         if guard is not None:
             return guard
-        token, _user, error = await _resolve_principal(request, app, runtime)
+        token, _user, source, error = await _resolve_principal(
+            request, app, runtime
+        )
         if error is not None:
             return error
+        csrf = _cookie_mutation_guard(request, source)
+        if csrf is not None:
+            return csrf
         try:
             await _db_call(app, runtime.store.logout, token)
         except Exception as exc:
+            # Do not acknowledge a sign-out that the server did not perform.
             return _store_error(request, exc)
-        return _ok({"status": "ok"})
+        response = _ok({"status": "ok"})
+        _clear_session_cookie(response, request)
+        return response
 
     @app.get("/workspace/api/me")
     async def workspace_me(request: Request):
         guard = _request_guard(request, runtime)
         if guard is not None:
             return guard
-        _token, user, error = await _resolve_principal(request, app, runtime)
+        _token, user, _source, error = await _resolve_principal(
+            request, app, runtime
+        )
         if error is not None:
             return error
         try:
@@ -695,12 +882,14 @@ def register_workspace_routes(app: FastAPI, runtime: WorkspaceRuntime) -> None:
 
     # -- admin account management ---------------------------------------
     async def admin_principal(request: Request):
-        token, user, error = await _resolve_principal(request, app, runtime)
+        token, user, source, error = await _resolve_principal(
+            request, app, runtime
+        )
         if error is not None:
-            return None, error
+            return None, None, error
         if user.get("role") != "admin":
-            return None, _ws_error(request, "FORBIDDEN", 403)
-        return user, None
+            return None, None, _ws_error(request, "FORBIDDEN", 403)
+        return user, source, None
 
     def admin_body_error(request: Request, exc: BaseException):
         return _store_error(request, exc)
@@ -710,7 +899,7 @@ def register_workspace_routes(app: FastAPI, runtime: WorkspaceRuntime) -> None:
         guard = _request_guard(request, runtime)
         if guard is not None:
             return guard
-        user, error = await admin_principal(request)
+        user, _source, error = await admin_principal(request)
         if error is not None:
             return error
         try:
@@ -727,9 +916,12 @@ def register_workspace_routes(app: FastAPI, runtime: WorkspaceRuntime) -> None:
         guard = _request_guard(request, runtime)
         if guard is not None:
             return guard
-        user, error = await admin_principal(request)
+        user, source, error = await admin_principal(request)
         if error is not None:
             return error
+        csrf = _cookie_mutation_guard(request, source)
+        if csrf is not None:
+            return csrf
         try:
             body = await _read_json(request, app)
             _body_fields(body, {"name"}, {"name"})
@@ -747,7 +939,7 @@ def register_workspace_routes(app: FastAPI, runtime: WorkspaceRuntime) -> None:
         guard = _request_guard(request, runtime)
         if guard is not None:
             return guard
-        user, error = await admin_principal(request)
+        user, _source, error = await admin_principal(request)
         if error is not None:
             return error
         try:
@@ -764,9 +956,12 @@ def register_workspace_routes(app: FastAPI, runtime: WorkspaceRuntime) -> None:
         guard = _request_guard(request, runtime)
         if guard is not None:
             return guard
-        user, error = await admin_principal(request)
+        user, source, error = await admin_principal(request)
         if error is not None:
             return error
+        csrf = _cookie_mutation_guard(request, source)
+        if csrf is not None:
+            return csrf
         try:
             body = await _read_json(request, app)
             _body_fields(
@@ -795,9 +990,12 @@ def register_workspace_routes(app: FastAPI, runtime: WorkspaceRuntime) -> None:
         guard = _request_guard(request, runtime)
         if guard is not None:
             return guard
-        actor, error = await admin_principal(request)
+        actor, source, error = await admin_principal(request)
         if error is not None:
             return error
+        csrf = _cookie_mutation_guard(request, source)
+        if csrf is not None:
+            return csrf
         try:
             body = await _read_json(request, app)
             if body:
@@ -814,9 +1012,12 @@ def register_workspace_routes(app: FastAPI, runtime: WorkspaceRuntime) -> None:
         guard = _request_guard(request, runtime)
         if guard is not None:
             return guard
-        actor, error = await admin_principal(request)
+        actor, source, error = await admin_principal(request)
         if error is not None:
             return error
+        csrf = _cookie_mutation_guard(request, source)
+        if csrf is not None:
+            return csrf
         try:
             body = await _read_json(request, app)
             _body_fields(body, {"password"}, {"password"})
@@ -834,7 +1035,7 @@ def register_workspace_routes(app: FastAPI, runtime: WorkspaceRuntime) -> None:
         guard = _request_guard(request, runtime)
         if guard is not None:
             return guard
-        actor, error = await admin_principal(request)
+        actor, _source, error = await admin_principal(request)
         if error is not None:
             return error
         try:
@@ -851,9 +1052,12 @@ def register_workspace_routes(app: FastAPI, runtime: WorkspaceRuntime) -> None:
         guard = _request_guard(request, runtime)
         if guard is not None:
             return guard
-        actor, error = await admin_principal(request)
+        actor, source, error = await admin_principal(request)
         if error is not None:
             return error
+        csrf = _cookie_mutation_guard(request, source)
+        if csrf is not None:
+            return csrf
         try:
             body = await _read_json(request, app)
             _body_fields(
@@ -878,9 +1082,12 @@ def register_workspace_routes(app: FastAPI, runtime: WorkspaceRuntime) -> None:
         guard = _request_guard(request, runtime)
         if guard is not None:
             return guard
-        actor, error = await admin_principal(request)
+        actor, source, error = await admin_principal(request)
         if error is not None:
             return error
+        csrf = _cookie_mutation_guard(request, source)
+        if csrf is not None:
+            return csrf
         try:
             await _db_call(app, runtime.store.revoke_grant, actor["id"], grant_id)
         except Exception as exc:
@@ -892,7 +1099,7 @@ def register_workspace_routes(app: FastAPI, runtime: WorkspaceRuntime) -> None:
         guard = _request_guard(request, runtime)
         if guard is not None:
             return guard
-        actor, error = await admin_principal(request)
+        actor, _source, error = await admin_principal(request)
         if error is not None:
             return error
         try:
@@ -910,7 +1117,9 @@ def register_workspace_routes(app: FastAPI, runtime: WorkspaceRuntime) -> None:
         guard = _request_guard(request, runtime)
         if guard is not None:
             return guard
-        _token, user, error = await _resolve_principal(request, app, runtime)
+        _token, user, _source, error = await _resolve_principal(
+            request, app, runtime
+        )
         if error is not None:
             return error
         try:
@@ -932,9 +1141,14 @@ def register_workspace_routes(app: FastAPI, runtime: WorkspaceRuntime) -> None:
         guard = _request_guard(request, runtime)
         if guard is not None:
             return guard
-        _token, user, error = await _resolve_principal(request, app, runtime)
+        _token, user, source, error = await _resolve_principal(
+            request, app, runtime
+        )
         if error is not None:
             return error
+        csrf = _cookie_mutation_guard(request, source)
+        if csrf is not None:
+            return csrf
         try:
             body = await _read_json(request, app)
             if body:
@@ -953,7 +1167,9 @@ def register_workspace_routes(app: FastAPI, runtime: WorkspaceRuntime) -> None:
         guard = _request_guard(request, runtime)
         if guard is not None:
             return guard
-        _token, user, error = await _resolve_principal(request, app, runtime)
+        _token, user, _source, error = await _resolve_principal(
+            request, app, runtime
+        )
         if error is not None:
             return error
         try:
@@ -969,9 +1185,14 @@ def register_workspace_routes(app: FastAPI, runtime: WorkspaceRuntime) -> None:
         guard = _request_guard(request, runtime)
         if guard is not None:
             return guard
-        _token, user, error = await _resolve_principal(request, app, runtime)
+        _token, user, source, error = await _resolve_principal(
+            request, app, runtime
+        )
         if error is not None:
             return error
+        csrf = _cookie_mutation_guard(request, source)
+        if csrf is not None:
+            return csrf
         try:
             await _db_call(
                 app, runtime.store.delete_conversation, user["id"], conversation_id
@@ -985,7 +1206,9 @@ def register_workspace_routes(app: FastAPI, runtime: WorkspaceRuntime) -> None:
         guard = _request_guard(request, runtime)
         if guard is not None:
             return guard
-        _token, user, error = await _resolve_principal(request, app, runtime)
+        _token, user, _source, error = await _resolve_principal(
+            request, app, runtime
+        )
         if error is not None:
             return error
         try:
@@ -1007,7 +1230,9 @@ def register_workspace_routes(app: FastAPI, runtime: WorkspaceRuntime) -> None:
         guard = _request_guard(request, runtime)
         if guard is not None:
             return guard
-        _token, user, error = await _resolve_principal(request, app, runtime)
+        _token, user, _source, error = await _resolve_principal(
+            request, app, runtime
+        )
         if error is not None:
             return error
         try:
@@ -1023,9 +1248,14 @@ def register_workspace_routes(app: FastAPI, runtime: WorkspaceRuntime) -> None:
         guard = _request_guard(request, runtime)
         if guard is not None:
             return guard
-        token, user, error = await _resolve_principal(request, app, runtime)
+        token, user, source, error = await _resolve_principal(
+            request, app, runtime
+        )
         if error is not None:
             return error
+        csrf = _cookie_mutation_guard(request, source)
+        if csrf is not None:
+            return csrf
         try:
             body = await _read_json(request, app)
             _body_fields(body, {"text", "max_tokens"}, {"text"})

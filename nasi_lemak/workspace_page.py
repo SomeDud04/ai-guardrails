@@ -1,10 +1,10 @@
 """Static employee workspace shell for the opt-in workspace HTTP API.
 
 The page is a same-origin client for ``/workspace/api/*``.  It contains no
-application data, no secrets and no remote assets.  The session token lives in
-a closure for the lifetime of the tab only: there is no browser storage, cookie
-or URL token.  Every rendered value is assigned with ``textContent`` or built
-with DOM methods.
+application data, no secrets and no remote assets.  The browser holds only an
+HttpOnly, SameSite=Strict workspace cookie scoped to ``/workspace``: the page
+never receives or stores a session token.  Every rendered value is assigned
+with ``textContent`` or built with DOM methods.
 
 The page is served only when the workspace is enabled.  It reports an unready
 configuration honestly, while the API remains the authority for every action.
@@ -36,8 +36,14 @@ _WORKSPACE_CSS = """:root {
   --danger: #ff9f92;
   --danger-soft: #241312;
   --focus: #e8e8e0;
-  --radius: 10px;
-  --radius-lg: 14px;
+  --radius: 8px;
+  --radius-lg: 12px;
+  --control-h: 36px;
+  --space-1: .25rem;
+  --space-2: .5rem;
+  --space-3: .75rem;
+  --space-4: 1rem;
+  --space-5: 1.5rem;
   font-family: "Segoe UI", system-ui, -apple-system, "Helvetica Neue", Arial, sans-serif;
   font-size: 16px;
 }
@@ -51,6 +57,7 @@ body {
   line-height: 1.55;
   -webkit-font-smoothing: antialiased;
   text-rendering: optimizeLegibility;
+  overflow: hidden;
 }
 ::selection { background: #3d3d34; color: #fff; }
 * { scrollbar-color: #3d3d38 transparent; scrollbar-width: thin; }
@@ -59,9 +66,9 @@ button, input, textarea, select { font: inherit; color: var(--text); }
 button {
   background: transparent;
   border: 1px solid var(--line-strong);
-  border-radius: 8px;
-  padding: .48rem .8rem;
-  min-height: 36px;
+  border-radius: var(--radius);
+  padding: 0 var(--space-3);
+  min-height: var(--control-h);
   cursor: pointer;
   transition: background-color .16s ease, border-color .16s ease, color .16s ease;
 }
@@ -75,15 +82,21 @@ button.danger { color: #1b0806; background: var(--danger); border-color: var(--d
 button.danger:hover:not(:disabled) { background: #ffb6ac; border-color: #ffb6ac; }
 input, textarea, select {
   width: 100%;
-  min-height: 38px;
-  padding: .58rem .66rem;
+  min-height: var(--control-h);
+  padding: 0 var(--space-3);
   border: 1px solid var(--line-strong);
-  border-radius: 8px;
+  border-radius: var(--radius);
   background: var(--surface);
 }
-select { padding: .48rem .5rem; }
+select { padding-right: var(--space-2); }
 input[type="checkbox"] { width: auto; min-height: 0; padding: 0; }
-textarea { resize: vertical; min-height: 76px; max-height: 220px; line-height: 1.5; }
+textarea {
+  resize: vertical;
+  min-height: 84px;
+  max-height: 220px;
+  padding: var(--space-2) var(--space-3);
+  line-height: 1.5;
+}
 input::placeholder, textarea::placeholder { color: #8f8f87; }
 input:focus-visible, textarea:focus-visible, select:focus-visible, button:focus-visible,
 a:focus-visible, [tabindex]:focus-visible {
@@ -95,151 +108,209 @@ textarea:focus-visible { outline-offset: -2px; }
   position: absolute; width: 1px; height: 1px; padding: 0; margin: -1px;
   overflow: hidden; clip: rect(0, 0, 0, 0); white-space: nowrap; border: 0;
 }
-.app { display: grid; grid-template-columns: 264px minmax(0, 1fr); height: 100dvh; }
+.app { display: grid; grid-template-columns: 264px minmax(0, 1fr); height: 100dvh; overflow: hidden; }
 .sidebar {
   display: flex; flex-direction: column; min-width: 0; min-height: 0;
   background: var(--panel); border-right: 1px solid var(--line);
 }
-.brand { display: flex; align-items: center; gap: .7rem; padding: 1rem .9rem .8rem; border-bottom: 1px solid var(--line); }
+.brand { display: flex; align-items: center; gap: .75rem; padding: var(--space-4) var(--space-3) var(--space-3); border-bottom: 1px solid var(--line); }
 .brand-mark { flex: none; color: var(--amber); }
-.brand h1 { margin: 0; font-size: .96rem; letter-spacing: .01em; }
-.brand p { margin: .05rem 0 0; color: var(--muted); font-size: .72rem; }
-.side-section { padding: .8rem .7rem .3rem; }
-.side-heading { margin: 0 0 .45rem .25rem; color: var(--muted-dim); font-size: .66rem; font-weight: 650; letter-spacing: .09em; text-transform: uppercase; }
-.side-nav { display: grid; gap: .2rem; padding: .55rem .55rem .25rem; }
-.side-nav button { display: flex; align-items: center; gap: .55rem; width: 100%; min-height: 34px; padding: .38rem .55rem; border-color: transparent; color: var(--muted); font-size: .84rem; text-align: left; }
+.brand h1 { margin: 0; font-size: .95rem; letter-spacing: .01em; }
+.brand p { margin: .125rem 0 0; color: var(--muted); font-size: .75rem; }
+.side-section { padding: var(--space-3) var(--space-3) var(--space-1); }
+.side-heading { margin: 0 0 var(--space-2) var(--space-1); color: var(--muted-dim); font-size: .75rem; font-weight: 650; letter-spacing: .09em; text-transform: uppercase; }
+.side-nav { display: grid; gap: var(--space-1); padding: var(--space-2) var(--space-2) var(--space-1); }
+.side-nav button { display: flex; align-items: center; gap: var(--space-2); width: 100%; min-height: var(--control-h); padding: 0 var(--space-2); border-color: transparent; color: var(--muted); font-size: .84rem; text-align: left; }
 .side-nav button:hover:not(:disabled) { color: var(--text); }
 .side-nav button[aria-selected="true"] { color: var(--text); background: var(--surface); border-color: var(--line); }
-.new-chat { display: flex; align-items: center; justify-content: center; gap: .45rem; width: calc(100% - 1.1rem); margin: .35rem .55rem .6rem; font-size: .82rem; }
-.side-list-head { display: flex; align-items: center; justify-content: space-between; padding: 0 .8rem .2rem; }
-.side-list-head h2 { margin: 0; color: var(--muted-dim); font-size: .66rem; font-weight: 650; letter-spacing: .09em; text-transform: uppercase; }
-.conversation-list { display: grid; align-content: start; gap: .16rem; overflow-y: auto; padding: .1rem .45rem .5rem; min-height: 0; flex: 1 1 auto; }
-.conversation-item { display: block; width: 100%; padding: .48rem .55rem; border-color: transparent; text-align: left; }
+.new-chat { display: flex; align-items: center; justify-content: center; gap: var(--space-2); width: calc(100% - var(--space-4)); margin: var(--space-1) var(--space-2) var(--space-3); font-size: .82rem; }
+.side-list-head { display: flex; align-items: center; justify-content: space-between; padding: 0 var(--space-3) var(--space-2); }
+.side-list-head h2 { margin: 0; color: var(--muted-dim); font-size: .75rem; font-weight: 650; letter-spacing: .09em; text-transform: uppercase; }
+.conversation-list { display: grid; align-content: start; gap: 2px; overflow-y: auto; padding: 0 var(--space-2) var(--space-2); min-height: 0; flex: 1 1 auto; }
+.conversation-item { display: block; width: 100%; padding: var(--space-2) var(--space-3); border-color: transparent; text-align: left; }
 .conversation-item:hover:not(:disabled) { border-color: var(--line); }
 .conversation-item[aria-current="true"] { background: var(--surface); border-color: var(--line-strong); }
 .conversation-item .item-title { display: block; color: var(--text-soft); font-size: .82rem; }
-.conversation-item .item-meta { display: block; color: var(--muted-dim); font-size: .68rem; margin-top: .08rem; }
-.list-state { margin: 0; padding: .4rem .8rem .6rem; color: var(--muted); font-size: .74rem; }
-.list-more { margin: 0 .55rem .7rem; font-size: .74rem; }
-.side-foot { margin-top: auto; padding: .7rem .8rem .9rem; border-top: 1px solid var(--line); color: var(--muted-dim); font-size: .68rem; }
+.conversation-item .item-meta { display: block; color: var(--muted-dim); font-size: .75rem; margin-top: .125rem; }
+.list-state { margin: 0; padding: var(--space-1) var(--space-3) var(--space-2); color: var(--muted); font-size: .75rem; }
+.list-more { margin: 0 var(--space-2) var(--space-3); font-size: .75rem; }
+.side-foot { margin-top: auto; padding: var(--space-3); border-top: 1px solid var(--line); color: var(--muted-dim); font-size: .75rem; }
 .main { display: flex; flex-direction: column; min-width: 0; min-height: 0; }
 .topbar {
-  display: flex; align-items: center; gap: .7rem; min-height: 58px;
-  padding: .55rem 1rem; border-bottom: 1px solid var(--line); background: var(--bg);
+  display: flex; align-items: center; gap: var(--space-2); min-height: 56px;
+  padding: var(--space-2) var(--space-4); border-bottom: 1px solid var(--line); background: var(--bg);
 }
-.topbar-title { flex: 1 1 auto; min-width: 0; margin: 0; color: var(--text-soft); font-size: .86rem; font-weight: 600; }
-.guard-status { margin: 0; color: var(--muted); font-size: .7rem; text-align: right; }
-.guard-status[data-kind="inactive"] { color: var(--amber); }
-.identity { display: grid; justify-items: end; min-width: 0; }
+.topbar-title { flex: 0 1 auto; min-width: 0; margin: 0; color: var(--text-soft); font-size: .86rem; font-weight: 600; }
+.guard-status { position: relative; flex: 0 1 auto; min-width: 0; margin: 0; color: var(--muted); font-size: .75rem; line-height: 1.35; text-align: right; }
+.guard-status summary { max-width: 240px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; cursor: pointer; list-style: none; }
+.guard-status summary::-webkit-details-marker { display: none; }
+.guard-status summary::after {
+  content: ""; display: inline-block; width: .34rem; height: .34rem; margin-left: .4rem;
+  border-right: 1px solid currentColor; border-bottom: 1px solid currentColor;
+  transform: rotate(45deg) translateY(-1px); vertical-align: .08em;
+}
+.guard-status[open] summary::after { transform: rotate(225deg) translateY(-1px); }
+.guard-status[data-kind="inactive"] summary { color: var(--amber); }
+.guard-detail {
+  position: absolute; z-index: 30; right: 0; top: calc(100% + .45rem); width: min(340px, 80vw);
+  margin: 0; padding: var(--space-2) var(--space-3); border: 1px solid var(--line-strong);
+  border-radius: var(--radius); background: var(--surface-raised); color: var(--text-soft);
+  font-size: .75rem; line-height: 1.45; text-align: left;
+}
+.guard-detail:empty { display: none; }
+.identity { display: grid; flex: 0 1 auto; justify-items: end; min-width: 0; }
 .identity-name { max-width: 210px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; color: var(--text-soft); font-size: .78rem; }
-.identity-meta { max-width: 210px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; color: var(--muted-dim); font-size: .67rem; }
-.icon-button { display: none; width: 36px; padding: 0; place-items: center; }
-.global-status { margin: 0; padding: 0 1rem; color: var(--muted); font-size: .75rem; min-height: 0; }
-.global-status:not(:empty) { padding-top: .55rem; }
-.banner { margin: .7rem 1rem 0; padding: .6rem .75rem; border: 1px solid var(--amber-line); border-radius: var(--radius); background: var(--amber-soft); color: var(--text-soft); font-size: .78rem; }
+.identity-meta { max-width: 210px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; color: var(--muted-dim); font-size: .75rem; }
+.icon-button { display: none; width: var(--control-h); padding: 0; place-items: center; }
+.global-status { width: 100%; max-width: 960px; margin: 0 auto; padding: 0 var(--space-5); color: var(--muted); font-size: .75rem; min-height: 0; }
+.global-status:not(:empty) { padding-top: var(--space-2); }
+.retry-check { display: block; margin: var(--space-2) auto 0; min-height: 32px; font-size: .75rem; color: var(--text-soft); }
+.app[data-private="hidden"] .sidebar,
+.app[data-private="hidden"] .identity,
+.app[data-private="hidden"] .topbar-title { visibility: hidden; pointer-events: none; }
+.banner { margin: var(--space-3) var(--space-4) 0; padding: var(--space-2) var(--space-3); border: 1px solid var(--amber-line); border-radius: var(--radius); background: var(--amber-soft); color: var(--text-soft); font-size: .78rem; }
 .banner strong { color: var(--amber); }
 .content { flex: 1 1 auto; min-height: 0; display: flex; flex-direction: column; }
 #workspace-view { flex: 1 1 auto; min-height: 0; display: flex; flex-direction: column; }
-.auth-view { width: min(420px, calc(100% - 2rem)); margin: auto; padding: 2rem 0; }
-.auth-view h2 { margin-bottom: .25rem; font-size: 1.25rem; }
+.auth-view { width: min(400px, calc(100% - 2rem)); margin: auto; padding: var(--space-5) 0; }
+.auth-view h2 { margin-bottom: var(--space-1); font-size: 1.25rem; }
 .auth-view > p { color: var(--muted); font-size: .84rem; }
-.auth-view form { display: grid; gap: .4rem; margin: 1.1rem 0 .8rem; }
+.auth-view form { display: grid; gap: var(--space-2); margin: var(--space-4) 0 var(--space-3); }
 .auth-view label { color: var(--text-soft); font-size: .78rem; }
-.auth-view button { margin-top: .5rem; justify-self: start; min-width: 110px; }
-.auth-status, .chat-status, .review-state { margin: .2rem 0 0; color: var(--muted); font-size: .78rem; min-height: 1.2em; }
+.auth-view button { margin-top: var(--space-2); justify-self: start; min-width: 112px; }
+.auth-status, .chat-status, .review-state { margin: 0; color: var(--muted); font-size: .78rem; min-height: 1.25em; }
 .auth-status[data-kind="error"], .chat-status[data-kind="error"], .review-state[data-kind="error"] { color: var(--danger); }
 .chat-status[data-kind="denied"], .review-state[data-kind="denied"] { color: var(--amber); }
-.chat-status[data-kind="warning"] { color: var(--amber); }
+.chat-status[data-kind="warning"], .global-status[data-kind="warning"] { color: var(--amber); }
 .chat-status[data-kind="ok"] { color: #b9d7b2; }
-.foot { color: var(--muted-dim); font-size: .72rem; }
+.foot { color: var(--muted-dim); font-size: .75rem; }
 .panel { flex: 1 1 auto; min-height: 0; display: flex; flex-direction: column; }
-.conversation-head { display: flex; align-items: flex-start; gap: .8rem; padding: .9rem 1rem .55rem; }
+.chat-column {
+  display: flex; flex-direction: column; flex: 1 1 auto; min-height: 0;
+  width: 100%; max-width: 960px; margin: 0 auto; padding: 0 var(--space-5);
+}
+.conversation-head { display: flex; align-items: flex-start; gap: var(--space-2); padding: var(--space-3) 0 var(--space-2); }
 .conversation-head h2 { margin: 0; font-size: 1rem; }
-.chat-meta { margin: .06rem 0 0; color: var(--muted-dim); font-size: .7rem; }
-.chat-actions { display: flex; gap: .4rem; margin-left: auto; }
-.chat-actions button { font-size: .76rem; min-height: 32px; padding: .32rem .62rem; }
-.confirm { margin: .1rem 1rem .5rem; padding: .65rem .75rem; border: 1px solid #6b332d; border-radius: var(--radius); background: var(--danger-soft); color: var(--text-soft); font-size: .78rem; }
-.confirm p { margin-bottom: .5rem; }
-.confirm button { min-height: 32px; font-size: .76rem; margin-right: .4rem; }
-.messages { flex: 1 1 auto; min-height: 0; overflow-y: auto; padding: .6rem 1rem 1.4rem; display: flex; flex-direction: column; gap: 1.35rem; }
-.message { max-width: 900px; width: 100%; margin: 0 auto; }
-.message-head { display: flex; align-items: baseline; gap: .5rem; margin-bottom: .28rem; color: var(--muted-dim); font-size: .7rem; }
+.chat-meta { margin: .125rem 0 0; color: var(--muted-dim); font-size: .75rem; }
+.chat-actions { display: flex; gap: var(--space-1); margin-left: auto; }
+.chat-actions button { font-size: .76rem; min-height: 32px; padding: 0 var(--space-2); }
+.confirm { margin: 0 0 var(--space-2); padding: var(--space-3); border: 1px solid #6b332d; border-radius: var(--radius); background: var(--danger-soft); color: var(--text-soft); font-size: .78rem; }
+.confirm p { margin-bottom: var(--space-2); }
+.confirm button { min-height: 32px; font-size: .76rem; margin-right: var(--space-2); }
+.messages { flex: 1 1 auto; min-height: 0; overflow-y: auto; padding: var(--space-2) 0 var(--space-4); display: flex; flex-direction: column; gap: var(--space-5); }
+.message { width: 100%; margin: 0; }
+.message-head { display: flex; align-items: baseline; gap: var(--space-2); margin-bottom: var(--space-1); color: var(--muted-dim); font-size: .75rem; }
 .message-role { color: var(--text-soft); font-weight: 650; letter-spacing: .02em; }
 .message-flag { color: var(--danger); font-weight: 650; }
 .message-flag[data-outcome="blocked"] { color: var(--amber); }
 .message-text { margin: 0; white-space: pre-wrap; overflow-wrap: anywhere; color: var(--text); font-size: .93rem; line-height: 1.62; }
 .message.user .message-text { color: var(--text-soft); }
-.empty-state { margin: auto; padding: 1.5rem; max-width: 520px; text-align: center; color: var(--muted); font-size: .88rem; }
-.empty-state strong { display: block; margin-bottom: .25rem; color: var(--text-soft); }
-.composer-wrap { padding: .6rem 1rem 1rem; border-top: 1px solid var(--line); background: var(--bg); }
-.composer { max-width: 900px; margin: 0 auto; }
-.composer textarea { background: var(--surface); }
-.composer-row { display: flex; align-items: center; gap: .6rem; margin-top: .4rem; }
-.composer-hint { flex: 1 1 auto; color: var(--muted-dim); font-size: .69rem; }
-.composer-row button { min-width: 90px; }
-.retention { max-width: 900px; margin: .5rem auto 0; color: var(--muted-dim); font-size: .67rem; }
-.review-view { flex: 1 1 auto; min-height: 0; overflow-y: auto; padding: .9rem 1rem 1.5rem; }
-.review-view > h2 { margin-bottom: .18rem; font-size: 1rem; }
-.review-notice { max-width: 900px; color: var(--muted); font-size: .76rem; }
-.review-layout { display: grid; grid-template-columns: minmax(220px, 320px) minmax(0, 1fr); gap: 1rem; margin-top: .8rem; align-items: start; }
-.review-column { border: 1px solid var(--line); border-radius: var(--radius-lg); background: var(--panel); padding: .55rem; min-width: 0; }
-.review-column h3 { margin: .1rem .2rem .45rem; color: var(--muted-dim); font-size: .68rem; letter-spacing: .08em; text-transform: uppercase; }
-.review-list { display: grid; gap: .15rem; }
-.review-meta { padding: .6rem .65rem; border-bottom: 1px solid var(--line); color: var(--muted); font-size: .74rem; overflow-wrap: anywhere; }
+.empty-state { margin: auto; padding: var(--space-5) var(--space-3); max-width: 520px; text-align: center; color: var(--muted); font-size: .88rem; }
+.empty-state strong { display: block; margin-bottom: var(--space-1); color: var(--text-soft); }
+.chat-status { padding-bottom: var(--space-2); }
+.composer-wrap { padding: var(--space-2) 0 var(--space-4); border-top: 1px solid var(--line); background: var(--bg); }
+.composer {
+  display: flex; flex-direction: column; max-width: none; margin: 0;
+  padding: var(--space-2);
+  border: 1px solid var(--line-strong); border-radius: var(--radius-lg);
+  background: var(--surface);
+  transition: border-color .16s ease, box-shadow .16s ease;
+}
+.composer:focus-within { border-color: #6d6757; box-shadow: 0 0 0 2px rgba(230, 177, 92, .2); }
+.composer textarea {
+  min-height: 68px; padding: var(--space-1) var(--space-1);
+  border: 0; border-radius: 0; background: transparent;
+}
+.composer textarea:focus-visible { outline: none; }
+.composer-row { display: flex; align-items: flex-end; justify-content: flex-end; gap: var(--space-2); margin-top: var(--space-1); }
+.composer-hint { flex: 1 1 auto; min-width: 0; color: var(--muted-dim); font-size: .75rem; }
+.composer-row button { min-width: 76px; min-height: 32px; align-self: flex-end; }
+.privacy-disclosure { margin-top: var(--space-2); color: var(--muted-dim); font-size: .75rem; }
+.privacy-disclosure summary { width: fit-content; cursor: pointer; color: var(--muted); list-style: none; }
+.privacy-disclosure summary::-webkit-details-marker { display: none; }
+.privacy-disclosure summary::after {
+  content: ""; display: inline-block; width: .3rem; height: .3rem; margin-left: .35rem;
+  border-right: 1px solid currentColor; border-bottom: 1px solid currentColor;
+  transform: rotate(45deg) translateY(-1px); vertical-align: .08em;
+}
+.privacy-disclosure[open] summary::after { transform: rotate(225deg) translateY(-1px); }
+.retention { max-width: 72ch; margin: var(--space-2) 0 0; color: var(--muted-dim); font-size: .75rem; }
+.review-view { flex: 1 1 auto; min-height: 0; overflow-y: auto; padding: var(--space-4) var(--space-5) var(--space-5); }
+.review-view > h2 { margin-bottom: .125rem; font-size: 1rem; }
+.review-notice { max-width: 960px; color: var(--muted); font-size: .76rem; }
+.review-layout { display: grid; grid-template-columns: minmax(220px, 320px) minmax(0, 1fr); gap: var(--space-4); margin-top: var(--space-3); align-items: start; max-width: 1160px; }
+.review-column { border: 1px solid var(--line); border-radius: var(--radius-lg); background: var(--panel); padding: var(--space-2); min-width: 0; }
+.review-column h3 { margin: var(--space-1) var(--space-1) var(--space-2); color: var(--muted-dim); font-size: .75rem; letter-spacing: .08em; text-transform: uppercase; }
+.review-list { display: grid; gap: 2px; }
+.review-meta { padding: var(--space-2) var(--space-3); border-bottom: 1px solid var(--line); color: var(--muted); font-size: .75rem; overflow-wrap: anywhere; }
 .review-meta strong { color: var(--text-soft); }
-.review-messages { padding: .8rem .65rem; display: flex; flex-direction: column; gap: 1rem; max-height: 58vh; overflow-y: auto; }
-.review-empty { padding: 1rem .5rem; color: var(--muted-dim); font-size: .8rem; }
-.admin-view { flex: 1 1 auto; min-height: 0; overflow-y: auto; padding: .9rem 1rem 1.5rem; }
-.admin-view > h2 { margin-bottom: .18rem; font-size: 1rem; }
-.admin-grid { display: grid; grid-template-columns: repeat(auto-fit, minmax(310px, 1fr)); gap: 1rem; margin-top: .8rem; align-items: start; }
-.admin-card { border: 1px solid var(--line); border-radius: var(--radius-lg); background: var(--panel); padding: .75rem; min-width: 0; }
-.admin-card h3 { margin: .1rem .15rem .5rem; color: var(--text-soft); font-size: .8rem; }
-.admin-form { display: grid; gap: .35rem; margin-bottom: .6rem; }
+.review-messages { padding: var(--space-3); display: flex; flex-direction: column; gap: var(--space-4); max-height: 58vh; overflow-y: auto; }
+.review-empty { padding: var(--space-4) var(--space-2); color: var(--muted-dim); font-size: .8rem; }
+.admin-view { flex: 1 1 auto; min-height: 0; overflow-y: auto; padding: var(--space-4) var(--space-5) var(--space-5); }
+.admin-view > h2 { margin-bottom: .125rem; font-size: 1rem; }
+.admin-grid { display: grid; grid-template-columns: repeat(auto-fit, minmax(min(100%, 300px), 1fr)); gap: var(--space-4); margin-top: var(--space-3); align-items: start; max-width: 1160px; }
+.admin-card { border: 1px solid var(--line); border-radius: var(--radius-lg); background: var(--panel); padding: var(--space-4); min-width: 0; }
+.admin-card h3 { margin: 0 0 var(--space-3); color: var(--text-soft); font-size: .8rem; }
+.admin-form { display: grid; gap: var(--space-2); margin-bottom: var(--space-3); }
 .admin-form label { color: var(--text-soft); font-size: .75rem; }
-.admin-form button { justify-self: start; margin-top: .25rem; }
-.admin-note { margin: .2rem 0 .5rem; color: var(--muted-dim); font-size: .71rem; }
-.admin-warning { margin: .2rem 0 .5rem; padding: .5rem .6rem; border: 1px solid var(--amber-line); border-radius: var(--radius); background: var(--amber-soft); color: var(--text-soft); font-size: .74rem; }
-.admin-list { display: grid; gap: .3rem; margin-top: .35rem; }
-.admin-row { border: 1px solid var(--line); border-radius: 8px; padding: .5rem .55rem; display: grid; gap: .3rem; min-width: 0; overflow-wrap: anywhere; }
+.admin-form button { justify-self: start; margin-top: var(--space-1); }
+.admin-note { margin: var(--space-1) 0 var(--space-2); color: var(--muted-dim); font-size: .75rem; }
+.admin-warning { margin: var(--space-1) 0 var(--space-2); padding: var(--space-2) var(--space-3); border: 1px solid var(--amber-line); border-radius: var(--radius); background: var(--amber-soft); color: var(--text-soft); font-size: .75rem; }
+.admin-list { display: grid; margin-top: var(--space-2); }
+.admin-row { border: 0; border-top: 1px solid var(--line); border-radius: 0; padding: var(--space-2) var(--space-1); display: grid; gap: var(--space-1); min-width: 0; overflow-wrap: anywhere; }
+.admin-list > .admin-row:first-child { border-top: 0; }
 .admin-row-main { color: var(--text-soft); font-size: .8rem; }
-.admin-row-meta { color: var(--muted-dim); font-size: .7rem; }
-.admin-row-actions { display: flex; flex-wrap: wrap; gap: .35rem; }
-.admin-row-actions button { min-height: 30px; padding: .26rem .55rem; font-size: .73rem; }
-.admin-confirm { border: 1px solid #6b332d; border-radius: 8px; background: var(--danger-soft); padding: .45rem .5rem; display: grid; gap: .35rem; }
-.admin-confirm p { margin: 0; color: var(--text-soft); font-size: .74rem; }
-.admin-confirm button { min-height: 30px; font-size: .73rem; }
-.admin-reset { display: grid; gap: .3rem; border-top: 1px solid var(--line); padding-top: .35rem; }
-.admin-reset label { color: var(--text-soft); font-size: .73rem; }
-.admin-reset-actions { display: flex; flex-wrap: wrap; gap: .35rem; }
-.admin-reset-actions button { min-height: 30px; font-size: .73rem; }
-.admin-empty { margin: 0; padding: .5rem .2rem; color: var(--muted-dim); font-size: .76rem; }
-.admin-more { margin-top: .45rem; font-size: .73rem; }
-.admin-card > p[role="status"] { margin: .25rem 0; }
+.admin-row-meta { color: var(--muted-dim); font-size: .75rem; }
+.admin-row-actions { display: flex; flex-wrap: wrap; gap: var(--space-1); }
+.admin-row-actions button { min-height: 30px; padding: 0 var(--space-2); font-size: .75rem; }
+.admin-confirm { border: 1px solid #6b332d; border-radius: var(--radius); background: var(--danger-soft); padding: var(--space-2) var(--space-3); display: grid; gap: var(--space-2); margin-top: var(--space-1); }
+.admin-confirm p { margin: 0; color: var(--text-soft); font-size: .75rem; }
+.admin-confirm button { min-height: 30px; font-size: .75rem; }
+.admin-reset { display: grid; gap: var(--space-2); border-top: 1px solid var(--line); padding-top: var(--space-2); margin-top: var(--space-1); }
+.admin-reset label { color: var(--text-soft); font-size: .75rem; }
+.admin-reset-actions { display: flex; flex-wrap: wrap; gap: var(--space-2); }
+.admin-reset-actions button { min-height: 30px; font-size: .75rem; }
+.admin-empty { margin: 0; padding: var(--space-2) var(--space-1); color: var(--muted-dim); font-size: .76rem; }
+.admin-more { margin-top: var(--space-2); font-size: .75rem; }
+.admin-card > p[role="status"] { margin: var(--space-1) 0; }
+@media (max-width: 900px) {
+  .review-layout { grid-template-columns: minmax(200px, 280px) minmax(0, 1fr); }
+}
 @media (max-width: 760px) {
   .app { grid-template-columns: minmax(0, 1fr); }
   .sidebar { position: fixed; z-index: 20; inset: 0 auto 0 0; width: min(276px, 86vw); transform: translateX(-102%); transition: transform .18s ease; box-shadow: 18px 0 40px rgba(0,0,0,.45); }
   .app[data-nav="open"] .sidebar { transform: translateX(0); }
   .icon-button { display: grid; }
-  .topbar { min-height: 52px; padding: .45rem .7rem; }
-  .identity-name, .identity-meta { max-width: 120px; }
-  .guard-status { order: 5; flex-basis: 100%; text-align: left; }
-  .topbar { flex-wrap: wrap; }
-  .messages { padding: .5rem .75rem 1rem; }
-  .conversation-head { padding: .7rem .75rem .4rem; }
-  .composer-wrap { padding: .5rem .75rem .75rem; }
-  .review-view { padding: .7rem .75rem 1rem; }
-  .admin-view { padding: .7rem .75rem 1rem; }
+  .topbar { min-height: 52px; padding: var(--space-2) var(--space-3); flex-wrap: wrap; }
+  .topbar-title { flex: 1 1 auto; }
+  .identity-name, .identity-meta { max-width: 140px; }
+  .guard-status { order: 10; flex-basis: 100%; text-align: left; }
+  .guard-detail { left: 0; right: auto; width: min(340px, calc(100vw - 1.5rem)); }
+  .chat-column { padding: 0 var(--space-3); }
+  .messages { padding: var(--space-2) 0 var(--space-3); gap: var(--space-4); }
+  .conversation-head { padding: var(--space-2) 0 var(--space-1); }
+  .composer-wrap { padding: var(--space-2) 0 var(--space-3); }
+  .review-view { padding: var(--space-3); }
+  .admin-view { padding: var(--space-3); }
   .admin-grid { grid-template-columns: minmax(0, 1fr); }
   .review-layout { grid-template-columns: minmax(0, 1fr); }
   .review-messages { max-height: none; }
-  .global-status { padding: 0 .75rem; }
-  .banner { margin: .6rem .75rem 0; }
+  .global-status { padding: 0 var(--space-3); }
+  .banner { margin: var(--space-2) var(--space-3) 0; }
 }
 @media (max-width: 380px) {
-  :root { font-size: 15px; }
   .identity { display: none; }
-  .chat-actions button { padding: .32rem .45rem; }
+  .topbar { padding: var(--space-2) var(--space-3); gap: var(--space-1); }
+  .chat-column { padding: 0 var(--space-3); }
+  .chat-actions button { padding: 0 var(--space-2); }
   .conversation-head h2 { font-size: .92rem; }
+  .message-head { flex-wrap: wrap; }
+  .composer-row { gap: var(--space-2); }
+  .composer-row button { min-width: 76px; }
+  .auth-view { width: calc(100% - 1.5rem); }
+  .review-view, .admin-view { padding: var(--space-2) var(--space-3) var(--space-3); }
+  .admin-card { padding: var(--space-3); }
+  .review-column { padding: var(--space-2); }
 }
 """
 
@@ -250,6 +321,10 @@ _WORKSPACE_JS = """
 
   var REQUEST_TIMEOUT_MS = 60000;
   var LIST_LIMIT = 25;
+  // A safe read of /me may be answered with a transient 503 while the bounded
+  // control-plane admission is full.  Retrying the read is safe; writes and the
+  // login POST are never retried and the password is never resent.
+  var PROFILE_CHECK_RETRY_MS = [300, 800];
 
   function byId(id) { return document.getElementById(id); }
   var appEl = byId("app");
@@ -263,7 +338,10 @@ _WORKSPACE_JS = """
   var loginSubmit = byId("login-submit");
   var authStatus = byId("auth-status");
   var globalStatus = byId("global-status");
+  var revalidateRetry = byId("revalidate-retry");
   var guardStatus = byId("guard-status");
+  var guardSummary = byId("guard-summary");
+  var guardDetail = byId("guard-detail");
   var identityName = byId("identity-name");
   var identityMeta = byId("identity-meta");
   var logoutButton = byId("logout-button");
@@ -329,9 +407,19 @@ _WORKSPACE_JS = """
   var accessState = byId("access-state");
   var accessMore = byId("access-more");
 
-  var token = null;
+  var signedIn = false;
   var profile = null;
+  var drafts = Object.create(null);
+  var authChannel = null;
+  var revalidating = false;
+  var logoutBusy = false;
+  var logoutUnconfirmed = false;
+  var logoutExpectedUid = null;
+  var revalidateSeq = 0;
   var sessionEpoch = 0;
+  // Auth changes and session restores supersede any profile check that was
+  // started for the previous cookie, even within the same session epoch.
+  var sessionCheckSeq = 0;
   var controllers = [];
   var currentConversation = null;
   var chatSeq = 0;
@@ -401,23 +489,41 @@ _WORKSPACE_JS = """
   function api(path, options) {
     var settings = options || {};
     var controller = new AbortController();
-    controllers.push(controller);
+    // Public readiness data is independent of the private session lifecycle:
+    // signing out or failing session restore must not abort the health check.
+    if (!settings.independent) { controllers.push(controller); }
     var timer = setTimeout(function () {
       controller.workspaceTimedOut = true;
       try { controller.abort(); } catch (error) { /* already finished */ }
     }, REQUEST_TIMEOUT_MS);
     var headers = { "Accept": "application/json" };
-    if (token) { headers.Authorization = "Bearer " + token; }
+    // Callers may pin the identity a request belongs to explicitly. Logout does
+    // this because it clears the profile before the revoke is sent.
+    var expectedUser = typeof settings.expectedUser === "string" && settings.expectedUser
+      ? settings.expectedUser
+      : (profile && profile.user && typeof profile.user.id === "string" ? profile.user.id : "");
+    if (expectedUser) {
+      headers["X-Workspace-User"] = expectedUser;
+    }
+    var method = settings.method || "GET";
     var init = {
-      method: settings.method || "GET",
+      method: method,
       headers: headers,
-      credentials: "omit",
+      // The HttpOnly workspace cookie is the only browser credential.  It is
+      // sent to this origin only; no token is stored or received by this page.
+      credentials: "same-origin",
       cache: "no-store",
       signal: controller.signal
     };
     if (typeof settings.body === "string") {
       headers["Content-Type"] = "application/json";
       init.body = settings.body;
+    } else if (method === "POST" || method === "DELETE") {
+      // The cookie mutation guard requires exactly one JSON Content-Type on
+      // every write.  A bodyless write therefore still sends an empty JSON
+      // object instead of omitting the header (which the guard rejects).
+      headers["Content-Type"] = "application/json";
+      init.body = "{}";
     }
     return fetch(path, init).then(function (response) {
       return response.json().catch(function () { return null; }).then(function (data) {
@@ -457,15 +563,42 @@ _WORKSPACE_JS = """
     return "The workspace could not be reached. Check the connection and try again.";
   }
 
-  function clearSession(message) {
-    sessionEpoch += 1;
-    token = null;
+  function errorCode(result) {
+    if (isObject(result.data) && isObject(result.data.error) &&
+        typeof result.data.error.code === "string") {
+      return result.data.error.code;
+    }
+    return "";
+  }
+
+  function wait(ms) {
+    return new Promise(function (resolve) { setTimeout(resolve, ms); });
+  }
+
+  function authFailure(result) {
+    if (result.status === 401) {
+      clearSession("Your session expired. Sign in again.");
+      return true;
+    }
+    if (result.status === 403 && errorCode(result) === "IDENTITY_CONFLICT") {
+      clearSession("This browser signed in as a different account. Private data was cleared. Sign in again.");
+      return true;
+    }
+    return false;
+  }
+
+  function resetPrivateState() {
+    signedIn = false;
     profile = null;
+    drafts = Object.create(null);
+    logoutExpectedUid = null;
     currentConversation = null;
     sending = false;
     creating = false;
     deleting = false;
     loginBusy = false;
+    logoutBusy = false;
+    revalidating = false;
     listLoading = false;
     listLoaded = false;
     reviewLoading = false;
@@ -473,11 +606,11 @@ _WORKSPACE_JS = """
     listCursor = null;
     reviewCursor = null;
     abortAll();
-    loginSubmit.disabled = false;
     resetAdminState();
-
-    loginUsername.value = "";
-    loginPassword.value = "";
+    loginSubmit.disabled = false;
+    logoutButton.disabled = false;
+    logoutButton.textContent = "Sign out";
+    revalidateRetry.hidden = true;
     composer.value = "";
     clearNode(conversationList);
     clearNode(messagesEl);
@@ -500,15 +633,24 @@ _WORKSPACE_JS = """
     chatEmpty.textContent = "Select a conversation or start a new one.";
     messagesEl.hidden = false;
     composer.disabled = true;
-    composer.value = "";
     sendButton.disabled = true;
     composerHint.textContent = "Select or create a conversation to send a message.";
     setStatus(chatStatus, "");
     setStatus(reviewState, "");
+  }
+
+  function clearSession(message) {
+    sessionEpoch += 1;
+    logoutUnconfirmed = false;
+    resetPrivateState();
+    loginUsername.value = "";
+    loginPassword.value = "";
     setStatus(globalStatus, message || "Signed out.", message ? "error" : "");
     setStatus(authStatus, message || "Sign in to continue.", message ? "error" : "");
     authView.hidden = false;
     workspaceView.hidden = true;
+    appEl.removeAttribute("data-private");
+    logoutButton.hidden = true;
     tabReview.hidden = true;
     tabAdmin.hidden = true;
     topbarTitle.textContent = "Sign in";
@@ -518,6 +660,12 @@ _WORKSPACE_JS = """
     try { loginUsername.focus(); } catch (error) { /* non-fatal */ }
   }
 
+  function announceAuthChange() {
+    if (!authChannel) { return; }
+    try { authChannel.postMessage({ type: "workspace-auth-changed" }); }
+    catch (error) { /* another tab is not required */ }
+  }
+
   function applyProfile(data) {
     if (!isObject(data) || !isObject(data.user) ||
         typeof data.user.id !== "string" || typeof data.user.username !== "string" ||
@@ -525,6 +673,7 @@ _WORKSPACE_JS = """
         typeof data.department.name !== "string") {
       throw new Error("invalid profile");
     }
+    var previous = profile;
     profile = {
       user: data.user,
       department: data.department,
@@ -532,26 +681,129 @@ _WORKSPACE_JS = """
       reviewDepartmentIds: Array.isArray(data.review_department_ids) ? data.review_department_ids : [],
       reviewGrants: Array.isArray(data.review_grants) ? data.review_grants : []
     };
+    signedIn = true;
+    // A confirmed profile is the authoritative identity; a pending login or
+    // failed sign-out identity is no longer needed.
+    logoutExpectedUid = null;
+    var scopeChanged = !!previous && (
+      previous.reviewScope !== profile.reviewScope ||
+      (Array.isArray(previous.reviewDepartmentIds) ? previous.reviewDepartmentIds.join("|") : "") !==
+        profile.reviewDepartmentIds.join("|")
+    );
     identityName.textContent = data.user.full_name;
     identityMeta.textContent = data.department.name + " · " + data.user.username +
       (data.user.role === "admin" ? " · Administrator" : "");
     tabReview.hidden = !profile.reviewScope;
+    if (scopeChanged) { clearReviewAccessState(); }
     if (!profile.reviewScope && currentView === "review") { showView("chat"); }
     var isAdmin = data.user.role === "admin";
+    if (previous && previous.user && previous.user.role === "admin" && !isAdmin) {
+      resetAdminState();
+    }
     tabAdmin.hidden = !isAdmin;
     if (!isAdmin && currentView === "admin") { showView("chat"); }
     authView.hidden = true;
     workspaceView.hidden = false;
+    appEl.removeAttribute("data-private");
+    logoutButton.hidden = false;
+    logoutUnconfirmed = false;
+    revalidateRetry.hidden = true;
     setStatus(authStatus, "");
   }
 
-  function loadProfile() {
+  function loadProfile(options) {
+    var settings = options || {};
     var epoch = sessionEpoch;
+    var retryIn = Array.isArray(settings.retryIn) ? settings.retryIn.slice() : [];
+    var expectedUid = typeof settings.expectedUid === "string" ? settings.expectedUid : "";
+    function stillCurrent() {
+      return epoch === sessionEpoch && (!settings.isCurrent || settings.isCurrent());
+    }
+    function check() {
+      return api("/workspace/api/me", { auth: false }).then(function (result) {
+        if (!stillCurrent()) { return false; }
+        if (settings.initial && result.status === 401) {
+          clearSession("");
+          return false;
+        }
+        if (authFailure(result)) { return false; }
+        if (!result.ok) {
+          if (retryIn.length && result.status === 503) {
+            // Bounded, delayed retry of this safe read only.  The recovery
+            // button remains the final fallback when the retries are exhausted.
+            return wait(retryIn.shift()).then(function () {
+              if (!stillCurrent()) { return false; }
+              return check();
+            });
+          }
+          if (!settings.quiet) {
+            setStatus(authStatus, serverMessage(result, timeoutOrNetwork(result)), "error");
+          }
+          if (settings.onFailure) { settings.onFailure(result); }
+          return false;
+        }
+        if (!isObject(result.data) || !isObject(result.data.user) ||
+            typeof result.data.user.id !== "string") {
+          clearSession("The workspace returned an unexpected response. Sign in again.");
+          return false;
+        }
+        if (expectedUid && result.data.user.id !== expectedUid) {
+          // The login answer and the cookie profile must describe the same
+          // account; never trust a silently switched cookie.
+          clearSession("This browser signed in as a different account. Private data was cleared. Sign in again.");
+          return false;
+        }
+        if (profile && profile.user && profile.user.id !== result.data.user.id) {
+          clearSession("This browser signed in as a different account. Private data was cleared. Sign in again.");
+          return false;
+        }
+        try { applyProfile(result.data); }
+        catch (error) {
+          clearSession("The workspace returned an unexpected response. Sign in again.");
+          return false;
+        }
+        return true;
+      });
+    }
+    return check();
+  }
+
+  function revalidate(force) {
+    if (!signedIn) { return Promise.resolve(false); }
+    if (revalidating && !force) { return Promise.resolve(false); }
+    revalidating = true;
+    var seq = ++revalidateSeq;
+    var epoch = sessionEpoch;
+    // Private content is withheld for the whole identity check.  Existing
+    // requests keep their original epoch: a changed identity clears the session
+    // and invalidates their callbacks before anything can be shown again.
+    authView.hidden = true;
+    workspaceView.hidden = true;
+    revalidateRetry.hidden = true;
+    appEl.setAttribute("data-private", "hidden");
+    setStatus(globalStatus, "Confirming your session…");
     return api("/workspace/api/me").then(function (result) {
+      if (seq !== revalidateSeq) { return false; }
+      revalidating = false;
       if (epoch !== sessionEpoch) { return false; }
-      if (result.status === 401) { clearSession("Your session expired. Sign in again."); return false; }
+      if (authFailure(result)) { return false; }
       if (!result.ok) {
-        setStatus(authStatus, serverMessage(result, timeoutOrNetwork(result)), "error");
+        // A transient failure does not prove an identity change, but it also
+        // does not permit showing the previous identity's private content.
+        workspaceView.hidden = true;
+        authView.hidden = true;
+        logoutButton.hidden = false;
+        revalidateRetry.hidden = false;
+        setStatus(
+          globalStatus,
+          "Private content stays hidden because your session could not be confirmed. " +
+            timeoutOrNetwork(result) + " Retry the check before continuing.",
+          "warning"
+        );
+        return false;
+      }
+      if (profile && profile.user && profile.user.id !== result.data.user.id) {
+        clearSession("This browser signed in as a different account. Private data was cleared. Sign in again.");
         return false;
       }
       try { applyProfile(result.data); }
@@ -559,8 +811,31 @@ _WORKSPACE_JS = """
         clearSession("The workspace returned an unexpected response. Sign in again.");
         return false;
       }
+      setStatus(globalStatus, "");
       return true;
     });
+  }
+
+  function showSessionCheckRecovery(failure) {
+    // The password was accepted so a cookie exists, but no private surface may
+    // be shown until /me confirms which account that cookie belongs to.  Keep
+    // an honest, accessible recovery path instead of a blank hidden page.
+    signedIn = false;
+    workspaceView.hidden = true;
+    authView.hidden = true;
+    revalidateRetry.hidden = false;
+    logoutButton.hidden = false;
+    appEl.setAttribute("data-private", "hidden");
+    topbarTitle.textContent = "Session check";
+    var detail = failure
+      ? serverMessage(failure, "The workspace is busy or did not answer.")
+      : "The workspace did not answer.";
+    setStatus(
+      globalStatus,
+      "Your session could not be confirmed. " + detail +
+        " Private content stays hidden; retry the session check.",
+      "warning"
+    );
   }
 
   function finishLogin(result, epoch) {
@@ -578,23 +853,52 @@ _WORKSPACE_JS = """
       return;
     }
     if (result.status === 403) {
-      setStatus(authStatus, "Sign-in is not allowed from this connection.", "error");
+      setStatus(authStatus, "Sign-in is not allowed from this connection. Open the workspace directly and try again.", "error");
       return;
     }
-    if (!result.ok || !isObject(result.data) || typeof result.data.token !== "string" ||
-        !result.data.token) {
+    if (!result.ok || !isObject(result.data) || !isObject(result.data.user)) {
       setStatus(authStatus, serverMessage(result, timeoutOrNetwork(result)), "error");
       return;
     }
-    token = result.data.token;
+    var loginUid = typeof result.data.user.id === "string" ? result.data.user.id : "";
+    var failure = null;
+    resetPrivateState();
     sessionEpoch += 1;
-    resetAdminState();
+    epoch = sessionEpoch;
+    logoutUnconfirmed = false;
+    // resetPrivateState() dropped the pending identity, but the accepted login
+    // response named the account whose server cookie now exists.  Retain that
+    // non-secret id so a sign-out from the recovery screen can still revoke the
+    // server session even before /me confirms who the cookie belongs to.
+    logoutExpectedUid = loginUid;
+    // No identity, no private surface and no "Signed in" claim until /me
+    // answers for the account named by this login response.
+    var checkSeq = ++sessionCheckSeq;
+    authView.hidden = true;
+    workspaceView.hidden = true;
+    appEl.setAttribute("data-private", "hidden");
+    revalidateRetry.hidden = true;
     setStatus(authStatus, "");
-    setStatus(globalStatus, "Signed in. Session is kept in this tab only.");
-    loadProfile().then(function (loaded) {
-      if (!loaded || !profile) { return; }
-      topbarTitle.textContent = "Chat";
-      loadConversations(true);
+    setStatus(globalStatus, "Confirming your session…");
+    announceAuthChange();
+    loadProfile({
+      quiet: true,
+      expectedUid: loginUid,
+      retryIn: PROFILE_CHECK_RETRY_MS,
+      isCurrent: function () { return checkSeq === sessionCheckSeq; },
+      onFailure: function (failedResult) { failure = failedResult; }
+    }).then(function (loaded) {
+      if (epoch !== sessionEpoch || checkSeq !== sessionCheckSeq) { return; }
+      if (loaded && signedIn && profile) {
+        topbarTitle.textContent = "Chat";
+        setStatus(globalStatus, "");
+        // Readiness is public but still consumes a bounded admission slot, so
+        // refresh it only after the critical profile check has completed.
+        loadGuardStatus();
+        loadConversations(true);
+        return;
+      }
+      showSessionCheckRecovery(failure);
     });
   }
 
@@ -614,22 +918,71 @@ _WORKSPACE_JS = """
     setStatus(authStatus, "Signing in…");
     api("/workspace/api/login", {
       method: "POST",
-      body: JSON.stringify({ username: username, password: password })
+      body: JSON.stringify({ username: username, password: password, cookie: true }),
+      auth: false
     }).then(function (result) { finishLogin(result, epoch); });
   });
 
   function logout() {
-    var oldToken = token;
-    clearSession("Signed out.");
-    if (!oldToken) { return; }
-    try {
-      fetch("/workspace/api/logout", {
-        method: "POST",
-        headers: { "Authorization": "Bearer " + oldToken, "Accept": "application/json" },
-        credentials: "omit",
-        cache: "no-store"
-      }).catch(function () { /* best effort after local clear */ });
-    } catch (error) { /* best effort */ }
+    if (logoutBusy) { return; }
+    if (!signedIn && !logoutUnconfirmed && !logoutExpectedUid) {
+      // No confirmed or login-named identity exists, so no server revoke can
+      // be attributed honestly.  Clear only the local view.
+      clearSession("Signed out.");
+      return;
+    }
+    // Sign-out must name the account the server has to revoke.  Capture it
+    // before resetPrivateState() drops the profile so a failed revoke can be
+    // retried honestly without the cookie silently belonging to a peer.
+    var expectedUid = profile && profile.user && typeof profile.user.id === "string"
+      ? profile.user.id : logoutExpectedUid;
+    sessionEpoch += 1;
+    var epoch = sessionEpoch;
+    // Withhold and clear every private surface as soon as sign-out starts.
+    // The sign-in form appears only after the server answers, so a failed or
+    // timed-out revoke is never reported as a completed sign-out.
+    resetPrivateState();
+    logoutExpectedUid = expectedUid;
+    logoutBusy = true;
+    logoutButton.disabled = true;
+    logoutButton.hidden = false;
+    appEl.setAttribute("data-private", "hidden");
+    workspaceView.hidden = true;
+    authView.hidden = true;
+    currentView = "chat";
+    setViewTabs("chat");
+    topbarTitle.textContent = "Signing out";
+    setStatus(globalStatus, "Signing out…");
+    api("/workspace/api/logout", {
+      method: "POST",
+      body: "{}",
+      auth: false,
+      expectedUser: expectedUid
+    }).then(function (result) {
+      if (epoch !== sessionEpoch) { return; }
+      logoutBusy = false;
+      logoutButton.disabled = false;
+      if (result.ok) {
+        logoutUnconfirmed = false;
+        clearSession("Signed out.");
+        announceAuthChange();
+        return;
+      }
+      if (authFailure(result)) {
+        announceAuthChange();
+        return;
+      }
+      logoutUnconfirmed = true;
+      workspaceView.hidden = true;
+      authView.hidden = false;
+      logoutButton.hidden = false;
+      logoutButton.textContent = "Retry sign-out";
+      var message = "Sign-out was not confirmed. " + (result.timeout || result.network
+        ? "The session may still be active; check the connection and try again."
+        : serverMessage(result, "The session may still be active. Try again."));
+      setStatus(authStatus, message, "error");
+      setStatus(globalStatus, message, "error");
+    });
   }
 
   logoutButton.addEventListener("click", logout);
@@ -681,10 +1034,9 @@ _WORKSPACE_JS = """
     for (var i = 0; i < items.length; i += 1) {
       (function (item) {
         if (!isObject(item) || typeof item.id !== "string") { return; }
-        var label = "Conversation";
-        var meta = shortId(item.id) + " · " + formatDate(item.updated_at || item.created_at);
+        var label = "Conversation " + shortId(item.id);
+        var meta = formatDate(item.updated_at || item.created_at) + " · saved chat";
         var button = makeItem(label, meta, function () {
-          composer.value = "";
           openConversation(item.id);
           setSidebar(false);
         });
@@ -696,7 +1048,7 @@ _WORKSPACE_JS = """
   }
 
   function loadConversations(reset) {
-    if (!token || listLoading) { return Promise.resolve(false); }
+    if (!signedIn || listLoading) { return Promise.resolve(false); }
     var epoch = sessionEpoch;
     listLoading = true;
     if (reset) {
@@ -712,7 +1064,7 @@ _WORKSPACE_JS = """
     return api(path).then(function (result) {
       if (epoch !== sessionEpoch) { return false; }
       listLoading = false;
-      if (result.status === 401) { clearSession("Your session expired. Sign in again."); return false; }
+      if (authFailure(result)) { return false; }
       if (result.status === 403) { setStatus(listState, "Conversation list access was denied.", "denied"); return false; }
       if (!result.ok || !isObject(result.data) || !Array.isArray(result.data.items)) {
         setStatus(listState, serverMessage(result, timeoutOrNetwork(result)), "error");
@@ -734,7 +1086,7 @@ _WORKSPACE_JS = """
   loadMoreButton.addEventListener("click", function () { loadConversations(false); });
 
   function updateComposer() {
-    var ready = !!(token && currentConversation);
+    var ready = !!(signedIn && currentConversation);
     composer.disabled = !ready || sending;
     sendButton.disabled = !ready || sending;
     composer.setAttribute(
@@ -746,7 +1098,7 @@ _WORKSPACE_JS = """
     } else if (sending) {
       composerHint.textContent = "Sending… duplicate submissions are paused.";
     } else {
-      composerHint.textContent = "Ctrl/Command + Enter sends. Your original prompt is saved with the conversation; answers are stored after generation.";
+      composerHint.textContent = "Ctrl/Command + Enter sends.";
     }
   }
 
@@ -790,14 +1142,33 @@ _WORKSPACE_JS = """
     }
   }
 
+  function storeDraft(conversationId) {
+    if (typeof conversationId !== "string") { return; }
+    var value = composer.value;
+    if (value) { drafts[conversationId] = value; }
+    else { delete drafts[conversationId]; }
+  }
+
+  function restoreDraft(conversationId) {
+    composer.value = typeof conversationId === "string" && drafts[conversationId]
+      ? drafts[conversationId]
+      : "";
+  }
+
   function openConversation(id, options) {
-    if (!token || typeof id !== "string") { return Promise.resolve(false); }
+    if (!signedIn || typeof id !== "string") { return Promise.resolve(false); }
     var settings = options || {};
+    if (currentConversation) { storeDraft(currentConversation.id); }
     chatSeq += 1;
     var seq = chatSeq;
     var epoch = sessionEpoch;
     currentConversation = null;
-    if (!settings.quiet) { sendSeq += 1; }
+    if (!settings.quiet) {
+      sendSeq += 1;
+      // Restore this conversation's own unsent draft; drafts are tab memory
+      // only and are never sent with metadata or stored in the browser.
+      restoreDraft(id);
+    }
     sending = false;
     deleteConfirm.hidden = true;
     clearNode(messagesEl);
@@ -808,7 +1179,7 @@ _WORKSPACE_JS = """
     updateComposer();
     return api("/workspace/api/conversations/" + encodeURIComponent(id)).then(function (result) {
       if (seq !== chatSeq || epoch !== sessionEpoch) { return false; }
-      if (result.status === 401) { clearSession("Your session expired. Sign in again."); return false; }
+      if (authFailure(result)) { return false; }
       if (result.status === 403) {
         setStatus(chatStatus, "You do not have permission to open this conversation.", "denied");
         return false;
@@ -839,7 +1210,8 @@ _WORKSPACE_JS = """
   }
 
   newChatButton.addEventListener("click", function () {
-    if (!token || creating) { return; }
+    if (!signedIn || creating) { return; }
+    if (currentConversation) { storeDraft(currentConversation.id); }
     creating = true;
     newChatButton.disabled = true;
     setStatus(chatStatus, "Creating conversation…");
@@ -850,7 +1222,7 @@ _WORKSPACE_JS = """
       if (epoch !== sessionEpoch) { return; }
       creating = false;
       newChatButton.disabled = false;
-      if (result.status === 401) { clearSession("Your session expired. Sign in again."); return; }
+      if (authFailure(result)) { return; }
       if (!result.ok || !isObject(result.data) || typeof result.data.id !== "string") {
         if (chatSeq === startSeq) {
           setStatus(chatStatus, serverMessage(result, timeoutOrNetwork(result)), "error");
@@ -863,7 +1235,12 @@ _WORKSPACE_JS = """
         loadConversations(true);
         return;
       }
+      // The previous draft is already retained in memory.  Detach the old
+      // conversation before clearing the composer so the empty value is not
+      // mistaken for a new draft for the previous conversation.
+      currentConversation = null;
       composer.value = "";
+      delete drafts[result.data.id];
       loadConversations(true).then(function () {
         if (epoch !== sessionEpoch || chatSeq !== startSeq) { return; }
         openConversation(result.data.id);
@@ -873,7 +1250,7 @@ _WORKSPACE_JS = """
   });
 
   function submitMessage() {
-    if (!token || !currentConversation || sending) { return; }
+    if (!signedIn || !currentConversation || sending) { return; }
     var text = composer.value;
     if (!text || !text.trim()) {
       setStatus(chatStatus, "Enter a message before sending.", "error");
@@ -884,6 +1261,7 @@ _WORKSPACE_JS = """
     var seq = chatSeq;
     var epoch = sessionEpoch;
     var send = ++sendSeq;
+    drafts[conversationId] = text;
     sending = true;
     updateComposer();
     setStatus(chatStatus, "Sending…");
@@ -893,7 +1271,7 @@ _WORKSPACE_JS = """
     }).then(function (result) {
       if (epoch !== sessionEpoch) { return; }
       if (send !== sendSeq) { return; }
-      if (result.status === 401) { clearSession("Your session expired. Sign in again."); return; }
+      if (authFailure(result)) { return; }
       var sameConversation = currentConversation && currentConversation.id === conversationId &&
         chatSeq === seq;
       var message;
@@ -932,6 +1310,8 @@ _WORKSPACE_JS = """
         message = serverMessage(result, "The message could not be sent.") +
           " The original prompt is shown from the saved conversation if it was stored.";
       }
+      if (keepText) { drafts[conversationId] = text; }
+      else { delete drafts[conversationId]; }
       if (!sameConversation) {
         sending = false;
         updateComposer();
@@ -958,6 +1338,10 @@ _WORKSPACE_JS = """
     submitMessage();
   });
 
+  composer.addEventListener("input", function () {
+    if (currentConversation) { storeDraft(currentConversation.id); }
+  });
+
   composer.addEventListener("keydown", function (event) {
     if (event.key === "Enter" && (event.ctrlKey || event.metaKey)) {
       event.preventDefault();
@@ -976,7 +1360,7 @@ _WORKSPACE_JS = """
   });
 
   deleteYes.addEventListener("click", function () {
-    if (!token || !currentConversation || deleting) { return; }
+    if (!signedIn || !currentConversation || deleting) { return; }
     var id = currentConversation.id;
     var seq = chatSeq;
     var epoch = sessionEpoch;
@@ -987,7 +1371,7 @@ _WORKSPACE_JS = """
       if (epoch !== sessionEpoch) { return; }
       deleting = false;
       deleteYes.disabled = false;
-      if (result.status === 401) { clearSession("Your session expired. Sign in again."); return; }
+      if (authFailure(result)) { return; }
       var stillCurrent = currentConversation && currentConversation.id === id && chatSeq === seq;
       deleteConfirm.hidden = true;
       if (result.status === 403) {
@@ -1003,6 +1387,7 @@ _WORKSPACE_JS = """
         return;
       }
       loadConversations(true);
+      delete drafts[id];
       if (!stillCurrent) { return; }
       currentConversation = null;
       chatMeta.textContent = "";
@@ -1065,7 +1450,7 @@ _WORKSPACE_JS = """
   }
 
   function loadReviewConversations(reset) {
-    if (!token || reviewLoading || !profile || !profile.reviewScope) { return Promise.resolve(false); }
+    if (!signedIn || reviewLoading || !profile || !profile.reviewScope) { return Promise.resolve(false); }
     var epoch = sessionEpoch;
     reviewLoading = true;
     if (reset) {
@@ -1081,7 +1466,7 @@ _WORKSPACE_JS = """
     return api(path).then(function (result) {
       if (epoch !== sessionEpoch) { return false; }
       reviewLoading = false;
-      if (result.status === 401) { clearSession("Your session expired. Sign in again."); return false; }
+      if (authFailure(result)) { return false; }
       if (result.status === 403) {
         setStatus(reviewState, "Review permission was denied. Your grants may have changed.", "denied");
         refreshReviewAccess();
@@ -1128,7 +1513,7 @@ _WORKSPACE_JS = """
     var wasReviewView = currentView === "review";
     return api("/workspace/api/me").then(function (result) {
       if (epoch !== sessionEpoch) { return; }
-      if (result.status === 401) { clearSession("Your session expired. Sign in again."); return; }
+      if (authFailure(result)) { return; }
       if (!result.ok) { return; }
       try { applyProfile(result.data); }
       catch (error) { return; }
@@ -1150,7 +1535,7 @@ _WORKSPACE_JS = """
   }
 
   function openReviewConversation(id) {
-    if (!token || typeof id !== "string") { return; }
+    if (!signedIn || typeof id !== "string") { return; }
     reviewDetailSeq += 1;
     var seq = reviewDetailSeq;
     var epoch = sessionEpoch;
@@ -1159,7 +1544,7 @@ _WORKSPACE_JS = """
     clearNode(reviewMessages);
     api("/workspace/api/review/conversations/" + encodeURIComponent(id)).then(function (result) {
       if (seq !== reviewDetailSeq || epoch !== sessionEpoch) { return; }
-      if (result.status === 401) { clearSession("Your session expired. Sign in again."); return; }
+      if (authFailure(result)) { return; }
       if (result.status === 403) {
         reviewMeta.textContent = "Permission denied for this conversation. This access attempt was not expanded.";
         setStatus(reviewState, "Review permission was denied. Rechecking your grants.", "denied");
@@ -1186,7 +1571,7 @@ _WORKSPACE_JS = """
 
 
   function adminGuard(result, node) {
-    if (result.status === 401) { clearSession("Your session expired. Sign in again."); return true; }
+    if (authFailure(result)) { return true; }
     if (result.status === 403) {
       setStatus(node, "Administrator permission was denied by the server.", "denied");
       return true;
@@ -1536,7 +1921,7 @@ _WORKSPACE_JS = """
   }
 
   function loadDepartments(reset) {
-    if (!token || departmentLoading) { return Promise.resolve(false); }
+    if (!signedIn || departmentLoading) { return Promise.resolve(false); }
     var epoch = sessionEpoch;
     departmentLoading = true;
     if (reset) {
@@ -1576,7 +1961,7 @@ _WORKSPACE_JS = """
   }
 
   function loadUsers(reset) {
-    if (!token || userLoading) { return Promise.resolve(false); }
+    if (!signedIn || userLoading) { return Promise.resolve(false); }
     var epoch = sessionEpoch;
     userLoading = true;
     if (reset) {
@@ -1616,7 +2001,7 @@ _WORKSPACE_JS = """
   }
 
   function loadGrants(reset) {
-    if (!token || grantLoading) { return Promise.resolve(false); }
+    if (!signedIn || grantLoading) { return Promise.resolve(false); }
     var epoch = sessionEpoch;
     grantLoading = true;
     if (reset) {
@@ -1652,7 +2037,7 @@ _WORKSPACE_JS = """
   }
 
   function loadAccessLog(reset) {
-    if (!token || accessLoading) { return Promise.resolve(false); }
+    if (!signedIn || accessLoading) { return Promise.resolve(false); }
     var epoch = sessionEpoch;
     accessLoading = true;
     if (reset) {
@@ -1690,7 +2075,7 @@ _WORKSPACE_JS = """
   function queueAdminList(loader) {
     var epoch = sessionEpoch;
     function run() {
-      if (epoch !== sessionEpoch || !token) { return false; }
+      if (epoch !== sessionEpoch || !signedIn) { return false; }
       return loader();
     }
     var result = adminListChain.then(run, run);
@@ -1699,7 +2084,7 @@ _WORKSPACE_JS = """
   }
 
   function loadAdminPanels() {
-    if (!token || !profile || !profile.user || profile.user.role !== "admin") { return; }
+    if (!signedIn || !profile || !profile.user || profile.user.role !== "admin") { return; }
     adminLoaded = true;
     setStatus(adminStatus, "Loading account administration data…");
     var epoch = sessionEpoch;
@@ -1768,7 +2153,7 @@ _WORKSPACE_JS = """
 
   departmentForm.addEventListener("submit", function (event) {
     event.preventDefault();
-    if (!token || creatingDepartment) { return; }
+    if (!signedIn || creatingDepartment) { return; }
     var name = departmentName.value.trim();
     if (!name) {
       setStatus(adminStatus, "Enter a department name.", "error");
@@ -1803,7 +2188,7 @@ _WORKSPACE_JS = """
 
   userForm.addEventListener("submit", function (event) {
     event.preventDefault();
-    if (!token || creatingUser) { return; }
+    if (!signedIn || creatingUser) { return; }
     var username = userUsername.value.trim();
     var fullName = userFullName.value.trim();
     var departmentId = userDepartment.value;
@@ -1858,7 +2243,7 @@ _WORKSPACE_JS = """
 
   grantForm.addEventListener("submit", function (event) {
     event.preventDefault();
-    if (!token || granting) { return; }
+    if (!signedIn || granting) { return; }
     var userId = grantUser.value;
     var scope = grantScope.value === "global" ? "global" : "department";
     if (!userId) {
@@ -1919,44 +2304,141 @@ _WORKSPACE_JS = """
     queueAdminList(function () { return loadAccessLog(false); });
   });
 
+  function setGuardStatus(label, detail, inactive) {
+    guardSummary.textContent = label;
+    guardDetail.textContent = detail;
+    if (inactive) { guardStatus.setAttribute("data-kind", "inactive"); }
+    else { guardStatus.removeAttribute("data-kind"); }
+    guardStatus.open = false;
+  }
+
   function loadGuardStatus() {
-    api("/health/ready").then(function (result) {
+    api("/health/ready", { independent: true }).then(function (result) {
       if (!result.ok || !isObject(result.data)) {
-        guardStatus.textContent =
-          "Model guard status unavailable — the readiness check did not succeed. Do not rely on guard protection.";
-        guardStatus.setAttribute("data-kind", "inactive");
+        setGuardStatus(
+          "Unavailable",
+          "Guard status is unavailable — the readiness check did not succeed. " +
+            "Do not rely on model guard protection.",
+          true
+        );
         return;
       }
       var mode = typeof result.data.mode === "string" ? result.data.mode : "unknown";
       var configured = result.data.guards_active === true;
       var ready = result.data.status === "ready" && result.data.workspace !== "not_ready";
-      if (configured) {
-        guardStatus.textContent = ready
-          ? "Model guard configured. Readiness: ready."
-          : "Model guard configured but unavailable — readiness: not ready. Do not rely on guard protection.";
-        if (ready) { guardStatus.removeAttribute("data-kind"); }
-        else { guardStatus.setAttribute("data-kind", "inactive"); }
+      if (configured && ready) {
+        setGuardStatus(
+          "Configured",
+          "Model guard is configured. Readiness: ready. Deterministic checks still apply.",
+          false
+        );
+      } else if (configured) {
+        setGuardStatus(
+          "Unavailable",
+          "Model guard is configured but unavailable — readiness is not ready. " +
+            "Do not rely on model guard protection.",
+          true
+        );
       } else {
-        guardStatus.textContent = "Model guard inactive — model-based checks are not active (" +
-          mode + " mode). Deterministic checks may still apply.";
-        guardStatus.setAttribute("data-kind", "inactive");
+        setGuardStatus(
+          "Inactive",
+          "Model guard is inactive — model-based checks are not running in " + mode +
+            " mode. Deterministic checks may still apply.",
+          true
+        );
       }
-      if (result.data.workspace === "not_ready" && ready) {
-        guardStatus.textContent += " Workspace readiness: not ready.";
+      if (result.data.workspace === "not_ready") {
+        guardDetail.textContent += " Workspace readiness is not ready.";
       }
     });
   }
 
+  function restoreSession() {
+    // A restore supersedes any profile check started for an earlier cookie, so
+    // a buffered reply cannot paint a stale identity after a peer change.
+    var seq = ++sessionCheckSeq;
+    var epoch = sessionEpoch;
+    authView.hidden = true;
+    workspaceView.hidden = true;
+    revalidateRetry.hidden = true;
+    appEl.setAttribute("data-private", "hidden");
+    setStatus(globalStatus, "Checking your session…");
+    loadProfile({
+      initial: true,
+      isCurrent: function () { return seq === sessionCheckSeq; }
+    }).then(function (loaded) {
+      if (seq !== sessionCheckSeq || epoch !== sessionEpoch) { return; }
+      if (loaded && signedIn && profile) {
+        appEl.removeAttribute("data-private");
+        topbarTitle.textContent = "Chat";
+        setStatus(globalStatus, "");
+        loadConversations(true);
+        return;
+      }
+      if (!signedIn) {
+        authView.hidden = false;
+        if (!authStatus.textContent) {
+          setStatus(authStatus, "Sign in to continue.", "");
+        }
+        if (authStatus.getAttribute("data-kind") === "error") {
+          setStatus(globalStatus, authStatus.textContent, "warning");
+          revalidateRetry.hidden = false;
+        }
+      }
+    });
+  }
+
+  revalidateRetry.addEventListener("click", function () {
+    if (signedIn) { revalidate(); }
+    else { restoreSession(); }
+  });
+
+  function revalidateIfSignedIn() {
+    if (!signedIn) { return; }
+    revalidate();
+  }
+
+  window.addEventListener("focus", revalidateIfSignedIn);
+  window.addEventListener("pageshow", revalidateIfSignedIn);
+  if (document.addEventListener) {
+    document.addEventListener("visibilitychange", function () {
+      if (!document.hidden) { revalidateIfSignedIn(); }
+    });
+  }
+  if (typeof BroadcastChannel === "function") {
+    try {
+      // Only a change signal crosses tabs; no token, profile, prompt or draft
+      // text is ever posted through this channel or any browser storage.
+      authChannel = new BroadcastChannel("nasi_lemak_workspace_auth");
+      authChannel.addEventListener("message", function (event) {
+        if (!event || !isObject(event.data) || event.data.type !== "workspace-auth-changed") {
+          return;
+        }
+        // A change announced by another tab supersedes any check already in
+        // flight: its buffered /me reply answers for the pre-change cookie, so
+        // it must not repaint private content.  Force a fresh check instead of
+        // dropping the signal, while every surface stays withheld.
+        if (signedIn) { revalidate(true); }
+        else { restoreSession(); }
+      });
+    } catch (error) {
+      authChannel = null;
+    }
+  }
+
   setViewTabs("chat");
   resetAdminState();
-  authView.hidden = false;
+  authView.hidden = true;
   workspaceView.hidden = true;
+  appEl.setAttribute("data-private", "hidden");
+  logoutButton.hidden = true;
   deleteButton.hidden = true;
   deleteConfirm.hidden = true;
   composer.disabled = true;
   sendButton.disabled = true;
   updateComposer();
   loadGuardStatus();
+  restoreSession();
 }());
 """
 
@@ -2016,7 +2498,10 @@ WORKSPACE_HTML = """<!doctype html>
 <svg width="17" height="17" viewBox="0 0 18 18" fill="none" aria-hidden="true" focusable="false"><path d="M2.5 5h13M2.5 9h13M2.5 13h13" stroke="currentColor" stroke-width="1.4" stroke-linecap="round"/></svg>
 </button>
 <h2 id="topbar-title" class="topbar-title">Sign in</h2>
-<p id="guard-status" class="guard-status" role="status">Model guard status loading…</p>
+<details id="guard-status" class="guard-status">
+<summary id="guard-summary" class="guard-summary">Guard status loading…</summary>
+<p id="guard-detail" class="guard-detail" aria-live="polite"></p>
+</details>
 <div class="identity">
 <span id="identity-name" class="identity-name"></span>
 <span id="identity-meta" class="identity-meta"></span>
@@ -2024,6 +2509,7 @@ WORKSPACE_HTML = """<!doctype html>
 <button id="logout-button" class="ghost" type="button">Sign out</button>
 </header>
 <p id="global-status" class="global-status" role="status" aria-live="polite"></p>
+<button id="revalidate-retry" class="retry-check" type="button" hidden>Retry session check</button>
 <!-- AVAILABILITY -->
 <div class="content">
 <section id="auth-view" class="auth-view" aria-labelledby="login-heading">
@@ -2037,10 +2523,11 @@ WORKSPACE_HTML = """<!doctype html>
 <button id="login-submit" class="primary" type="submit">Sign in</button>
 </form>
 <p id="auth-status" class="auth-status" role="status" aria-live="polite">Sign in to continue.</p>
-<p class="foot">Your password is sent only to this workspace and is cleared from the form after each request. The session token stays in this tab's memory.</p>
+<p class="foot">Your password is sent only to this workspace and is cleared from the form after each request. The server keeps your session in an HttpOnly cookie scoped to this workspace; this page never stores a token in browser storage or the URL.</p>
 </section>
 <section id="workspace-view" hidden>
 <div id="chat-panel" class="panel" role="tabpanel" aria-labelledby="tab-chat">
+<div class="chat-column">
 <div class="conversation-head">
 <div>
 <h2 id="chat-title">Conversation</h2>
@@ -2067,7 +2554,11 @@ WORKSPACE_HTML = """<!doctype html>
 <button id="send" class="primary" type="submit" disabled>Send</button>
 </div>
 </form>
+<details class="privacy-disclosure">
+<summary>Privacy and storage</summary>
 <p class="retention">Your original prompt and the delivered assistant reply are saved encrypted on the server until you delete the conversation. A blocked or failed prompt is saved with its outcome; no blocked assistant reply is stored.</p>
+</details>
+</div>
 </div>
 </div>
 <div id="review-panel" class="review-view" role="tabpanel" aria-labelledby="tab-review" hidden>

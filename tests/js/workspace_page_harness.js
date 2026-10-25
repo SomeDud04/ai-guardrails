@@ -157,8 +157,21 @@ function createApp(options) {
     }
     return elements[id];
   }
+  const documentListeners = Object.create(null);
   const document = {
     body: makeElement("body"),
+    hidden: false,
+    addEventListener(type, handler) {
+      if (!documentListeners[type]) {
+        documentListeners[type] = [];
+      }
+      documentListeners[type].push(handler);
+    },
+    dispatch(type, extra) {
+      for (const handler of documentListeners[type] || []) {
+        handler(Object.assign({ type }, extra || {}));
+      }
+    },
     getElementById(id) {
       return elementFor(id);
     },
@@ -250,11 +263,27 @@ function createApp(options) {
     }
   }
 
+  const channelInstances = [];
+  class FakeBroadcastChannel {
+    constructor(name) {
+      this.name = name;
+      this.handlers = [];
+      channelInstances.push(this);
+    }
+    addEventListener(type, handler) {
+      if (type === "message") { this.handlers.push(handler); }
+    }
+    postMessage() {
+      // A real BroadcastChannel never delivers a message back to its sender.
+    }
+  }
+
   const context = {
     document,
     window,
     fetch,
     AbortController,
+    BroadcastChannel: FakeBroadcastChannel,
     Promise,
     Date,
     JSON,
@@ -266,6 +295,10 @@ function createApp(options) {
     clearTimeout: fakeClearTimeout,
   };
   vm.createContext(context);
+  // The page markup nests these summary/detail nodes inside the guard
+  // <details> element; the synthetic DOM must mirror that containment.
+  elementFor("guard-status").appendChild(elementFor("guard-summary"));
+  elementFor("guard-status").appendChild(elementFor("guard-detail"));
   vm.runInContext(scriptText, context, { filename: "workspace_page.js" });
 
   function callsMatching(part) {
@@ -297,6 +330,13 @@ function createApp(options) {
     callsMatching,
     pendingCallsMatching,
     lastMatching,
+    broadcast(data) {
+      for (const channel of channelInstances.slice()) {
+        for (const handler of channel.handlers.slice()) {
+          handler({ data });
+        }
+      }
+    },
     fireAllTimers,
   };
 }
@@ -318,15 +358,49 @@ const PROFILE = {
   review_grants: [],
 };
 
-function loginPayload(token, user) {
+function loginPayload(user) {
   return {
-    token,
     expires: 1800000000,
     user: user || ALICE_USER,
   };
 }
 
-async function signIn(app, token, profile) {
+async function start(app, options) {
+  const settings = options || {};
+  await settle();
+  const health = app.lastMatching("/health/ready");
+  if (health) {
+    health.respond(
+      settings.health || { status: "ready", mode: "test", guards_active: false },
+      settings.healthStatus || 200
+    );
+  }
+  await settle();
+  const me = app.lastMatching("/workspace/api/me");
+  if (me) {
+    assert(
+      me.options.credentials === "same-origin",
+      "the initial /me restore must use same-origin credentials"
+    );
+    assert(
+      me.options.headers.Authorization === undefined,
+      "the page must never send a bearer token"
+    );
+    assert(
+      me.options.headers["X-Workspace-User"] === undefined,
+      "the initial /me bootstrap has no expected user yet"
+    );
+    me.respond(
+      settings.profile || {
+        error: { code: "UNAUTHORIZED", message: "Authentication required." },
+      },
+      settings.profile ? 200 : 401
+    );
+  }
+  await settle();
+}
+
+async function signIn(app, profile) {
   const login = app.elementFor("login-form");
   app.elementFor("username").value = "alice";
   app.elementFor("password").value = "secret-password";
@@ -340,45 +414,71 @@ async function signIn(app, token, profile) {
   const body = JSON.parse(request.options.body);
   assert(body.username === "alice", "username payload mismatch");
   assert(body.password === "secret-password", "password payload mismatch");
+  assert(body.cookie === true, "login must opt into the HttpOnly cookie");
+  assert(request.options.credentials === "same-origin", "login credentials shape is wrong");
   assert(
     request.options.headers.Authorization === undefined,
     "login must not send a stale bearer token"
   );
-  request.respond(loginPayload(token), 200);
+  request.respond(loginPayload(profile ? profile.user : ALICE_USER), 200);
   await settle();
   const me = app.lastMatching("/workspace/api/me");
   assert(me, "GET /me was not issued after login");
   assert(
-    me.options.headers.Authorization === `Bearer ${token}`,
-    "session bearer header shape is wrong"
+    me.options.credentials === "same-origin",
+    "session restore must use same-origin credentials"
+  );
+  assert(
+    me.options.headers.Authorization === undefined,
+    "session restore must not use a bearer token"
+  );
+  assert(
+    me.options.headers["X-Workspace-User"] === undefined,
+    "login bootstrap /me must not name an expected user"
   );
   me.respond(profile || PROFILE, 200);
   await settle();
+  // The readiness refresh is now sequenced after the critical profile check.
+  // Settle it so it cannot hold an admission slot for the rest of a scenario.
+  const postLoginHealth = app.lastMatching("/health/ready");
+  if (postLoginHealth && !postLoginHealth.settled) {
+    postLoginHealth.respond(
+      { status: "ready", mode: "test", guards_active: false },
+      200
+    );
+    await settle();
+  }
+  assert(app.elementFor("workspace-view").hidden === false,
+    "a confirmed profile must reveal the workspace");
 }
 
 async function scenarioSignInAndChat() {
   assert(!/localStorage|sessionStorage|document\.cookie/.test(scriptText),
     "page script must not use browser storage or cookies");
+  assert(!/Authorization|Bearer\s/.test(scriptText),
+    "page script must never build a bearer credential");
   assert(!/innerHTML\s*=/.test(scriptText), "page script must not assign innerHTML");
   assert(!/console\.(log|error|warn)/.test(scriptText), "page must not log");
 
   const app = createApp();
-  await settle();
-  const health = app.lastMatching("/health/ready");
-  assert(health, "health/ready request missing");
-  health.respond({ status: "ready", mode: "test", guards_active: false }, 200);
-  await settle();
+  await start(app);
   assert(
     app.elementFor("guard-status").textContent.indexOf("inactive") >= 0,
     "test mode must clearly report inactive guard models"
   );
 
-  await signIn(app, "token-1");
+  await signIn(app);
   const list = app.lastMatching("/workspace/api/conversations?limit=25");
   assert(list, "own conversation list request missing");
+  assert(list.options.credentials === "same-origin", "conversation list credentials changed");
+  assert(list.options.headers.Authorization === undefined, "list must not use a bearer token");
+  assert(list.options.body === undefined,
+    "GET requests must not gain a synthetic JSON body");
+  assert(list.options.headers["Content-Type"] === undefined,
+    "GET requests must not gain a mutation Content-Type");
   assert(
-    list.options.headers.Authorization === "Bearer token-1",
-    "conversation list must use the session token"
+    list.options.headers["X-Workspace-User"] === "user-alice",
+    "authenticated requests must name the current profile"
   );
   list.respond(
     {
@@ -549,6 +649,15 @@ async function scenarioSignInAndChat() {
     (call) => call.options.method === "DELETE"
   )[0];
   assert(deletion, "confirmed delete did not issue DELETE");
+  assert(deletion.options.body === "{}",
+    "bodyless DELETE must send an empty JSON object");
+  assert(deletion.options.headers["Content-Type"] === "application/json",
+    "DELETE must declare a JSON Content-Type for the cookie mutation guard");
+  assert(deletion.options.credentials === "same-origin", "delete credentials changed");
+  assert(deletion.options.headers["X-Workspace-User"] === "user-alice",
+    "delete must name the current profile");
+  assert(deletion.options.headers.Authorization === undefined,
+    "delete must not use bearer auth");
   deletion.respond({ status: "deleted" }, 200);
   await settle();
   const afterDelete = app.lastMatching("/workspace/api/conversations?limit=25");
@@ -569,6 +678,18 @@ async function scenarioSignInAndChat() {
   const lateDetail = app.lastMatching("/workspace/api/conversations/conv-beta-5678");
   assert(lateDetail, "conversation opened before logout is missing");
   app.elementFor("logout-button").dispatch("click");
+  const logoutCall = app.lastMatching("/workspace/api/logout");
+  assert(logoutCall, "logout did not call the server first");
+  assert(logoutCall.options.method === "POST", "logout must POST");
+  assert(logoutCall.options.body === "{}", "bodyless logout must send a JSON body");
+  assert(logoutCall.options.credentials === "same-origin", "logout credentials changed");
+  assert(logoutCall.options.headers.Authorization === undefined, "logout must not use bearer auth");
+  assert(logoutCall.options.headers["X-Workspace-User"] === "user-alice",
+    "logout must name the identity the server has to revoke");
+  assert(app.elementFor("auth-view").hidden === true,
+    "local state must not claim sign-out before the server confirms");
+  logoutCall.respond({ status: "ok" }, 200);
+  await settle();
   assert(app.elementFor("auth-view").hidden === false, "logout must show sign-in");
   assert(app.elementFor("workspace-view").hidden === true, "logout must hide workspace");
   lateDetail.respond(
@@ -592,13 +713,8 @@ async function scenarioSignInAndChat() {
 
 async function scenarioReviewer() {
   const app = createApp();
-  await settle();
-  app.lastMatching("/health/ready").respond(
-    { status: "ready", mode: "test", guards_active: false },
-    200
-  );
-  await settle();
-  await signIn(app, "review-token", {
+  await start(app);
+  await signIn(app, {
     user: { ...ALICE_USER, id: "user-rev", username: "reviewer", full_name: "Rita Reviewer", role: "employee" },
     department: { id: "dept-accounting", name: "Accounting" },
     review_scope: "department",
@@ -660,10 +776,8 @@ async function scenarioReviewer() {
 
 async function scenarioReviewRevoked() {
   const app = createApp();
-  await settle();
-  app.lastMatching("/health/ready").respond({ status: "ready", mode: "test", guards_active: false }, 200);
-  await settle();
-  await signIn(app, "review-token-2", {
+  await start(app);
+  await signIn(app, {
     user: { ...ALICE_USER, id: "user-rev2", username: "reviewer2", full_name: "Rita Reviewer" },
     department: { id: "dept-accounting", name: "Accounting" },
     review_scope: "department",
@@ -719,10 +833,8 @@ async function scenarioReviewRevoked() {
 
 async function scenarioExpiredSession() {
   const app = createApp();
-  await settle();
-  app.lastMatching("/health/ready").respond({ status: "ready", mode: "test", guards_active: false }, 200);
-  await settle();
-  await signIn(app, "token-expire");
+  await start(app);
+  await signIn(app);
   app.lastMatching("/workspace/api/conversations?limit=25").respond(
     { error: { code: "UNAUTHORIZED", message: "Authentication required." } },
     401
@@ -735,10 +847,8 @@ async function scenarioExpiredSession() {
 
 async function scenarioComposerIsolation() {
   const app = createApp();
-  await settle();
-  app.lastMatching("/health/ready").respond({ status: "ready", mode: "enforce", guards_active: true }, 200);
-  await settle();
-  await signIn(app, "draft-token");
+  await start(app);
+  await signIn(app);
   app.lastMatching("/workspace/api/conversations?limit=25").respond(
     {
       items: [
@@ -869,13 +979,8 @@ async function scenarioComposerIsolation() {
 
 async function scenarioStaleQuietReloadKeepsCurrentDraft() {
   const app = createApp();
-  await settle();
-  app.lastMatching("/health/ready").respond(
-    { status: "ready", mode: "enforce", guards_active: true },
-    200
-  );
-  await settle();
-  await signIn(app, "reload-token");
+  await start(app);
+  await signIn(app);
   app.lastMatching("/workspace/api/conversations?limit=25").respond(
     {
       items: [
@@ -943,12 +1048,10 @@ async function scenarioStaleQuietReloadKeepsCurrentDraft() {
 
 async function scenarioGuardReadiness() {
   const app = createApp();
-  await settle();
-  app.lastMatching("/health/ready").respond(
-    { status: "not_ready", mode: "enforce", guards_active: true, workspace: "not_ready" },
-    503
-  );
-  await settle();
+  await start(app, {
+    health: { status: "not_ready", mode: "enforce", guards_active: true, workspace: "not_ready" },
+    healthStatus: 503,
+  });
   const text = app.elementFor("guard-status").textContent;
   assert(text.indexOf("unavailable") >= 0 || text.indexOf("not ready") >= 0,
     "unready health must be reported as unavailable");
@@ -959,9 +1062,7 @@ async function scenarioGuardReadiness() {
 
 async function scenarioStaleLogin() {
   const app = createApp();
-  await settle();
-  app.lastMatching("/health/ready").respond({ status: "ready", mode: "enforce", guards_active: true }, 200);
-  await settle();
+  await start(app);
   app.elementFor("username").value = "alice";
   app.elementFor("password").value = "first-password";
   app.elementFor("login-form").dispatch("submit");
@@ -970,20 +1071,19 @@ async function scenarioStaleLogin() {
   app.elementFor("logout-button").dispatch("click");
   app.elementFor("username").value = "bob";
   app.elementFor("password").value = "second-password";
-  first.respond(loginPayload("stale-token"), 200);
+  const meCount = app.callsMatching("/workspace/api/me").length;
+  first.respond(loginPayload(), 200);
   await settle();
   assert(app.elementFor("password").value === "second-password",
     "stale login must not clear the newer password");
   assert(app.elementFor("username").value === "bob", "stale login must not overwrite the newer username");
-  assert(app.callsMatching("/workspace/api/me").length === 0,
+  assert(app.callsMatching("/workspace/api/me").length === meCount,
     "stale login must not start a new authenticated session");
 }
 
 async function scenarioAdmin() {
   const app = createApp({ maxInflight: 2 });
-  await settle();
-  app.lastMatching("/health/ready").respond({ status: "ready", mode: "enforce", guards_active: true }, 200);
-  await settle();
+  await start(app);
   const adminProfile = {
     user: { ...ALICE_USER, id: "user-admin", username: "admin", full_name: "Ada Admin", role: "admin" },
     department: { id: "dept-accounting", name: "Accounting" },
@@ -991,7 +1091,7 @@ async function scenarioAdmin() {
     review_department_ids: [],
     review_grants: [],
   };
-  await signIn(app, "admin-token", adminProfile);
+  await signIn(app, adminProfile);
   app.lastMatching("/workspace/api/conversations?limit=25").respond({ items: [], next: null }, 200);
   await settle();
   assert(app.elementFor("tab-admin").hidden === false, "admin tab must appear for an admin role");
@@ -1004,8 +1104,12 @@ async function scenarioAdmin() {
   assert(departments, "all admin list requests must be bounded");
   assert(app.pendingCallsMatching("/workspace/api/admin").length <= 2,
     "admin list loading must respect the two-slot admission");
-  assert(departments.options.headers.Authorization === "Bearer admin-token",
-    "admin requests must carry the bearer token");
+  assert(departments.options.headers.Authorization === undefined,
+    "admin requests must not carry a bearer token");
+  assert(departments.options.credentials === "same-origin",
+    "admin requests must use same-origin cookie credentials");
+  assert(departments.options.headers["X-Workspace-User"] === "user-admin",
+    "admin requests must name the current profile");
   departments.respond(
     {
       items: [
@@ -1221,6 +1325,15 @@ async function scenarioAdmin() {
     (call) => call.options.method === "DELETE"
   ).pop();
   assert(revoke, "confirmed revoke was not sent");
+  assert(revoke.options.body === "{}",
+    "bodyless grant revoke must send an empty JSON object");
+  assert(revoke.options.headers["Content-Type"] === "application/json",
+    "grant revoke must declare a JSON Content-Type for the cookie mutation guard");
+  assert(revoke.options.credentials === "same-origin", "grant revoke credentials changed");
+  assert(revoke.options.headers["X-Workspace-User"] === "user-admin",
+    "grant revoke must name the current profile");
+  assert(revoke.options.headers.Authorization === undefined,
+    "grant revoke must not use bearer auth");
   revoke.respond({ status: "revoked" }, 200);
   await settle();
   app.lastMatching("/workspace/api/admin/review-grants?limit=25").respond(
@@ -1310,15 +1423,490 @@ async function scenarioAdmin() {
   assert(app.elementFor("workspace-view").hidden === true, "logout must hide the workspace");
 }
 
+async function scenarioInitialRestoreWithholdsSurfaces() {
+  const app = createApp();
+  await settle();
+  assert(app.elementFor("auth-view").hidden === true,
+    "the sign-in form must not flash before the initial session check answers");
+  assert(app.elementFor("workspace-view").hidden === true,
+    "private workspace content must stay hidden during the initial check");
+  const me = app.lastMatching("/workspace/api/me");
+  assert(me && !me.settled, "initial session check missing");
+  me.respond({ error: { code: "UNAUTHORIZED", message: "Authentication required." } }, 401);
+  await settle();
+  assert(app.elementFor("auth-view").hidden === false,
+    "a completed initial check must reveal sign-in");
+  assert(app.elementFor("workspace-view").hidden === true,
+    "a signed-out initial check must keep private content hidden");
+}
+
+async function scenarioDraftSurvivesListNavigation() {
+  const app = createApp();
+  await start(app);
+  await signIn(app);
+  app.lastMatching("/workspace/api/conversations?limit=25").respond(
+    {
+      items: [
+        { id: "conv-a", created_at: 1700000001, updated_at: 1700000002 },
+        { id: "conv-b", created_at: 1700000003, updated_at: 1700000004 },
+      ],
+      next: null,
+    },
+    200
+  );
+  await settle();
+  app.elementFor("conversation-list").children[0].dispatch("click");
+  app.lastMatching("/workspace/api/conversations/conv-a").respond(
+    { id: "conv-a", created_at: 1700000001, messages: [] },
+    200
+  );
+  await settle();
+  app.elementFor("composer").value = "draft in A";
+
+  app.elementFor("conversation-list").children[1].dispatch("click");
+  app.lastMatching("/workspace/api/conversations/conv-b").respond(
+    { id: "conv-b", created_at: 1700000003, messages: [] },
+    200
+  );
+  await settle();
+  app.elementFor("composer").value = "draft in B";
+
+  app.elementFor("conversation-list").children[0].dispatch("click");
+  app.lastMatching("/workspace/api/conversations/conv-a").respond(
+    { id: "conv-a", created_at: 1700000001, messages: [] },
+    200
+  );
+  await settle();
+  assert(app.elementFor("composer").value === "draft in A",
+    "returning to A must restore A's in-memory draft");
+
+  app.elementFor("conversation-list").children[1].dispatch("click");
+  app.lastMatching("/workspace/api/conversations/conv-b").respond(
+    { id: "conv-b", created_at: 1700000003, messages: [] },
+    200
+  );
+  await settle();
+  assert(app.elementFor("composer").value === "draft in B",
+    "B to A to B navigation must restore B's draft, not clear it");
+}
+
+async function scenarioRevalidationHidesPrivateState() {
+  const app = createApp();
+  await start(app);
+  await signIn(app);
+  app.lastMatching("/workspace/api/conversations?limit=25").respond(
+    { items: [{ id: "conv-a", created_at: 1700000001, updated_at: 1700000002 }], next: null },
+    200
+  );
+  await settle();
+  app.elementFor("conversation-list").children[0].dispatch("click");
+  app.lastMatching("/workspace/api/conversations/conv-a").respond(
+    {
+      id: "conv-a",
+      created_at: 1700000001,
+      messages: [{ id: "a1", role: "assistant", outcome: "allowed", text: "private A", created_at: 1700000002 }],
+    },
+    200
+  );
+  await settle();
+  app.elementFor("composer").value = "draft in A";
+
+  app.window.dispatch("focus");
+  const check = app.lastMatching("/workspace/api/me");
+  assert(check && !check.settled, "focus revalidation request missing");
+  assert(app.elementFor("workspace-view").hidden === true,
+    "private surfaces must hide while identity is checked");
+  assert(app.elementFor("auth-view").hidden === true,
+    "revalidation must not show the sign-in form before the result");
+  assert(app.elementFor("app").getAttribute("data-private") === "hidden",
+    "the sidebar and identity must be withheld during revalidation");
+  assert(app.elementFor("composer").value === "draft in A",
+    "same-identity drafts stay in tab memory while hidden");
+
+  check.respond(PROFILE, 200);
+  await settle();
+  assert(app.elementFor("workspace-view").hidden === false,
+    "a confirmed identity must restore the workspace");
+  assert(app.elementFor("app").getAttribute("data-private") === null,
+    "a confirmed identity must restore the sidebar");
+  assert(app.elementFor("composer").value === "draft in A",
+    "a confirmed identity must restore its own draft");
+
+  app.window.dispatch("focus");
+  const offline = app.lastMatching("/workspace/api/me");
+  assert(offline && !offline.settled, "second revalidation request missing");
+  offline.reject(new Error("offline"));
+  await settle();
+  assert(app.elementFor("workspace-view").hidden === true,
+    "a failed revalidation must keep private content hidden");
+  assert(app.elementFor("auth-view").hidden === true,
+    "a failed revalidation must not claim the user is signed out");
+  assert(app.elementFor("revalidate-retry").hidden === false,
+    "a failed revalidation must offer a retry");
+  assert(app.elementFor("global-status").textContent.indexOf("could not be confirmed") >= 0,
+    "a failed revalidation must explain the hidden state");
+
+  app.elementFor("revalidate-retry").dispatch("click");
+  const retry = app.lastMatching("/workspace/api/me");
+  assert(retry && !retry.settled, "retry revalidation request missing");
+  retry.respond({
+    user: { ...ALICE_USER, id: "user-bob", username: "bob", full_name: "Bob Lee" },
+    department: { id: "dept-accounting", name: "Accounting" },
+    review_scope: null,
+    review_department_ids: [],
+    review_grants: [],
+  }, 200);
+  await settle();
+  assert(app.elementFor("workspace-view").hidden === true,
+    "a changed cookie identity must not paint the old workspace");
+  assert(app.elementFor("auth-view").hidden === false,
+    "a changed cookie identity must require sign-in");
+  assert(app.elementFor("conversation-list").children.length === 0,
+    "a changed cookie identity must clear private lists");
+  assert(app.elementFor("composer").value === "",
+    "a changed cookie identity must clear drafts");
+}
+
+async function scenarioLoginProfile503IsRecoverable() {
+  const app = createApp();
+  await start(app);
+  app.elementFor("username").value = "alice";
+  app.elementFor("password").value = "secret-password";
+  app.elementFor("login-form").dispatch("submit");
+  const loginRequest = app.lastMatching("/workspace/api/login");
+  assert(loginRequest, "login request missing");
+  loginRequest.respond(loginPayload(), 200);
+  await settle();
+
+  // The cookie exists, but nothing private may be shown and no sign-in claim
+  // may be made until /me confirms the account.
+  assert(app.elementFor("auth-view").hidden === true,
+    "sign-in must stay hidden while the cookie profile is unconfirmed");
+  assert(app.elementFor("workspace-view").hidden === true,
+    "private content must stay hidden while the cookie profile is unconfirmed");
+  assert(app.elementFor("app").getAttribute("data-private") === "hidden",
+    "the sidebar must stay withheld while the cookie profile is unconfirmed");
+  assert(app.elementFor("global-status").textContent.indexOf("Signed in") < 0,
+    "a successful password POST must not claim a confirmed session");
+  assert(app.elementFor("identity-name").textContent === "",
+    "no identity may be painted before /me confirms it");
+
+  const first = app.lastMatching("/workspace/api/me");
+  assert(first && !first.settled, "critical profile check missing after login");
+  first.respond({ error: { code: "UNAVAILABLE", message: "Busy." } }, 503);
+  await settle();
+  assert(app.elementFor("workspace-view").hidden === true,
+    "a busy profile check must not reveal private content");
+  assert(app.elementFor("revalidate-retry").hidden === true,
+    "the retries must finish before the recovery control appears");
+
+  app.fireAllTimers();
+  await settle();
+  const second = app.lastMatching("/workspace/api/me");
+  assert(second && second !== first && !second.settled, "bounded profile retry missing");
+  second.respond({ error: { code: "UNAVAILABLE", message: "Busy." } }, 503);
+  await settle();
+  app.fireAllTimers();
+  await settle();
+  const third = app.lastMatching("/workspace/api/me");
+  assert(third && third !== second && !third.settled, "second bounded profile retry missing");
+  third.respond({ error: { code: "UNAVAILABLE", message: "Busy." } }, 503);
+  await settle();
+
+  assert(app.elementFor("workspace-view").hidden === true,
+    "exhausted profile retries must keep private content hidden");
+  assert(app.elementFor("auth-view").hidden === true,
+    "exhausted profile retries must not claim the user is signed out");
+  assert(app.elementFor("revalidate-retry").hidden === false,
+    "exhausted profile retries must offer an accessible retry");
+  assert(app.elementFor("global-status").getAttribute("data-kind") === "warning",
+    "the hidden state must be explained honestly");
+  assert(app.elementFor("global-status").textContent.indexOf("could not be confirmed") >= 0,
+    "the recovery text must state that the session is unconfirmed");
+  assert(app.elementFor("global-status").textContent.indexOf("Signed in") < 0,
+    "an unconfirmed session must never be reported as signed in");
+
+  app.elementFor("revalidate-retry").dispatch("click");
+  const retry = app.lastMatching("/workspace/api/me");
+  assert(retry && !retry.settled && retry !== third, "retry session check request missing");
+  retry.respond(PROFILE, 200);
+  await settle();
+  assert(app.elementFor("workspace-view").hidden === false,
+    "a confirmed identity must reveal the workspace");
+  assert(app.elementFor("auth-view").hidden === true,
+    "a confirmed identity must keep sign-in hidden");
+  assert(app.elementFor("identity-name").textContent === "Alice Tan",
+    "the confirmed account must be painted");
+  assert(app.elementFor("app").getAttribute("data-private") === null,
+    "a confirmed identity must restore the sidebar");
+  assert(app.elementFor("revalidate-retry").hidden === true,
+    "the recovery control must hide after confirmation");
+}
+
+async function scenarioLoginRecoverySignOutRevokesPendingIdentity() {
+  const app = createApp();
+  await start(app);
+  app.elementFor("username").value = "alice";
+  app.elementFor("password").value = "secret-password";
+  app.elementFor("login-form").dispatch("submit");
+  app.lastMatching("/workspace/api/login").respond(loginPayload(), 200);
+  await settle();
+
+  // The password POST succeeded, but every bounded /me check is unavailable.
+  const first = app.lastMatching("/workspace/api/me");
+  assert(first && !first.settled, "critical profile check missing after login");
+  first.respond({ error: { code: "UNAVAILABLE", message: "Busy." } }, 503);
+  await settle();
+  app.fireAllTimers();
+  await settle();
+  const second = app.lastMatching("/workspace/api/me");
+  assert(second && second !== first && !second.settled, "bounded profile retry missing");
+  second.respond({ error: { code: "UNAVAILABLE", message: "Busy." } }, 503);
+  await settle();
+  app.fireAllTimers();
+  await settle();
+  const third = app.lastMatching("/workspace/api/me");
+  assert(third && third !== second && !third.settled, "second bounded profile retry missing");
+  third.respond({ error: { code: "UNAVAILABLE", message: "Busy." } }, 503);
+  await settle();
+
+  assert(app.elementFor("revalidate-retry").hidden === false,
+    "exhausted profile retries must offer a session check retry");
+  assert(app.elementFor("logout-button").hidden === false,
+    "the recovery screen must offer sign-out");
+  assert(app.elementFor("workspace-view").hidden === true,
+    "private content must stay hidden during recovery");
+  assert(app.elementFor("global-status").textContent.indexOf("Signed in") < 0,
+    "an unconfirmed login must not claim a confirmed session");
+
+  // A cookie exists for the account named by the accepted login POST, so
+  // recovery sign-out must revoke it rather than merely clearing the view.
+  app.elementFor("logout-button").dispatch("click");
+  const revoke = app.lastMatching("/workspace/api/logout");
+  assert(revoke && !revoke.settled,
+    "sign-out during recovery must call the server");
+  assert(revoke.options.method === "POST", "recovery sign-out must POST");
+  assert(typeof revoke.options.body === "string" &&
+    revoke.options.body.indexOf("{}") >= 0, "recovery sign-out must send a JSON body");
+  assert(revoke.options.headers["X-Workspace-User"] === "user-alice",
+    "recovery sign-out must name the login identity");
+  assert(revoke.options.credentials === "same-origin",
+    "recovery sign-out must use same-origin credentials");
+  assert(revoke.options.headers.Authorization === undefined,
+    "recovery sign-out must not use bearer auth");
+  assert(app.elementFor("workspace-view").hidden === true,
+    "pending sign-out must keep private content hidden");
+  assert(app.elementFor("app").getAttribute("data-private") === "hidden",
+    "pending sign-out must withhold the sidebar");
+  assert(app.elementFor("auth-view").hidden === true,
+    "sign-in must stay hidden until the server confirms sign-out");
+  assert(app.elementFor("global-status").textContent.indexOf("Signed out") < 0,
+    "sign-out must not be claimed before the server answers");
+
+  revoke.respond({ error: { code: "UNAVAILABLE", message: "Could not revoke." } }, 503);
+  await settle();
+  assert(app.elementFor("logout-button").textContent === "Retry sign-out",
+    "a failed recovery revoke must offer an honest retry");
+  assert(app.elementFor("global-status").textContent.indexOf("Signed out") < 0,
+    "a failed recovery revoke must not claim success");
+
+  const before = app.callsMatching("/workspace/api/logout").length;
+  app.elementFor("logout-button").dispatch("click");
+  const retry = app.lastMatching("/workspace/api/logout");
+  assert(app.callsMatching("/workspace/api/logout").length === before + 1,
+    "the retry must issue a new server revoke");
+  assert(retry && !retry.settled && retry !== revoke, "recovery revoke retry missing");
+  assert(retry.options.headers["X-Workspace-User"] === "user-alice",
+    "a retry must keep the pending login identity");
+  retry.respond({ status: "ok" }, 200);
+  await settle();
+  assert(app.elementFor("workspace-view").hidden === true,
+    "a confirmed sign-out must keep the workspace hidden");
+  assert(app.elementFor("auth-view").hidden === false,
+    "a confirmed sign-out must reveal sign-in");
+  assert(app.elementFor("logout-button").hidden === true,
+    "a confirmed sign-out must remove the retry control");
+  assert(app.elementFor("global-status").textContent.indexOf("Signed out") >= 0,
+    "a confirmed sign-out may claim completion");
+}
+
+async function scenarioQueuedAuthChangeCannotRevealLoginProfile() {
+  const app = createApp();
+  await start(app);
+  app.elementFor("username").value = "alice";
+  app.elementFor("password").value = "secret-password";
+  app.elementFor("login-form").dispatch("submit");
+  app.lastMatching("/workspace/api/login").respond(loginPayload(), 200);
+  await settle();
+  const stale = app.lastMatching("/workspace/api/me");
+  assert(stale && !stale.settled, "login profile check missing");
+
+  // A peer change arrives while the login profile check is still queued.
+  app.broadcast({ type: "workspace-auth-changed" });
+  await settle();
+  const fresh = app.lastMatching("/workspace/api/me");
+  assert(fresh && fresh !== stale, "a peer change must start a fresh cookie check");
+
+  stale.respond(PROFILE, 200);
+  await settle();
+  assert(app.elementFor("workspace-view").hidden === true,
+    "a queued pre-change login reply must not reveal private content");
+  assert(app.elementFor("auth-view").hidden === true,
+    "the sign-in form must wait for the fresh cookie check");
+
+  fresh.respond(PROFILE, 200);
+  await settle();
+  assert(app.elementFor("workspace-view").hidden === false,
+    "the fresh cookie check must reveal the confirmed account");
+  assert(app.elementFor("identity-name").textContent === "Alice Tan",
+    "the fresh check must paint the correct identity");
+}
+
+async function scenarioLogoutFailureIsRetryable() {
+  const app = createApp();
+  await start(app);
+  await signIn(app);
+  app.lastMatching("/workspace/api/conversations?limit=25").respond({ items: [], next: null }, 200);
+  await settle();
+  app.elementFor("logout-button").dispatch("click");
+  const first = app.lastMatching("/workspace/api/logout");
+  assert(first, "logout request missing");
+  assert(first.options.headers["X-Workspace-User"] === "user-alice",
+    "the first revoke must name the signed-in identity");
+  first.respond({ error: { code: "UNAVAILABLE", message: "Could not revoke." } }, 503);
+  await settle();
+  assert(app.elementFor("workspace-view").hidden === true,
+    "a failed sign-out must leave private content hidden");
+  assert(app.elementFor("auth-view").hidden === false,
+    "a failed sign-out may offer sign-in again");
+  assert(app.elementFor("logout-button").hidden === false,
+    "a failed sign-out must keep a usable retry control");
+  assert(app.elementFor("logout-button").textContent === "Retry sign-out",
+    "the retry control must be labelled honestly");
+  assert(app.elementFor("global-status").textContent.indexOf("not confirmed") >= 0,
+    "a failed sign-out must not claim success");
+  assert(app.elementFor("global-status").textContent.indexOf("Signed out") < 0,
+    "a failed sign-out must not claim completion");
+
+  const before = app.callsMatching("/workspace/api/logout").length;
+  app.elementFor("logout-button").dispatch("click");
+  const retry = app.lastMatching("/workspace/api/logout");
+  assert(app.callsMatching("/workspace/api/logout").length === before + 1,
+    "the retry control must issue a new revoke");
+  assert(retry && !retry.settled, "retry revoke missing");
+  assert(retry.options.headers["X-Workspace-User"] === "user-alice",
+    "a retry after the profile was cleared must still name the revoked identity");
+  retry.respond({ status: "ok" }, 200);
+  await settle();
+  assert(app.elementFor("workspace-view").hidden === true,
+    "a completed retry must hide the workspace");
+  assert(app.elementFor("auth-view").hidden === false,
+    "a completed retry must show sign-in");
+  assert(app.elementFor("logout-button").hidden === true,
+    "a completed retry must remove the retry control");
+  assert(app.elementFor("global-status").textContent.indexOf("Signed out") >= 0,
+    "a completed retry may claim success");
+}
+
+async function scenarioAuthChangeRejectsStaleProfile() {
+  const app = createApp();
+  await start(app);
+  await signIn(app);
+  app.lastMatching("/workspace/api/conversations?limit=25").respond(
+    { items: [{ id: "conv-a", created_at: 1700000001, updated_at: 1700000002 }], next: null },
+    200
+  );
+  await settle();
+  app.elementFor("conversation-list").children[0].dispatch("click");
+  app.lastMatching("/workspace/api/conversations/conv-a").respond(
+    {
+      id: "conv-a",
+      created_at: 1700000001,
+      messages: [{ id: "a1", role: "assistant", outcome: "allowed", text: "private A", created_at: 1700000002 }],
+    },
+    200
+  );
+  await settle();
+  app.elementFor("composer").value = "same identity draft";
+
+  // A focus check is already in flight when a peer announces an auth change.
+  app.window.dispatch("focus");
+  const stale = app.lastMatching("/workspace/api/me");
+  assert(stale && !stale.settled, "focus revalidation request missing");
+  app.broadcast({ type: "workspace-auth-changed" });
+  await settle();
+  assert(app.elementFor("workspace-view").hidden === true,
+    "an auth change must withhold private content");
+  assert(app.elementFor("app").getAttribute("data-private") === "hidden",
+    "an auth change must not leave private content exposed");
+  const fresh = app.lastMatching("/workspace/api/me");
+  assert(fresh !== stale && !fresh.settled,
+    "an auth change must bootstrap a fresh cookie identity check");
+
+  // The pre-change reply for the old cookie must be discarded.
+  stale.respond(PROFILE, 200);
+  await settle();
+  assert(app.elementFor("workspace-view").hidden === true,
+    "a buffered pre-change /me reply must not repaint private content");
+  assert(app.elementFor("auth-view").hidden === true,
+    "the sign-in form must wait for the fresh identity check");
+
+  // Confirming the same identity restores the tab's own draft.
+  fresh.respond(PROFILE, 200);
+  await settle();
+  assert(app.elementFor("workspace-view").hidden === false,
+    "a confirmed identity must restore the workspace");
+  assert(app.elementFor("composer").value === "same identity draft",
+    "same-identity drafts must survive an auth change");
+
+  // A later change to a different identity must clear the old private state.
+  app.window.dispatch("focus");
+  const secondStale = app.lastMatching("/workspace/api/me");
+  assert(secondStale && !secondStale.settled, "second revalidation request missing");
+  app.broadcast({ type: "workspace-auth-changed" });
+  await settle();
+  const changed = app.lastMatching("/workspace/api/me");
+  assert(changed !== secondStale && !changed.settled,
+    "the second auth change must bootstrap another identity check");
+  secondStale.respond(PROFILE, 200);
+  await settle();
+  assert(app.elementFor("workspace-view").hidden === true,
+    "a stale same-identity reply must not repaint after a peer change");
+  changed.respond({
+    user: { ...ALICE_USER, id: "user-bob", username: "bob", full_name: "Bob Lee" },
+    department: { id: "dept-accounting", name: "Accounting" },
+    review_scope: null,
+    review_department_ids: [],
+    review_grants: [],
+  }, 200);
+  await settle();
+  assert(app.elementFor("workspace-view").hidden === true,
+    "a changed cookie identity must not paint the old workspace");
+  assert(app.elementFor("auth-view").hidden === false,
+    "a changed cookie identity must require sign-in");
+  assert(app.elementFor("conversation-list").children.length === 0,
+    "a changed cookie identity must clear private lists");
+  assert(app.elementFor("composer").value === "",
+    "a changed cookie identity must clear drafts");
+}
+
 async function main() {
+  await scenarioInitialRestoreWithholdsSurfaces();
   await scenarioSignInAndChat();
   await scenarioReviewer();
   await scenarioReviewRevoked();
   await scenarioExpiredSession();
   await scenarioComposerIsolation();
+  await scenarioDraftSurvivesListNavigation();
   await scenarioStaleQuietReloadKeepsCurrentDraft();
+  await scenarioRevalidationHidesPrivateState();
+  await scenarioAuthChangeRejectsStaleProfile();
   await scenarioGuardReadiness();
   await scenarioStaleLogin();
+  await scenarioLoginProfile503IsRecoverable();
+  await scenarioLoginRecoverySignOutRevokesPendingIdentity();
+  await scenarioQueuedAuthChangeCannotRevealLoginProfile();
+  await scenarioLogoutFailureIsRetryable();
   await scenarioAdmin();
   console.log("workspace page: all scenarios passed");
 }

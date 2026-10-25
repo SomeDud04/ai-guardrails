@@ -910,5 +910,262 @@ class HeldTurnTests(WorkspaceHTTPBase):
         self.assertEqual(messages[0]["text"], "first turn")
 
 
+class PersistentSessionTests(WorkspaceHTTPBase):
+    """Browser cookie sessions, identity binding and CSRF coverage."""
+
+    ORIGIN = "http://testserver"
+
+    def _cookie_login(self, client: TestClient, username: str = "alice"):
+        response = client.post(
+            "/workspace/api/login",
+            json={
+                "username": username,
+                "password": PASSWORD,
+                "cookie": True,
+            },
+            headers={"Origin": self.ORIGIN},
+        )
+        self.assertEqual(response.status_code, 200, response.text)
+        return response
+
+    def _write_headers(self, user_id: str, origin: str | None = None) -> dict:
+        return {
+            "Origin": self.ORIGIN if origin is None else origin,
+            "X-Workspace-User": user_id,
+        }
+
+    def test_cookie_login_requires_strict_origin_before_authentication(self) -> None:
+        client = self.make_client(self.app)
+        payload = {
+            "username": "alice",
+            "password": PASSWORD,
+            "cookie": True,
+        }
+        for headers in (
+            {},
+            {"Origin": "null"},
+            {"Origin": "http://testserver/"},
+            {"Origin": "http://testserver/workspace"},
+            {"Origin": "http://testserver?x=1"},
+            {"Origin": "https://evil.example"},
+            {"Origin": "http://user:pass@testserver"},
+        ):
+            response = client.post(
+                "/workspace/api/login", json=payload, headers=headers
+            )
+            self.assert_error(response, 403, "FORBIDDEN")
+            self.assertNotIn("set-cookie", response.headers)
+            self.assertFalse(client.cookies.get("nasi_lemak_workspace"))
+
+        duplicate = client.post(
+            "/workspace/api/login",
+            content=json.dumps(payload),
+            headers=[
+                ("Origin", self.ORIGIN),
+                ("Origin", self.ORIGIN),
+                ("Content-Type", "application/json"),
+            ],
+        )
+        self.assert_error(duplicate, 403, "FORBIDDEN")
+        self.assertFalse(client.cookies.get("nasi_lemak_workspace"))
+
+        # The default bearer API keeps working without an Origin header.
+        bearer = client.post(
+            "/workspace/api/login",
+            json={"username": "alice", "password": PASSWORD},
+        )
+        self.assertEqual(bearer.status_code, 200, bearer.text)
+        self.assertIn("token", bearer.json())
+        self.assertNotIn("set-cookie", bearer.headers)
+
+    def test_cookie_login_restore_logout_and_server_revocation(self) -> None:
+        client = self.make_client(self.app)
+        login = self._cookie_login(client)
+        self.assertNotIn("token", login.json())
+        self.assertEqual(login.json()["user"]["username"], "alice")
+        raw_cookie = login.headers["set-cookie"].lower()
+        self.assertIn("httponly", raw_cookie)
+        self.assertIn("samesite=strict", raw_cookie)
+        self.assertIn("path=/workspace", raw_cookie)
+        self.assertNotIn("domain=", raw_cookie)
+        self.assertNotIn("secure", raw_cookie)
+        max_age = int(raw_cookie.split("max-age=", 1)[1].split(";", 1)[0])
+        self.assertGreater(max_age, 0)
+        self.assertLessEqual(max_age, 8 * 60 * 60)
+
+        token = client.cookies.get("nasi_lemak_workspace")
+        self.assertTrue(token)
+        me = client.get(
+            "/workspace/api/me", headers={"X-Workspace-User": self.alice["id"]}
+        )
+        self.assertEqual(me.status_code, 200, me.text)
+        self.assertEqual(me.json()["user"]["id"], self.alice["id"])
+        # /me is the bootstrap call and still works before the client knows the
+        # account id; the cookie remains the only credential.
+        bootstrap = client.get("/workspace/api/me")
+        self.assertEqual(bootstrap.status_code, 200, bootstrap.text)
+
+        logout = client.post(
+            "/workspace/api/logout",
+            json={},
+            headers=self._write_headers(self.alice["id"]),
+        )
+        self.assertEqual(logout.status_code, 200, logout.text)
+        self.assertIn("max-age=0", logout.headers["set-cookie"].lower())
+        self.assertFalse(client.cookies.get("nasi_lemak_workspace"))
+        with self.assertRaises(AuthError):
+            self.store.resolve_session(token)
+        self.assertEqual(
+            client.get(
+                "/workspace/api/me",
+                headers={"X-Workspace-User": self.alice["id"]},
+            ).status_code,
+            401,
+        )
+
+    def test_cookie_mutations_require_strict_origin_and_json(self) -> None:
+        client = self.make_client(self.app)
+        self._cookie_login(client)
+        user_id = self.alice["id"]
+
+        no_origin = client.post(
+            "/workspace/api/conversations",
+            json={},
+            headers={"X-Workspace-User": user_id},
+        )
+        self.assert_error(no_origin, 403, "FORBIDDEN")
+        for origin in (
+            "https://evil.example",
+            "null",
+            "http://testserver/workspace",
+            "http://user:pass@testserver",
+            "http://testserver?x=1",
+        ):
+            response = client.post(
+                "/workspace/api/conversations",
+                json={},
+                headers=self._write_headers(user_id, origin),
+            )
+            self.assert_error(response, 403, "FORBIDDEN")
+        duplicate = client.post(
+            "/workspace/api/conversations",
+            content=b"{}",
+            headers=[
+                ("Origin", self.ORIGIN),
+                ("Origin", self.ORIGIN),
+                ("X-Workspace-User", user_id),
+                ("Content-Type", "application/json"),
+            ],
+        )
+        self.assert_error(duplicate, 403, "FORBIDDEN")
+        no_json = client.post(
+            "/workspace/api/conversations",
+            content=b"",
+            headers=self._write_headers(user_id),
+        )
+        self.assert_error(no_json, 403, "FORBIDDEN")
+        created = client.post(
+            "/workspace/api/conversations",
+            json={},
+            headers=self._write_headers(user_id),
+        )
+        self.assertEqual(created.status_code, 201, created.text)
+
+    def test_cookie_identity_binding_rejects_stale_and_ambiguous_auth(self) -> None:
+        client = self.make_client(self.app)
+        self._cookie_login(client)
+        missing = client.get("/workspace/api/conversations")
+        self.assert_error(missing, 403, "IDENTITY_CONFLICT")
+        wrong = client.get(
+            "/workspace/api/conversations",
+            headers={"X-Workspace-User": self.bob["id"]},
+        )
+        self.assert_error(wrong, 403, "IDENTITY_CONFLICT")
+
+        # A second account in the same profile replaces the shared cookie.  A
+        # stale tab still naming alice must not read or mutate bob's session.
+        self._cookie_login(client, "bob")
+        stale_me = client.get(
+            "/workspace/api/me", headers={"X-Workspace-User": self.alice["id"]}
+        )
+        self.assert_error(stale_me, 403, "IDENTITY_CONFLICT")
+        stale_list = client.get(
+            "/workspace/api/conversations",
+            headers={"X-Workspace-User": self.alice["id"]},
+        )
+        self.assert_error(stale_list, 403, "IDENTITY_CONFLICT")
+        stale_write = client.post(
+            "/workspace/api/conversations",
+            json={},
+            headers=self._write_headers(self.alice["id"]),
+        )
+        self.assert_error(stale_write, 403, "IDENTITY_CONFLICT")
+        bob_me = client.get(
+            "/workspace/api/me", headers={"X-Workspace-User": self.bob["id"]}
+        )
+        self.assertEqual(bob_me.status_code, 200, bob_me.text)
+        self.assertEqual(bob_me.json()["user"]["id"], self.bob["id"])
+
+        ambiguous = client.get(
+            "/workspace/api/me",
+            headers={
+                "Authorization": "Bearer not-a-session",
+                "X-Workspace-User": self.bob["id"],
+            },
+        )
+        self.assert_error(ambiguous, 401, "UNAUTHORIZED")
+
+    def test_cookie_accounts_are_isolated_and_bearer_still_works(self) -> None:
+        alice_client = self.make_client(self.app)
+        bob_client = self.make_client(self.app)
+        self._cookie_login(alice_client)
+        self._cookie_login(bob_client, "bob")
+        created = alice_client.post(
+            "/workspace/api/conversations",
+            json={},
+            headers=self._write_headers(self.alice["id"]),
+        )
+        self.assertEqual(created.status_code, 201, created.text)
+        conversation_id = created.json()["id"]
+        denied = bob_client.get(
+            f"/workspace/api/conversations/{conversation_id}",
+            headers={"X-Workspace-User": self.bob["id"]},
+        )
+        self.assert_error(denied, 403, "FORBIDDEN")
+
+        bearer = self.login("carol")
+        own = self.client.get(
+            "/workspace/api/conversations", headers=self.auth(bearer)
+        )
+        self.assertEqual(own.status_code, 200, own.text)
+
+    def test_logout_failure_is_not_reported_as_success(self) -> None:
+        client = self.make_client(self.app)
+        self._cookie_login(client)
+        original = self.store.logout
+
+        def broken_logout(token: str) -> None:
+            raise WorkspaceStorageError("synthetic logout failure")
+
+        self.store.logout = broken_logout
+        try:
+            response = client.post(
+                "/workspace/api/logout",
+                json={},
+                headers=self._write_headers(self.alice["id"]),
+            )
+        finally:
+            self.store.logout = original
+        self.assert_error(response, 503, "UNAVAILABLE")
+        self.assertTrue(client.cookies.get("nasi_lemak_workspace"))
+        self.assertEqual(
+            client.get(
+                "/workspace/api/me",
+                headers={"X-Workspace-User": self.alice["id"]},
+            ).status_code,
+            200,
+        )
+
+
 if __name__ == "__main__":
     unittest.main()

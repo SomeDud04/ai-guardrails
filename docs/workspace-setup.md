@@ -123,11 +123,10 @@ operator UID cannot read it. This applies only to this privileged migration
 container. The gateway runtime still runs as UID `10001`.
 
 Re-running `init` with the same key and schema is safe. A different key fails
-before committing changes. Remove the privileged DSN after initialisation:
-
-```bash
-shred -u .secrets/workspace/migration_dsn
-```
+before committing changes. Keep the privileged DSN until the one-time
+`bootstrap-admin` step in section 7; it is needed because bootstrap writes a
+`ws_meta` marker that the restricted runtime role cannot modify. Remove it
+immediately after bootstrap (section 7).
 
 ## 4. Apply the fixed SQL privileges
 
@@ -216,23 +215,35 @@ existing nginx proxy already forwards `/workspace`; no nginx change is needed.
 
 ## 7. Create the first administrator interactively
 
-Use the restricted runtime DSN and the same running container. The password is
-prompted twice and is never accepted from argv, an environment variable or a
-default. There is no default account. Re-running this command after an
-administrator exists refuses instead of resetting it.
+Use the operator-privileged migration DSN for this one-time bootstrap, in a
+one-off container. The restricted runtime role has `SELECT`-only access to
+`ws_meta`, so it cannot write the `bootstrap_admin` marker and must not be used
+for this command. The password is prompted twice and is never accepted from
+argv, an environment variable or a default. There is no default account.
+Re-running this command after an administrator exists refuses instead of
+resetting it.
 
 ```bash
 sudo docker compose \
   --env-file .secrets/compose.env \
   --env-file .secrets/compose.test.env \
-  --env-file .secrets/compose.workspace.env \
-  -f compose.yaml -f compose.test.yaml -f compose.workspace.yaml \
-  exec gateway python -m nasi_lemak.workspace_cli bootstrap-admin \
-  --dsn-file /run/secrets/workspace_dsn \
-  --key-file /run/secrets/workspace_key \
+  -f compose.yaml -f compose.test.yaml \
+  run --rm --no-deps \
+  --user "0:0" \
+  -v "$PWD/.secrets/workspace:/secrets:ro" \
+  --entrypoint python gateway \
+  -m nasi_lemak.workspace_cli bootstrap-admin \
+  --dsn-file /secrets/migration_dsn \
+  --key-file /secrets/workspace_key \
   --username admin.name \
   --full-name "Workspace Administrator" \
   --department "IT"
+```
+
+Then remove the privileged DSN; it is not needed by the gateway:
+
+```bash
+shred -u .secrets/workspace/migration_dsn
 ```
 
 `bootstrap-admin` does not grant review access. Grant reviewer scope explicitly
@@ -246,6 +257,23 @@ from the admin panel only when approved; admins have no implicit content access.
 Check `/health/ready` and the page through the same URL. A `503` means the
 workspace configuration, schema, key or runtime credential is unavailable; the
 error is deliberately generic and does not print the DSN or key.
+
+Browser sessions use a host-only `HttpOnly`, `SameSite=Strict`,
+`Path=/workspace` cookie issued only by a page login. It expires with the same
+fixed eight-hour server session record and is `Secure` on HTTPS. The explicit
+`NASI_LEMAK_WORKSPACE_ALLOW_HTTP=true` LAN acknowledgement also allows the
+cookie over plain HTTP; that mode exposes the session to anyone who can observe
+the LAN traffic and is only for local demonstration. Bearer API clients keep
+their existing token behaviour. Sign-out revokes the server session and clears
+the cookie; expired, disabled or password-reset sessions stop working
+immediately. To use multiple accounts at once, use separate browser profiles or
+browsers; tabs in one profile intentionally share the server cookie identity.
+
+For a local disposable PostgreSQL verification run, set
+`TEST_WORKSPACE_DISPOSABLE=1` as well as `TEST_AUDIT_DISPOSABLE=1`. The
+workspace PostgreSQL privilege tests truncate every workspace row; never set the
+flag for a shared database, and note that `TEST_WORKSPACE_DSN` alone never
+authorises destructive setup.
 
 ## Updating and operating
 

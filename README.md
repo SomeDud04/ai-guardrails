@@ -62,6 +62,23 @@ Use the workspace virtualenv:
 .\.venv\Scripts\python.exe scripts/preflight.py
 ```
 
+Ordinary test runs skip optional PostgreSQL cases when their DSNs are unset.
+To run the explicit disposable PostgreSQL gate, provide the owner, administrator
+and restricted runtime DSNs plus `TEST_WORKSPACE_DISPOSABLE=1` and
+`TEST_AUDIT_DISPOSABLE=1`; the command fails clearly when any is missing rather
+than reporting a skip as success. The workspace flag acknowledges that the
+PostgreSQL privilege tests TRUNCATE every workspace row, so set it only for an
+isolated disposable database; the owner DSN alone never authorises that action:
+
+```powershell
+$env:TEST_WORKSPACE_DISPOSABLE = "1"
+$env:TEST_AUDIT_DISPOSABLE = "1"
+.\.venv\Scripts\python.exe scripts/verify_postgres.py
+```
+
+See the script docstring for the exact variable names and synthetic example
+values. Never point it at a shared database.
+
 Run the server locally (it will be live but not ready without an explicitly
 configured policy file, locally supplied guard artifacts and a configured
 upstream model ID):

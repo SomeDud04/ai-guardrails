@@ -13,6 +13,7 @@ import tempfile
 import threading
 import unittest
 import uuid
+from pathlib import Path
 
 from cryptography.fernet import Fernet
 
@@ -24,6 +25,7 @@ from nasi_lemak.workspace_store import (
     NotFound,
     WorkspaceConfigError,
     WorkspaceError,
+    WorkspaceStorageError,
     WorkspaceStore,
 )
 
@@ -674,8 +676,16 @@ class WorkspaceStoreTest(unittest.TestCase):
 class PostgresWorkspaceStoreTest(unittest.TestCase):
     """Real PostgreSQL round-trip against a dedicated disposable test database."""
 
-    def _open(self, key: str) -> WorkspaceStore:
-        return WorkspaceStore(os.environ["TEST_WORKSPACE_DSN"], encryption_key=key)
+    # A stable, test-only key keeps repeated runs against the same disposable
+    # database usable.  The store still verifies the persisted key marker and
+    # rejects any other key; this is not a runtime default secret.
+    TEST_KEY = "SIuN9xihVB4_BtpG0So_WjfgQNiprJozOTk6YZMA_2o="
+
+    def _open(self, key: str | None = None) -> WorkspaceStore:
+        return WorkspaceStore(
+            os.environ["TEST_WORKSPACE_DSN"],
+            encryption_key=key or self.TEST_KEY,
+        )
 
     def _admin(self, store: WorkspaceStore) -> dict:
         admin = store.bootstrap_admin(
@@ -689,7 +699,7 @@ class PostgresWorkspaceStoreTest(unittest.TestCase):
         return admin
 
     def test_postgres_roundtrip(self) -> None:
-        key = Fernet.generate_key().decode("ascii")
+        key = self.TEST_KEY
         store = self._open(key)
         admin = self._admin(store)
         suffix = uuid.uuid4().hex[:8]
@@ -722,7 +732,7 @@ class PostgresWorkspaceStoreTest(unittest.TestCase):
         store.close()
 
     def test_postgres_concurrent_reservation_single_winner(self) -> None:
-        key = Fernet.generate_key().decode("ascii")
+        key = self.TEST_KEY
         store = self._open(key)
         admin = self._admin(store)
         suffix = uuid.uuid4().hex[:8]
@@ -763,6 +773,171 @@ class PostgresWorkspaceStoreTest(unittest.TestCase):
         for worker in workers:
             worker.close()
         store.close()
+
+
+@unittest.skipUnless(
+    all(
+        os.environ.get(name)
+        for name in (
+            "TEST_WORKSPACE_DSN",
+            "TEST_WORKSPACE_ADMIN_DSN",
+            "TEST_WORKSPACE_RUNTIME_DSN",
+        )
+    )
+    and os.environ.get("TEST_WORKSPACE_DISPOSABLE") == "1",
+    "PostgreSQL privilege verification needs owner, admin and runtime DSNs "
+    "and TEST_WORKSPACE_DISPOSABLE=1",
+)
+class PostgresWorkspacePrivilegeTests(unittest.TestCase):
+    """Real PostgreSQL least-privilege and bootstrap regression checks.
+
+    ``TEST_WORKSPACE_DSN`` is the dedicated database owner, the admin DSN can
+    apply ``workspace_roles.sql``, and the runtime DSN is a LOGIN that is only a
+    member of the fixed ``nasi_lemak_workspace`` group.  These tests TRUNCATE
+    every workspace row, so ``TEST_WORKSPACE_DISPOSABLE=1`` is mandatory and
+    must only be set for an isolated disposable database; the owner DSN alone
+    never authorises destructive setup.
+    """
+
+    TEST_KEY = PostgresWorkspaceStoreTest.TEST_KEY
+
+    def setUp(self) -> None:
+        self.owner_dsn = os.environ["TEST_WORKSPACE_DSN"]
+        self.admin_dsn = os.environ["TEST_WORKSPACE_ADMIN_DSN"]
+        self.runtime_dsn = os.environ["TEST_WORKSPACE_RUNTIME_DSN"]
+        self._apply_roles()
+        import psycopg
+
+        with psycopg.connect(self.owner_dsn, autocommit=True) as conn:
+            conn.execute("DELETE FROM ws_meta WHERE key = 'bootstrap_admin'")
+            conn.execute(
+                "TRUNCATE ws_access_log, ws_messages, ws_review_grants, "
+                "ws_sessions, ws_conversations, ws_users, ws_departments CASCADE"
+            )
+
+    def _apply_roles(self) -> None:
+        import psycopg
+
+        roles_sql = (
+            Path(__file__).resolve().parents[1]
+            / "nasi_lemak"
+            / "workspace_roles.sql"
+        ).read_text(encoding="utf-8")
+        with psycopg.connect(self.admin_dsn, autocommit=True) as conn:
+            conn.execute(roles_sql)
+
+    def _bootstrap(self, dsn: str):
+        return WorkspaceStore(
+            dsn, encryption_key=self.TEST_KEY, migrate=False
+        ).bootstrap_admin(
+            username="pg.admin.owner",
+            password=GOOD_PASSWORD,
+            full_name="PG Admin",
+            department_name="PG IT",
+        )
+
+    def test_runtime_cannot_bootstrap_but_privileged_setup_can(self) -> None:
+        import psycopg
+
+        with self.assertRaises(WorkspaceStorageError):
+            self._bootstrap(self.runtime_dsn)
+
+        admin = self._bootstrap(self.owner_dsn)
+        self.assertIsNotNone(admin)
+        self.assertEqual(admin["username"], "pg.admin.owner")
+
+        # The runtime role has normal operational access after the one-time
+        # privileged bootstrap, including encrypted save/reopen and deletion.
+        store = WorkspaceStore(
+            self.runtime_dsn, encryption_key=self.TEST_KEY, migrate=False
+        )
+        dept = store.create_department(admin["id"], "Runtime Engineering")
+        user = store.create_user(
+            admin["id"],
+            "runtime.employee",
+            GOOD_PASSWORD,
+            "Runtime Employee",
+            dept["id"],
+            "employee",
+        )
+        reviewer = store.create_user(
+            admin["id"],
+            "runtime.reviewer",
+            GOOD_PASSWORD,
+            "Runtime Reviewer",
+            dept["id"],
+            "employee",
+        )
+        conversation = store.create_conversation(user["id"])
+        lease = store.reserve_turn(user["id"], conversation["id"])
+        store.append_exchange(
+            user["id"],
+            conversation["id"],
+            lease["token"],
+            user_prompt="runtime prompt",
+            assistant_response="runtime response",
+        )
+        self.assertEqual(
+            [m["text"] for m in store.read_conversation(user["id"], conversation["id"])["messages"]],
+            ["runtime prompt", "runtime response"],
+        )
+        grant = store.grant_review(
+            admin["id"], reviewer["id"], "department", dept["id"]
+        )
+        self.assertEqual(
+            store.read_conversation(reviewer["id"], conversation["id"])["id"],
+            conversation["id"],
+        )
+        store.revoke_grant(admin["id"], grant["id"])
+        store.delete_conversation(user["id"], conversation["id"])
+        store.close()
+
+        # The runtime connection still cannot alter setup metadata, including
+        # the bootstrap marker and the append-only access audit.
+        with psycopg.connect(self.runtime_dsn, autocommit=True) as conn:
+            for statement in (
+                "INSERT INTO ws_meta(key, value) VALUES ('runtime', 'write')",
+                "UPDATE ws_meta SET value = 'write' WHERE key = 'key_verifier'",
+                "DELETE FROM ws_meta",
+            ):
+                with self.subTest(statement=statement):
+                    with self.assertRaises(psycopg.errors.InsufficientPrivilege):
+                        conn.execute(statement)
+
+    def test_runtime_grants_are_idempotent_and_access_log_is_append_only(self) -> None:
+        import psycopg
+
+        # Reapplying the fixed grant script must not fail or broaden access.
+        self._apply_roles()
+        with psycopg.connect(self.runtime_dsn, autocommit=True) as conn:
+            conn.execute(
+                "INSERT INTO ws_access_log(id, actor_id, action, created_at) "
+                "VALUES ('log-1', 'runtime', 'read', 1.0)"
+            )
+            self.assertEqual(
+                conn.execute("SELECT count(*) FROM ws_meta").fetchone()[0], 1
+            )
+            self.assertEqual(
+                conn.execute(
+                    "SELECT count(*) FROM ws_schema_migrations"
+                ).fetchone()[0],
+                1,
+            )
+            for statement in (
+                "UPDATE ws_access_log SET action = 'tampered'",
+                "DELETE FROM ws_access_log",
+                "CREATE TABLE ws_runtime_ddl(id integer)",
+                "INSERT INTO ws_meta(key, value) VALUES ('runtime', 'write')",
+            ):
+                with self.subTest(statement=statement):
+                    with self.assertRaises(psycopg.errors.InsufficientPrivilege):
+                        conn.execute(statement)
+            self.assertEqual(
+                conn.execute(
+                    "SELECT action FROM ws_access_log WHERE id = 'log-1'"
+                ).fetchone()[0],
+                "read",
+            )
 
 
 if __name__ == "__main__":
