@@ -299,6 +299,11 @@ function createApp(options) {
   // <details> element; the synthetic DOM must mirror that containment.
   elementFor("guard-status").appendChild(elementFor("guard-summary"));
   elementFor("guard-status").appendChild(elementFor("guard-detail"));
+  // The synthetic DOM is not an HTML parser, so mirror the static markup for
+  // the retry control that has no dynamically assigned label.
+  elementFor("list-retry").textContent = "Retry conversations";
+  elementFor("list-retry").hidden = true;
+  elementFor("load-more").hidden = true;
   vm.runInContext(scriptText, context, { filename: "workspace_page.js" });
 
   function callsMatching(part) {
@@ -357,6 +362,21 @@ const PROFILE = {
   review_department_ids: [],
   review_grants: [],
 };
+const BOB_PROFILE = {
+  user: {
+    id: "user-bob",
+    username: "bob",
+    full_name: "Bob Lee",
+    department_id: "dept-accounting",
+    role: "employee",
+    disabled: false,
+    created_at: 1700000000,
+  },
+  department: { id: "dept-accounting", name: "Accounting" },
+  review_scope: null,
+  review_department_ids: [],
+  review_grants: [],
+};
 
 function loginPayload(user) {
   return {
@@ -400,9 +420,10 @@ async function start(app, options) {
   await settle();
 }
 
-async function signIn(app, profile) {
+async function signIn(app, profile, username) {
   const login = app.elementFor("login-form");
-  app.elementFor("username").value = "alice";
+  const name = username || "alice";
+  app.elementFor("username").value = name;
   app.elementFor("password").value = "secret-password";
   login.dispatch("submit");
   const request = app.lastMatching("/workspace/api/login");
@@ -412,7 +433,7 @@ async function signIn(app, profile) {
     "password field must be cleared when the request starts"
   );
   const body = JSON.parse(request.options.body);
-  assert(body.username === "alice", "username payload mismatch");
+  assert(body.username === name, "username payload mismatch");
   assert(body.password === "secret-password", "password payload mismatch");
   assert(body.cookie === true, "login must opt into the HttpOnly cookie");
   assert(request.options.credentials === "same-origin", "login credentials shape is wrong");
@@ -636,6 +657,36 @@ async function scenarioSignInAndChat() {
     app.elementFor("chat-status").textContent.indexOf("blocked") >= 0,
     "blocked outcome should be reported"
   );
+  // A saved (including blocked) turn must refresh list recency from the
+  // existing list endpoint without changing the current conversation or text.
+  const recency = app.pendingCallsMatching("/workspace/api/conversations?limit=25").pop();
+  assert(recency, "a saved turn must refresh the conversation list recency");
+  assert(recency.options.headers["X-Workspace-User"] === "user-alice",
+    "recency refresh must keep naming the current profile");
+  recency.respond(
+    {
+      items: [
+        { id: "conv-beta-5678", created_at: 1700000050, updated_at: 1700000300 },
+        { id: "conv-alpha-1234", created_at: 1700000100, updated_at: 1700000200 },
+      ],
+      next: null,
+    },
+    200
+  );
+  await settle();
+  const recencyOrder = app.elementFor("conversation-list").children.map(
+    (child) => child.getAttribute("data-conversation")
+  );
+  assert(recencyOrder[0] === "conv-beta-5678" && recencyOrder[1] === "conv-alpha-1234",
+    "the refreshed list must put the most recent conversation first without duplicates");
+  assert(app.elementFor("chat-title").textContent === "Conversation",
+    "recency refresh must not replace the current conversation");
+  assert(
+    app.elementFor("messages").children.map((child) => child.textContent).join(" ").indexOf(hostile) >= 0,
+    "recency refresh must not drop the current transcript"
+  );
+  assert(app.elementFor("composer").value === "",
+    "recency refresh must not restore a submitted prompt into the composer");
 
   app.elementFor("delete-conversation").dispatch("click");
   assert(
@@ -721,7 +772,15 @@ async function scenarioReviewer() {
     review_department_ids: ["dept-accounting"],
     review_grants: [{ id: "grant-1", scope: "department", department_id: "dept-accounting", department_name: "Accounting" }],
   });
-  app.lastMatching("/workspace/api/conversations?limit=25").respond({ items: [], next: null }, 200);
+  app.lastMatching("/workspace/api/conversations?limit=25").respond(
+    {
+      items: [
+        { id: "conv-own-reviewer", created_at: 1700000001, updated_at: 1700000002 },
+      ],
+      next: null,
+    },
+    200
+  );
   await settle();
   assert(app.elementFor("tab-review").hidden === false, "review tab must appear only with a review scope");
   app.elementFor("tab-review").dispatch("click");
@@ -772,6 +831,66 @@ async function scenarioReviewer() {
   );
   assert(app.elementFor("composer").disabled === true, "reviewer must not have an enabled composer");
   assert(app.elementFor("review-messages").children.length === 1, "review messages missing");
+  assert(app.elementFor("review-panel").hidden === false && app.elementFor("chat-panel").hidden === true,
+    "selecting a review conversation must stay in Review");
+
+  // Selecting the reviewer's own saved conversation is an explicit chat
+  // navigation and must leave Review; the mobile sidebar closes as well.
+  app.elementFor("conversation-list").children[0].dispatch("click");
+  const ownDetail = app.lastMatching("/workspace/api/conversations/conv-own-reviewer");
+  assert(ownDetail, "own conversation detail request missing from Review");
+  assert(app.elementFor("chat-panel").hidden === false && app.elementFor("review-panel").hidden === true,
+    "opening an own conversation from Review must show Chat");
+  assert(app.elementFor("app").getAttribute("data-nav") === "closed",
+    "opening an own conversation must close the mobile sidebar");
+  ownDetail.respond(
+    {
+      id: "conv-own-reviewer",
+      created_at: 1700000001,
+      messages: [{ id: "own1", role: "assistant", outcome: "allowed", text: "Own answer", created_at: 1700000003 }],
+    },
+    200
+  );
+  await settle();
+  assert(!app.elementFor("composer").disabled, "own conversation must enable the composer");
+
+  // New chat from Review must also switch to Chat immediately, even before
+  // the server answers, and must close the mobile sidebar.
+  app.elementFor("tab-review").dispatch("click");
+  assert(app.elementFor("review-panel").hidden === false, "review tab must reopen Review");
+  app.elementFor("sidebar-toggle").dispatch("click");
+  assert(app.elementFor("app").getAttribute("data-nav") === "open", "sidebar setup failed");
+  app.elementFor("new-chat").dispatch("click");
+  assert(app.elementFor("chat-panel").hidden === false && app.elementFor("review-panel").hidden === true,
+    "New chat from Review must show Chat before the create answer");
+  assert(app.elementFor("app").getAttribute("data-nav") === "closed",
+    "New chat must close the mobile sidebar");
+  const createFromReview = app.callsMatching("/workspace/api/conversations").filter(
+    (call) => call.options.method === "POST"
+  ).pop();
+  assert(createFromReview, "New chat from Review did not POST");
+  createFromReview.respond({ id: "conv-new-reviewer", created_at: 1700000009 }, 201);
+  await settle();
+  app.lastMatching("/workspace/api/conversations?limit=25").respond(
+    {
+      items: [
+        { id: "conv-new-reviewer", created_at: 1700000009, updated_at: 1700000009 },
+        { id: "conv-own-reviewer", created_at: 1700000001, updated_at: 1700000002 },
+      ],
+      next: null,
+    },
+    200
+  );
+  await settle();
+  const newDetail = app.lastMatching("/workspace/api/conversations/conv-new-reviewer");
+  assert(newDetail, "New chat from Review must open the created conversation");
+  newDetail.respond(
+    { id: "conv-new-reviewer", created_at: 1700000009, messages: [] },
+    200
+  );
+  await settle();
+  assert(app.elementFor("chat-panel").hidden === false, "New chat from Review must remain in Chat");
+  assert(app.elementFor("composer").focused >= 1, "opening the created conversation must focus its composer");
 }
 
 async function scenarioReviewRevoked() {
@@ -1423,6 +1542,364 @@ async function scenarioAdmin() {
   assert(app.elementFor("workspace-view").hidden === true, "logout must hide the workspace");
 }
 
+async function scenarioOwnNavigationFromAdmin() {
+  const app = createApp();
+  await start(app);
+  const adminProfile = {
+    user: { ...ALICE_USER, id: "user-admin", username: "admin", full_name: "Ada Admin", role: "admin" },
+    department: { id: "dept-accounting", name: "Accounting" },
+    review_scope: null,
+    review_department_ids: [],
+    review_grants: [],
+  };
+  await signIn(app, adminProfile);
+  app.lastMatching("/workspace/api/conversations?limit=25").respond(
+    {
+      items: [
+        { id: "conv-own-admin", created_at: 1700000001, updated_at: 1700000002 },
+        { id: "conv-other-admin", created_at: 1700000003, updated_at: 1700000004 },
+      ],
+      next: null,
+    },
+    200
+  );
+  await settle();
+
+  app.elementFor("tab-admin").dispatch("click");
+  await settle();
+  assert(app.elementFor("admin-panel").hidden === false, "admin view must open for an admin");
+  app.elementFor("sidebar-toggle").dispatch("click");
+  app.elementFor("new-chat").dispatch("click");
+  assert(app.elementFor("chat-panel").hidden === false && app.elementFor("admin-panel").hidden === true,
+    "New chat from Admin must switch to Chat before the create answer");
+  assert(app.elementFor("app").getAttribute("data-nav") === "closed",
+    "New chat from Admin must close the mobile sidebar");
+  const create = app.callsMatching("/workspace/api/conversations").filter(
+    (call) => call.options.method === "POST"
+  ).pop();
+  assert(create, "New chat from Admin did not POST");
+  create.respond({ id: "conv-new-admin", created_at: 1700000009 }, 201);
+  await settle();
+  app.lastMatching("/workspace/api/conversations?limit=25").respond(
+    {
+      items: [
+        { id: "conv-new-admin", created_at: 1700000009, updated_at: 1700000009 },
+        { id: "conv-own-admin", created_at: 1700000001, updated_at: 1700000002 },
+        { id: "conv-other-admin", created_at: 1700000003, updated_at: 1700000004 },
+      ],
+      next: null,
+    },
+    200
+  );
+  await settle();
+  app.lastMatching("/workspace/api/conversations/conv-new-admin").respond(
+    { id: "conv-new-admin", created_at: 1700000009, messages: [] },
+    200
+  );
+  await settle();
+  assert(app.elementFor("chat-panel").hidden === false && app.elementFor("admin-panel").hidden === true,
+    "created conversation from Admin must stay in Chat");
+  assert(app.elementFor("composer").focused >= 1, "opening the created conversation must focus its composer");
+
+  app.elementFor("tab-admin").dispatch("click");
+  await settle();
+  assert(app.elementFor("admin-panel").hidden === false, "admin view must reopen");
+  const own = app.elementFor("conversation-list").children.find(
+    (child) => child.getAttribute("data-conversation") === "conv-own-admin"
+  );
+  assert(own, "own conversation missing from the sidebar");
+  own.dispatch("click");
+  assert(app.elementFor("chat-panel").hidden === false && app.elementFor("admin-panel").hidden === true,
+    "selecting an own conversation must switch from Admin to Chat");
+  const ownDetail = app.lastMatching("/workspace/api/conversations/conv-own-admin");
+  assert(ownDetail, "own conversation detail request missing from Admin");
+  ownDetail.respond(
+    {
+      id: "conv-own-admin",
+      created_at: 1700000001,
+      messages: [{ id: "a1", role: "assistant", outcome: "allowed", text: "Admin own answer", created_at: 1700000002 }],
+    },
+    200
+  );
+  await settle();
+  assert(app.elementFor("messages").textContent.indexOf("Admin own answer") >= 0,
+    "own conversation did not render after leaving Admin");
+
+  // A failed selection still switches to Chat so its meaningful error is not
+  // hidden behind the Admin panel.
+  app.elementFor("tab-admin").dispatch("click");
+  await settle();
+  const denied = app.elementFor("conversation-list").children.find(
+    (child) => child.getAttribute("data-conversation") === "conv-other-admin"
+  );
+  assert(denied, "second own conversation missing from the sidebar");
+  denied.dispatch("click");
+  assert(app.elementFor("chat-panel").hidden === false && app.elementFor("admin-panel").hidden === true,
+    "a failed own selection must still leave Admin");
+  app.lastMatching("/workspace/api/conversations/conv-other-admin").respond(
+    { error: { code: "FORBIDDEN", message: "Permission denied." } },
+    403
+  );
+  await settle();
+  assert(app.elementFor("chat-status").textContent.indexOf("permission") >= 0,
+    "own-conversation denial must stay visible in Chat");
+}
+
+async function scenarioConversationListRetryAndPreservation() {
+  const app = createApp();
+  await start(app);
+  await signIn(app);
+
+  const first = app.lastMatching("/workspace/api/conversations?limit=25");
+  assert(first && !first.settled, "initial conversation list request missing");
+  first.respond(
+    { error: { code: "UNAVAILABLE", message: "Required workspace control is unavailable." } },
+    503
+  );
+  await settle();
+  assert(app.elementFor("list-retry").hidden === true,
+    "bounded retries must finish before the retry control appears");
+  assert(app.elementFor("list-state").getAttribute("data-kind") === "warning",
+    "a retrying list must be reported as transient");
+  assert(app.elementFor("list-state").textContent.indexOf("No saved conversations") < 0,
+    "a transient failure must not look like empty history");
+
+  app.fireAllTimers();
+  await settle();
+  const second = app.lastMatching("/workspace/api/conversations?limit=25");
+  assert(second && second !== first && !second.settled, "bounded list retry missing");
+  second.respond({ error: { code: "UNAVAILABLE", message: "Busy." } }, 503);
+  await settle();
+  app.fireAllTimers();
+  await settle();
+  const third = app.lastMatching("/workspace/api/conversations?limit=25");
+  assert(third && third !== second && !third.settled, "second bounded list retry missing");
+  third.respond({ error: { code: "UNAVAILABLE", message: "Busy." } }, 503);
+  await settle();
+
+  assert(app.elementFor("list-retry").hidden === false,
+    "exhausted list retries must offer an explicit retry");
+  assert(app.elementFor("list-retry").textContent.trim() === "Retry conversations",
+    "the retry control must be labelled for assistive technology");
+  assert(app.elementFor("list-state").textContent.indexOf("Saved conversations may still exist") >= 0,
+    "exhausted retries must explain that history may still exist");
+  assert(app.callsMatching("/workspace/api/conversations?limit=25").length === 3,
+    "list retries must be bounded");
+
+  app.elementFor("list-retry").dispatch("click");
+  const recovered = app.lastMatching("/workspace/api/conversations?limit=25");
+  assert(recovered && recovered !== third && !recovered.settled,
+    "Retry conversations must issue a fresh safe read");
+  recovered.respond(
+    {
+      items: [{ id: "conv-a", created_at: 1700000001, updated_at: 1700000002 }],
+      next: "page-2",
+    },
+    200
+  );
+  await settle();
+  assert(app.elementFor("list-retry").hidden === true, "a successful retry must hide the control");
+  assert(app.elementFor("conversation-list").children.length === 1,
+    "a successful retry must render the recovered list once");
+  assert(app.elementFor("conversation-list").children[0].focused >= 1,
+    "a successful retry must restore focus to the recovered list");
+
+  app.elementFor("conversation-list").children[0].dispatch("click");
+  app.lastMatching("/workspace/api/conversations/conv-a").respond(
+    {
+      id: "conv-a",
+      created_at: 1700000001,
+      messages: [{ id: "a1", role: "user", outcome: "allowed", text: "Preserved transcript", created_at: 1700000002 }],
+    },
+    200
+  );
+  await settle();
+  app.elementFor("composer").value = "draft survives a list failure";
+
+  app.elementFor("load-more").dispatch("click");
+  const pageFirst = app.lastMatching("/workspace/api/conversations?limit=25&after=page-2");
+  assert(pageFirst && !pageFirst.settled, "load-more request missing");
+  pageFirst.respond({ error: { code: "UNAVAILABLE", message: "Busy." } }, 503);
+  await settle();
+  app.fireAllTimers();
+  await settle();
+  const pageSecond = app.lastMatching("/workspace/api/conversations?limit=25&after=page-2");
+  assert(pageSecond && pageSecond !== pageFirst && !pageSecond.settled,
+    "load-more retry missing");
+  pageSecond.respond({ error: { code: "UNAVAILABLE", message: "Busy." } }, 503);
+  await settle();
+  app.fireAllTimers();
+  await settle();
+  const pageThird = app.lastMatching("/workspace/api/conversations?limit=25&after=page-2");
+  assert(pageThird && pageThird !== pageSecond && !pageThird.settled,
+    "second load-more retry missing");
+  pageThird.respond({ error: { code: "UNAVAILABLE", message: "Busy." } }, 503);
+  await settle();
+  assert(app.elementFor("list-retry").hidden === false,
+    "a failed page must offer the explicit retry");
+  assert(app.elementFor("composer").value === "draft survives a list failure",
+    "a failed list refresh must not clear the current draft");
+  assert(
+    app.elementFor("messages").textContent.indexOf("Preserved transcript") >= 0,
+    "a failed list refresh must not clear the current conversation"
+  );
+
+  app.elementFor("list-retry").dispatch("click");
+  const retryPage = app.lastMatching("/workspace/api/conversations?limit=25");
+  assert(retryPage && retryPage !== pageThird && !retryPage.settled,
+    "list retry after a failed page missing");
+  retryPage.respond(
+    {
+      items: [{ id: "conv-a", created_at: 1700000001, updated_at: 1700000002 }],
+      next: null,
+    },
+    200
+  );
+  await settle();
+  assert(app.elementFor("composer").value === "draft survives a list failure",
+    "a successful list retry must preserve the draft");
+  assert(app.elementFor("chat-title").textContent === "Conversation",
+    "a successful list retry must preserve the current conversation");
+  assert(app.elementFor("conversation-list").children.length === 1,
+    "a retried reset must not duplicate rows");
+
+  const deniedApp = createApp();
+  await start(deniedApp);
+  await signIn(deniedApp);
+  deniedApp.lastMatching("/workspace/api/conversations?limit=25").respond(
+    { error: { code: "FORBIDDEN", message: "Permission denied." } },
+    403
+  );
+  await settle();
+  assert(deniedApp.callsMatching("/workspace/api/conversations?limit=25").length === 1,
+    "403 must not be retried");
+  assert(deniedApp.elementFor("list-retry").hidden === true,
+    "permission denial must not offer a blind retry");
+  assert(deniedApp.elementFor("list-state").getAttribute("data-kind") === "denied",
+    "403 must be reported as permission denial");
+
+  const malformedApp = createApp();
+  await start(malformedApp);
+  await signIn(malformedApp);
+  malformedApp.lastMatching("/workspace/api/conversations?limit=25").respond(
+    { items: "not-an-array" },
+    200
+  );
+  await settle();
+  assert(malformedApp.callsMatching("/workspace/api/conversations?limit=25").length === 1,
+    "malformed list data must not be retried");
+  assert(malformedApp.elementFor("list-state").getAttribute("data-kind") === "error",
+    "malformed list data must be reported honestly");
+  assert(malformedApp.elementFor("list-state").textContent.indexOf("No saved conversations") < 0,
+    "malformed list data must not look like empty history");
+}
+
+async function scenarioListAttemptCannotOutliveIdentityChange() {
+  const app = createApp();
+  await start(app);
+  await signIn(app);
+  const oldList = app.lastMatching("/workspace/api/conversations?limit=25");
+  assert(oldList && !oldList.settled, "initial list request missing");
+  oldList.respond({ error: { code: "UNAVAILABLE", message: "Busy." } }, 503);
+  await settle();
+  const before = app.callsMatching("/workspace/api/conversations?limit=25").length;
+
+  app.broadcast({ type: "workspace-auth-changed" });
+  await settle();
+  const check = app.lastMatching("/workspace/api/me");
+  assert(check && !check.settled, "peer auth change must revalidate the session");
+  check.respond(BOB_PROFILE, 200);
+  await settle();
+  assert(app.elementFor("auth-view").hidden === false,
+    "a changed cookie identity must not keep the previous workspace visible");
+  assert(app.elementFor("identity-name").textContent === "",
+    "the previous identity must be cleared");
+  assert(app.elementFor("list-retry").hidden === true,
+    "the previous account's list retry must be cleared");
+
+  // The old bounded retry timer must not launch a list request with the old
+  // attempt (or the new account's cookie) after the identity changed.
+  app.fireAllTimers();
+  await settle();
+  assert(app.callsMatching("/workspace/api/conversations?limit=25").length === before,
+    "a stale list retry must not outlive the identity change");
+
+  await signIn(app, BOB_PROFILE, "bob");
+  const bobList = app.lastMatching("/workspace/api/conversations?limit=25");
+  assert(bobList && !bobList.settled, "new-account list request missing");
+  assert(bobList.options.headers["X-Workspace-User"] === "user-bob",
+    "new-account list must name the new profile");
+  bobList.respond(
+    {
+      items: [{ id: "conv-bob", created_at: 1700000001, updated_at: 1700000002 }],
+      next: null,
+    },
+    200
+  );
+  await settle();
+  assert(app.elementFor("identity-name").textContent === "Bob Lee",
+    "the new identity must be shown");
+  assert(app.elementFor("conversation-list").textContent.indexOf("conv-bob") >= 0,
+    "the new account's history must render");
+}
+
+async function scenarioPendingListRefreshKeepsNewChat() {
+  const app = createApp();
+  await start(app);
+  await signIn(app);
+
+  const stale = app.lastMatching("/workspace/api/conversations?limit=25");
+  assert(stale && !stale.settled, "initial list request must still be pending");
+
+  // Commit a new chat while the initial reset is in flight.
+  app.elementFor("new-chat").dispatch("click");
+  const create = app.lastMatching("/workspace/api/conversations");
+  assert(create && !create.settled && create.options.method === "POST",
+    "new chat request missing");
+  create.respond({ id: "conv-new", created_at: 1700000100 }, 201);
+  await settle();
+  assert(app.callsMatching("/workspace/api/conversations?limit=25").length === 1,
+    "a reset requested during a pending reset must coalesce, not overlap");
+
+  // The old snapshot predates the new conversation.
+  stale.respond(
+    {
+      items: [{ id: "conv-old", created_at: 1700000001, updated_at: 1700000002 }],
+      next: "stale-page-2",
+    },
+    200
+  );
+  await settle();
+  assert(app.elementFor("conversation-list").children.length === 0,
+    "a stale pre-mutation snapshot must not repaint rows");
+  assert(app.elementFor("load-more").hidden === true,
+    "a stale pre-mutation cursor must not be repainted");
+
+  const fresh = app.lastMatching("/workspace/api/conversations?limit=25");
+  assert(fresh && fresh !== stale && !fresh.settled,
+    "a mutation during a pending reset must trigger one fresh first-page read");
+  assert(fresh.url.indexOf("after=") < 0, "the follow-up refresh must start at page one");
+  assert(app.callsMatching("/workspace/api/conversations?limit=25").length === 2,
+    "the follow-up refresh must be bounded to one request");
+
+  fresh.respond(
+    {
+      items: [{ id: "conv-new", created_at: 1700000100, updated_at: 1700000100 }],
+      next: null,
+    },
+    200
+  );
+  await settle();
+  assert(app.elementFor("conversation-list").children.length === 1,
+    "the fresh refresh must render the new conversation exactly once");
+  assert(
+    app.elementFor("conversation-list").children[0].getAttribute("data-conversation") === "conv-new",
+    "the fresh refresh must reflect the mutation, not the withheld snapshot"
+  );
+  assert(app.elementFor("load-more").hidden === true,
+    "the stale cursor must not survive the follow-up refresh");
+}
+
 async function scenarioInitialRestoreWithholdsSurfaces() {
   const app = createApp();
   await settle();
@@ -1908,6 +2385,10 @@ async function main() {
   await scenarioQueuedAuthChangeCannotRevealLoginProfile();
   await scenarioLogoutFailureIsRetryable();
   await scenarioAdmin();
+  await scenarioOwnNavigationFromAdmin();
+  await scenarioConversationListRetryAndPreservation();
+  await scenarioListAttemptCannotOutliveIdentityChange();
+  await scenarioPendingListRefreshKeepsNewChat();
   console.log("workspace page: all scenarios passed");
 }
 

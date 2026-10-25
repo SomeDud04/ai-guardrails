@@ -134,6 +134,7 @@ textarea:focus-visible { outline-offset: -2px; }
 .conversation-item .item-meta { display: block; color: var(--muted-dim); font-size: .75rem; margin-top: .125rem; }
 .list-state { margin: 0; padding: var(--space-1) var(--space-3) var(--space-2); color: var(--muted); font-size: .75rem; }
 .list-more { margin: 0 var(--space-2) var(--space-3); font-size: .75rem; }
+.list-retry { margin: 0 var(--space-2) var(--space-3); font-size: .75rem; }
 .side-foot { margin-top: auto; padding: var(--space-3); border-top: 1px solid var(--line); color: var(--muted-dim); font-size: .75rem; }
 .main { display: flex; flex-direction: column; min-width: 0; min-height: 0; }
 .topbar {
@@ -325,6 +326,9 @@ _WORKSPACE_JS = """
   // control-plane admission is full.  Retrying the read is safe; writes and the
   // login POST are never retried and the password is never resent.
   var PROFILE_CHECK_RETRY_MS = [300, 800];
+  // The conversation list is a safe idempotent read.  Only transient read
+  // failures are retried, and an exhausted retry leaves an explicit control.
+  var LIST_RETRY_MS = [300, 800];
 
   function byId(id) { return document.getElementById(id); }
   var appEl = byId("app");
@@ -352,6 +356,7 @@ _WORKSPACE_JS = """
   var reviewPanel = byId("review-panel");
   var conversationList = byId("conversation-list");
   var listState = byId("list-state");
+  var listRetry = byId("list-retry");
   var loadMoreButton = byId("load-more");
   var newChatButton = byId("new-chat");
   var chatTitle = byId("chat-title");
@@ -426,6 +431,15 @@ _WORKSPACE_JS = """
   var listCursor = null;
   var listLoading = false;
   var listLoaded = false;
+  var listResetLoading = false;
+  var listPending = Promise.resolve(false);
+  // Set when a mutation asks for a first-page refresh while a reset is
+  // already in flight.  Exactly one follow-up runs after the older reset
+  // settles, so a pre-mutation snapshot can never win.
+  var listRefreshPending = false;
+  // Bumped by every list attempt.  An older response or retry timer must not
+  // append rows, reuse a cursor or paint a previous identity's list.
+  var listAttemptSeq = 0;
   var reviewCursor = null;
   var reviewLoading = false;
   var reviewLoaded = false;
@@ -563,6 +577,13 @@ _WORKSPACE_JS = """
     return "The workspace could not be reached. Check the connection and try again.";
   }
 
+  function retriableRead(result) {
+    // Only a transient read failure is safe to repeat.  Authentication,
+    // permission and malformed-answer outcomes need a real user action.
+    return result.network === true || result.timeout === true ||
+      result.status === 502 || result.status === 503 || result.status === 504;
+  }
+
   function errorCode(result) {
     if (isObject(result.data) && isObject(result.data.error) &&
         typeof result.data.error.code === "string") {
@@ -601,6 +622,10 @@ _WORKSPACE_JS = """
     revalidating = false;
     listLoading = false;
     listLoaded = false;
+    listResetLoading = false;
+    listPending = Promise.resolve(false);
+    listRefreshPending = false;
+    listAttemptSeq += 1;
     reviewLoading = false;
     reviewLoaded = false;
     listCursor = null;
@@ -620,6 +645,7 @@ _WORKSPACE_JS = """
     reviewEmpty.textContent = "Select a conversation to review.";
     reviewEmpty.hidden = false;
     listState.textContent = "";
+    listRetry.hidden = true;
     chatMeta.textContent = "";
     chatTitle.textContent = "Conversation";
     identityName.textContent = "";
@@ -1048,42 +1074,120 @@ _WORKSPACE_JS = """
   }
 
   function loadConversations(reset) {
-    if (!signedIn || listLoading) { return Promise.resolve(false); }
+    if (!signedIn) { return Promise.resolve(false); }
+    if (listLoading) {
+      // A reset (login, new chat, send, delete or retry) may supersede an
+      // in-flight older page, but a second reset coalesces instead of
+      // spending another admission slot.  A load-more never overlaps.
+      if (!reset) { return Promise.resolve(false); }
+      if (listResetLoading) {
+        // A mutation changed the first page while this reset was already in
+        // flight.  Coalesce into one follow-up refresh once it settles.
+        listRefreshPending = true;
+        return listPending;
+      }
+    }
     var epoch = sessionEpoch;
+    var attempt = ++listAttemptSeq;
+    var cursor = reset ? null : listCursor;
+    var retries = LIST_RETRY_MS.slice();
     listLoading = true;
+    listResetLoading = !!reset;
+    listRefreshPending = false;
+    listRetry.hidden = true;
     if (reset) {
-      listCursor = null;
       listLoaded = false;
-      clearNode(conversationList);
       setStatus(listState, "Loading conversations…");
     } else {
       setStatus(listState, "Loading more…");
     }
-    var path = "/workspace/api/conversations?limit=" + LIST_LIMIT +
-      (listCursor ? "&after=" + encodeURIComponent(listCursor) : "");
-    return api(path).then(function (result) {
-      if (epoch !== sessionEpoch) { return false; }
+    function stillCurrent() {
+      return epoch === sessionEpoch && attempt === listAttemptSeq;
+    }
+    function failed(result) {
       listLoading = false;
-      if (authFailure(result)) { return false; }
-      if (result.status === 403) { setStatus(listState, "Conversation list access was denied.", "denied"); return false; }
-      if (!result.ok || !isObject(result.data) || !Array.isArray(result.data.items)) {
-        setStatus(listState, serverMessage(result, timeoutOrNetwork(result)), "error");
-        return false;
-      }
-      renderConversationList(result.data.items, reset);
-      listCursor = typeof result.data.next === "string" && result.data.next ? result.data.next : null;
-      loadMoreButton.hidden = !listCursor;
-      listLoaded = true;
-      if (reset && result.data.items.length === 0) {
-        setStatus(listState, "No saved conversations yet.");
-      } else {
-        setStatus(listState, listCursor ? "More conversations available." : "");
-      }
-      return true;
-    });
+      listResetLoading = false;
+      listRefreshPending = false;
+      // Never rewrite a failed refresh as an empty account.  Any rows already
+      // on screen stay in place and the user gets an explicit safe retry.
+      setStatus(
+        listState,
+        serverMessage(result, timeoutOrNetwork(result)) +
+          " Saved conversations may still exist. Retry the conversation list.",
+        "error"
+      );
+      listRetry.hidden = false;
+      return false;
+    }
+    function request() {
+      var path = "/workspace/api/conversations?limit=" + LIST_LIMIT +
+        (cursor ? "&after=" + encodeURIComponent(cursor) : "");
+      return api(path).then(function (result) {
+        if (!stillCurrent()) { return false; }
+        if (authFailure(result)) { return false; }
+        if (result.status === 403) {
+          listLoading = false;
+          listResetLoading = false;
+          listRefreshPending = false;
+          setStatus(listState, "Conversation list access was denied.", "denied");
+          listRetry.hidden = true;
+          return false;
+        }
+        if (!result.ok || !isObject(result.data) || !Array.isArray(result.data.items)) {
+          if (retries.length && retriableRead(result)) {
+            setStatus(listState, "The conversation list is temporarily unavailable. Retrying…", "warning");
+            return wait(retries.shift()).then(function () {
+              if (!stillCurrent()) { return false; }
+              return request();
+            });
+          }
+          return failed(result);
+        }
+        if (reset && listRefreshPending) {
+          // A mutation asked for a new first page while this reset was in
+          // flight, so this snapshot predates it.  Discard the rows/cursor and
+          // spend the single follow-up on a fresh first-page read.
+          listRefreshPending = false;
+          listLoading = false;
+          listResetLoading = false;
+          listPending = loadConversations(true);
+          return listPending;
+        }
+        listLoading = false;
+        listResetLoading = false;
+        listRetry.hidden = true;
+        renderConversationList(result.data.items, reset);
+        listCursor = typeof result.data.next === "string" && result.data.next ? result.data.next : null;
+        loadMoreButton.hidden = !listCursor;
+        listLoaded = true;
+        if (reset && result.data.items.length === 0) {
+          setStatus(listState, "No saved conversations yet.");
+        } else {
+          setStatus(listState, listCursor ? "More conversations available." : "");
+        }
+        return true;
+      });
+    }
+    listPending = request();
+    return listPending;
   }
 
   loadMoreButton.addEventListener("click", function () { loadConversations(false); });
+
+  listRetry.addEventListener("click", function () {
+    if (!signedIn || listLoading) { return; }
+    loadConversations(true).then(function (loaded) {
+      // A retry must not discard the current conversation or its draft.  It
+      // only refreshes read-only list metadata; focus moves to the recovered
+      // rows (or the create control when the account really has none).
+      if (!loaded) {
+        try { listRetry.focus(); } catch (error) { /* non-fatal */ }
+        return;
+      }
+      var target = conversationList.firstChild || newChatButton;
+      try { target.focus(); } catch (error) { /* non-fatal */ }
+    });
+  });
 
   function updateComposer() {
     var ready = !!(signedIn && currentConversation);
@@ -1155,9 +1259,20 @@ _WORKSPACE_JS = """
       : "";
   }
 
+  function enterChatView() {
+    // Opening an own conversation or starting a new chat is an explicit
+    // navigation action, even when the user came from Admin or Review.  It
+    // must not carry that panel over and must close the mobile sidebar.
+    currentView = "chat";
+    setViewTabs("chat");
+    topbarTitle.textContent = "Chat";
+    setSidebar(false);
+  }
+
   function openConversation(id, options) {
     if (!signedIn || typeof id !== "string") { return Promise.resolve(false); }
     var settings = options || {};
+    if (!settings.quiet) { enterChatView(); }
     if (currentConversation) { storeDraft(currentConversation.id); }
     chatSeq += 1;
     var seq = chatSeq;
@@ -1211,6 +1326,7 @@ _WORKSPACE_JS = """
 
   newChatButton.addEventListener("click", function () {
     if (!signedIn || creating) { return; }
+    enterChatView();
     if (currentConversation) { storeDraft(currentConversation.id); }
     creating = true;
     newChatButton.disabled = true;
@@ -1327,6 +1443,10 @@ _WORKSPACE_JS = """
         }
         sending = false;
         updateComposer();
+        // A saved turn changes recency.  Refresh only the existing list data;
+        // this is a safe read of the first page and does not touch the current
+        // conversation, its draft or the message transcript.
+        loadConversations(true);
         if (reloaded) { setStatus(chatStatus, message, kind); }
         else if (!keepText) { composer.value = text; }
       });
@@ -2488,6 +2608,7 @@ WORKSPACE_HTML = """<!doctype html>
 <div class="side-list-head"><h2>Conversations</h2></div>
 <div id="conversation-list" class="conversation-list" aria-label="Your conversations"></div>
 <p id="list-state" class="list-state" role="status" aria-live="polite"></p>
+<button id="list-retry" class="list-retry" type="button" hidden>Retry conversations</button>
 <button id="load-more" class="list-more" type="button" hidden>Load more</button>
 <div class="side-foot">Your history is private to your account and authorised reviewers.</div>
 </aside>
