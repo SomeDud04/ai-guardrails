@@ -15,6 +15,7 @@ from pathlib import Path
 from typing import Any
 
 from .audit import AuditStore, SqliteAuditStore
+from .controls import GatewayControl, block_detail
 from .generation import conservative_byte_budget
 from .guards import GuardInputLimit
 from .limits import ChatLimits
@@ -147,13 +148,15 @@ class MemoryAdapters:
         return self.output_result
 
 
-def mask_pii(text: str) -> str:
+def mask_pii(text: str, masks: tuple[str, ...] | None = None) -> str:
     """Experimental ASCII format recognizers; false positives/negatives expected.
 
     The spans live in :mod:`nasi_lemak.pii` and are shared with the offline
     evaluator.  Format matching does not establish identity validity.
+    ``masks`` is the explicit per-request selection; ``None`` preserves the
+    original all-recognizer behaviour.
     """
-    return mask_text(text)
+    return mask_text(text, masks)
 
 
 def serialize_messages(messages: list[dict[str, str]]) -> str:
@@ -255,7 +258,32 @@ class Gateway:
         messages = {"INVALID_REQUEST": "Request is not supported.", "UNAUTHORIZED": "Authentication required.", "INPUT_LIMIT": "Request exceeds the supported input limit.", "UNAVAILABLE": "Required safety control is unavailable.", "POLICY_BLOCK": "Request did not pass safety checks."}
         return status, {"error": {"code": code, "message": messages[code], "request_id": request_id}}
 
-    def handle(self, method: str, path: str, headers: Any, body: Any, *, scan_context: ScanContext | None = None):
+    @classmethod
+    def _blocked(cls, request_id: str, reason_code: str):
+        status, body = cls._error(403, "POLICY_BLOCK", request_id)
+        # Fixed, bounded detail only: never classifier verdict text, rules,
+        # the original prompt or any withheld output.
+        body["error"]["block"] = block_detail(reason_code)
+        return status, body
+
+    @staticmethod
+    def _resolve_control(control: GatewayControl | None) -> GatewayControl:
+        if control is None:
+            return GatewayControl()
+        if not isinstance(control, GatewayControl):
+            raise ValueError("invalid gateway control")
+        return control
+
+    def handle(
+        self,
+        method: str,
+        path: str,
+        headers: Any,
+        body: Any,
+        *,
+        scan_context: ScanContext | None = None,
+        control: GatewayControl | None = None,
+    ):
         request_id = "req_" + uuid.uuid4().hex
         if method != "POST" or path != "/v1/chat/completions":
             return self._error(404, "INVALID_REQUEST", request_id)
@@ -275,6 +303,10 @@ class Gateway:
             return self._error(400, "INVALID_REQUEST", request_id)
         messages, max_tokens = parsed
         if self.adapters is None:
+            return self._error(503, "UNAVAILABLE", request_id)
+        try:
+            control = self._resolve_control(control)
+        except ValueError:
             return self._error(503, "UNAVAILABLE", request_id)
         try:
             self._audit(request_id, "request_started", "pending")
@@ -305,29 +337,37 @@ class Gateway:
         try:
             if scan_context is not None and scan_context.cancelled():
                 raise _ScanCancelled()
-            if scan_context is not None and getattr(
-                self.adapters, "supports_scan_context", False
-            ):
-                result = self.adapters.scan_attack(
-                    serialized, scan_context=scan_context
-                )
-            else:
-                result = self.adapters.scan_attack(serialized)
-            if not isinstance(result, dict) or result.get("decision") not in ("allow", "block"):
-                raise ValueError("invalid attack result")
-            if result["decision"] == "block":
-                self._audit(request_id, "request_blocked", "blocked", "POLICY_BLOCK")
-                return self._error(403, "POLICY_BLOCK", request_id)
+            if control.input_check_enabled:
+                if scan_context is not None and getattr(
+                    self.adapters, "supports_scan_context", False
+                ):
+                    result = self.adapters.scan_attack(
+                        serialized, scan_context=scan_context
+                    )
+                else:
+                    result = self.adapters.scan_attack(serialized)
+                if not isinstance(result, dict) or result.get("decision") not in ("allow", "block"):
+                    raise ValueError("invalid attack result")
+                if result["decision"] == "block":
+                    self._audit(request_id, "request_blocked", "blocked", "POLICY_BLOCK")
+                    return self._blocked(request_id, "INPUT_GUARD_BLOCK")
             # Deny phrases are literal policy text, checked across every accepted
-            # input turn after the mandatory attack guard and before generation.
+            # input turn before generation.  Disabling the model classifier never
+            # disables this server-side policy control.
             if any(self.policy.denies(message["content"]) for message in messages):
                 self._audit(request_id, "request_blocked", "blocked", "POLICY_BLOCK")
-                return self._error(403, "POLICY_BLOCK", request_id)
+                return self._blocked(request_id, "INPUT_POLICY_BLOCK")
             # A cancelled/deadlined workspace request must not launch new
             # inference after a successful scan.
             if scan_context is not None and scan_context.cancelled():
                 raise _ScanCancelled()
-            safe_messages = [{"role": message["role"], "content": mask_pii(message["content"])} for message in messages]
+            safe_messages = [
+                {
+                    "role": message["role"],
+                    "content": mask_pii(message["content"], control.input_masks),
+                }
+                for message in messages
+            ]
             output = self.adapters.generate(safe_messages, self.policy.model, max_tokens)
             if not isinstance(output, str):
                 raise ValueError("invalid generation result")
@@ -343,28 +383,29 @@ class Gateway:
         try:
             if scan_context is not None and scan_context.cancelled():
                 raise _ScanCancelled()
-            contextual_scan = getattr(self.adapters, "scan_response", None)
-            if callable(contextual_scan):
-                # Each request passes its own complete sanitized conversation.
-                # Guard/composite objects must not cache it between requests.
-                context = [dict(message) for message in safe_messages]
-                result = contextual_scan(context, output)
-            else:
-                # Legacy synthetic test adapters only implement response-only
-                # scanning. Genuine adapters must provide ``scan_response``.
-                result = self.adapters.scan_output(output)
-            if not isinstance(result, dict) or not isinstance(result.get("safe"), bool):
-                raise ValueError("invalid output result")
-            if not result["safe"]:
-                self._audit(request_id, "request_blocked", "blocked", "POLICY_BLOCK")
-                return self._error(403, "POLICY_BLOCK", request_id)
-            # The complete buffered output is checked before any release.  The
-            # mandatory output guard above has already run; this check only
-            # adds a policy denial and cannot bypass an unsafe verdict.
+            if control.output_check_enabled:
+                contextual_scan = getattr(self.adapters, "scan_response", None)
+                if callable(contextual_scan):
+                    # Each request passes its own complete sanitized conversation.
+                    # Guard/composite objects must not cache it between requests.
+                    context = [dict(message) for message in safe_messages]
+                    result = contextual_scan(context, output)
+                else:
+                    # Legacy synthetic test adapters only implement response-only
+                    # scanning. Genuine adapters must provide ``scan_response``.
+                    result = self.adapters.scan_output(output)
+                if not isinstance(result, dict) or not isinstance(result.get("safe"), bool):
+                    raise ValueError("invalid output result")
+                if not result["safe"]:
+                    self._audit(request_id, "request_blocked", "blocked", "POLICY_BLOCK")
+                    return self._blocked(request_id, "OUTPUT_GUARD_BLOCK")
+            # The complete buffered output is checked before any release.
+            # Disabling the model output classifier never bypasses the literal
+            # policy deny list.
             if self.policy.denies(output):
                 self._audit(request_id, "request_blocked", "blocked", "POLICY_BLOCK")
-                return self._error(403, "POLICY_BLOCK", request_id)
-            masked_output = mask_pii(output)
+                return self._blocked(request_id, "OUTPUT_POLICY_BLOCK")
+            masked_output = mask_pii(output, control.output_masks)
             self._audit(request_id, "request_completed", "allowed")
         except Exception:
             self._terminal_best_effort(request_id, "failed", "UNAVAILABLE")

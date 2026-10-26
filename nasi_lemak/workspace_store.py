@@ -47,8 +47,11 @@ from functools import wraps
 from pathlib import Path
 from typing import Any, Callable
 
+from .controls import block_detail
+from .workspace_governance import AlertAdminMixin, PolicyAdminMixin
+
 SCHEMA_PATH = Path(__file__).with_name("workspace_schema.sql")
-SCHEMA_VERSION = 2
+SCHEMA_VERSION = 3
 # Version 2 adds outcome/request_id/error_code to ws_messages. Runtime stores
 # open with ``migrate=False`` and therefore require an explicit provisioning
 # step (CLI slice) rather than silently altering a live database.
@@ -214,6 +217,28 @@ def _schema_statements() -> list[str]:
         statement.strip()
         for statement in without_comments.split(";")
         if statement.strip()
+    ]
+
+
+def _schema_v3_statements() -> list[str]:
+    """Additive version-3 DDL, filtered from the shared schema file.
+
+    Keeping this derived from the same SQL file avoids a hand-maintained second
+    copy drifting from a fresh install.  Every statement is ``IF NOT EXISTS``
+    and safe to re-run after a partial deployment.
+    """
+    prefixes = (
+        "CREATE TABLE IF NOT EXISTS WS_POLICY_",
+        "CREATE TABLE IF NOT EXISTS WS_BLOCK_ALERTS",
+        "CREATE TABLE IF NOT EXISTS WS_ALERT_STATE",
+        "CREATE INDEX IF NOT EXISTS IDX_WS_POLICY_",
+        "CREATE INDEX IF NOT EXISTS IDX_WS_BLOCK_ALERTS",
+        "CREATE INDEX IF NOT EXISTS IDX_WS_ALERT_STATE",
+    )
+    return [
+        statement
+        for statement in _schema_statements()
+        if statement.upper().startswith(prefixes)
     ]
 
 
@@ -489,7 +514,7 @@ def _guard(operation):
 # ---------------------------------------------------------------------------
 
 
-class WorkspaceStore:
+class WorkspaceStore(PolicyAdminMixin, AlertAdminMixin):
     """Workspace persistence boundary with in-method authorization."""
 
     def __init__(
@@ -559,15 +584,22 @@ class WorkspaceStore:
         row = db.query_one("SELECT MAX(version) AS version FROM ws_schema_migrations")
         current = row["version"] if row else None
         if current is not None:
-            if int(current) == SCHEMA_VERSION:
+            version = int(current)
+            if version == SCHEMA_VERSION:
                 return
-            if int(current) != SCHEMA_VERSION - 1:
+            if version not in (1, 2):
                 raise WorkspaceConfigError("unsupported workspace schema version")
-            for statement in _SCHEMA_V2_ALTERS:
+            if version == 1:
+                # Preserve the original v1 -> v2 data migration, then add the
+                # v3 governance tables.  Existing rows and the key verifier are
+                # untouched.
+                for statement in _SCHEMA_V2_ALTERS:
+                    db.execute(statement)
+            for statement in _schema_v3_statements():
                 db.execute(statement)
             db.execute(
                 "UPDATE ws_schema_migrations SET version = ? WHERE version = ?",
-                (SCHEMA_VERSION, int(current)),
+                (SCHEMA_VERSION, version),
             )
             return
         statements = _schema_statements()
@@ -1449,11 +1481,15 @@ class WorkspaceStore:
         outcome: str,
         request_id: str | None = None,
         error_code: str | None = None,
+        alert: dict[str, Any] | None = None,
     ) -> dict[str, Any]:
         """Persist a failed/blocked original prompt and close the lease.
 
         Only the user prompt is stored. No assistant content exists for this
-        turn, so no pair can enter a later Gateway context.
+        turn, so no pair can enter a later Gateway context.  When the turn was
+        blocked, an optional bounded alert metadata payload is inserted in the
+        same transaction (request-id idempotent); it never contains prompt or
+        response text.
         """
         if outcome not in ("blocked", "failed"):
             raise ValueError("turn outcome is invalid")
@@ -1462,11 +1498,14 @@ class WorkspaceStore:
         )
         clean_request_id = _optional_metadata(request_id, "request_id")
         clean_error_code = _optional_metadata(error_code, "error_code")
+        prepared_alert = self._prepare_block_alert(
+            alert, outcome=outcome, request_id=clean_request_id
+        )
         if not isinstance(lease_token, str) or not lease_token:
             raise ValueError("turn reservation is invalid")
         now = self._now()
         with self._backend.transaction() as db:
-            self._require_active_user(db, owner_id)
+            owner = self._require_active_user(db, owner_id)
             conversation = db.query_one(
                 "SELECT id, owner_id FROM ws_conversations WHERE id = ?",
                 (conversation_id,),
@@ -1524,6 +1563,17 @@ class WorkspaceStore:
             )
             if applied != 1:
                 raise WorkspaceStorageError("workspace message was not stored")
+            alert_id = None
+            if prepared_alert is not None:
+                alert_id = self._insert_block_alert(
+                    db,
+                    prepared_alert,
+                    user_id=owner["id"],
+                    department_id=owner["department_id"],
+                    conversation_id=conversation_id,
+                    message_id=message_id,
+                    now=now,
+                )
             applied = db.execute(
                 """
                 UPDATE ws_conversations
@@ -1538,6 +1588,7 @@ class WorkspaceStore:
             return {
                 "conversation_id": conversation_id,
                 "version": version,
+                "alert_id": alert_id,
                 "message": {
                     "id": message_id,
                     "role": "user",
@@ -1754,6 +1805,35 @@ class WorkspaceStore:
                 """,
                 (conversation_id,),
             )
+            alert_rows = db.query(
+                "SELECT message_id, request_id, stage, reason_code "
+                "FROM ws_block_alerts WHERE conversation_id = ? AND user_id = ?",
+                (conversation_id, conversation["owner_id"]),
+            )
+            blocks: dict[str, dict[str, str]] = {}
+            for alert in alert_rows:
+                message_id = alert.get("message_id")
+                request_id = alert.get("request_id")
+                reason_code = alert.get("reason_code")
+                stage = alert.get("stage")
+                if not isinstance(message_id, str) or not message_id:
+                    continue
+                if (
+                    not isinstance(request_id, str)
+                    or not 1 <= len(request_id) <= 128
+                    or any(
+                        ord(char) < 32 or ord(char) == 127
+                        for char in request_id
+                    )
+                ):
+                    continue
+                try:
+                    detail = block_detail(reason_code)
+                except (KeyError, TypeError, ValueError):
+                    continue
+                if stage != detail["stage"]:
+                    continue
+                blocks[message_id] = {**detail, "ref": request_id}
             messages = [
                 {
                     "id": row["id"],
@@ -1768,6 +1848,11 @@ class WorkspaceStore:
                 }
                 for row in rows
             ]
+            for message in messages:
+                if message["outcome"] == "blocked":
+                    block = blocks.get(message["id"])
+                    if block is not None:
+                        message["block"] = block
             metadata = self._conversation_metadata(conversation, len(messages))
         # The transaction above committed before the plaintext is returned.
         result = dict(metadata)

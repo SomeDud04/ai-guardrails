@@ -32,6 +32,7 @@ from __future__ import annotations
 import asyncio
 import functools
 import hashlib
+import inspect
 import json
 import os
 import secrets
@@ -46,6 +47,7 @@ from urllib.parse import urlsplit
 from fastapi import FastAPI, Request
 from fastapi.responses import JSONResponse
 
+from .controls import BLOCK_REASONS, GatewayControl, block_detail
 from .gateway import Gateway, serialize_messages
 from .generation import conservative_byte_budget
 from .limits import ChatLimits
@@ -338,6 +340,27 @@ def _required_store_methods() -> tuple[str, ...]:
         "revoke_grant",
         "reset_password",
         "list_access_log",
+        # Persisted policy administration and block-alert bridge.  The runtime
+        # refuses to become ready when any of these is missing rather than
+        # silently serving turns without per-principal enforcement.
+        "create_policy_profile",
+        "list_policy_profiles",
+        "get_policy_profile",
+        "revise_policy_profile",
+        "rollback_policy_profile",
+        "list_policy_profile_revisions",
+        "list_policy_audit",
+        "assign_policy_profile",
+        "clear_policy_assignment",
+        "get_policy_assignment",
+        "list_policy_assignments",
+        "resolve_effective_policy",
+        "resolve_gateway_control",
+        "list_block_alerts",
+        "get_block_alert",
+        "alert_summary",
+        "mark_block_alert_read",
+        "acknowledge_block_alert",
     )
 
 
@@ -423,16 +446,26 @@ def load_workspace_runtime(
 # ---------------------------------------------------------------------------
 
 
-def _ws_error(request: Request, code: str, status: int, message: str | None = None):
+def _ws_error(
+    request: Request,
+    code: str,
+    status: int,
+    message: str | None = None,
+    *,
+    details: dict[str, Any] | None = None,
+):
     request_id = getattr(request.state, "request_id", "req_unknown")
+    error: dict[str, Any] = {
+        "code": code,
+        "message": message or _ERROR_MESSAGES[code],
+        "request_id": request_id,
+    }
+    if details:
+        # Bounded, fixed server-side fields only (for example a safe block
+        # reason and the gateway turn request id).  Never raw prompt/output.
+        error.update(details)
     return JSONResponse(
-        {
-            "error": {
-                "code": code,
-                "message": message or _ERROR_MESSAGES[code],
-                "request_id": request_id,
-            }
-        },
+        {"error": error},
         status_code=status,
         headers=_COMMON_HEADERS,
     )
@@ -868,6 +901,29 @@ def register_workspace_routes(app: FastAPI, runtime: WorkspaceRuntime) -> None:
         response = _ok({"status": "ok"})
         _clear_session_cookie(response, request)
         return response
+
+    @app.get("/workspace/api/policy")
+    async def workspace_own_policy(request: Request):
+        guard = _request_guard(request, runtime)
+        if guard is not None:
+            return guard
+        _token, user, _source, error = await _resolve_principal(
+            request, app, runtime
+        )
+        if error is not None:
+            return error
+        # This endpoint is deliberately self-only.  Any query value (including
+        # ``user_id``) is rejected rather than interpreted, so a caller cannot
+        # preview another principal's effective policy.
+        if request.query_params.multi_items():
+            return _ws_error(request, "INVALID_REQUEST", 400)
+        try:
+            result = await _db_call(
+                app, runtime.store.resolve_effective_policy, user["id"]
+            )
+        except Exception as exc:
+            return _store_error(request, exc)
+        return _ok(result)
 
     @app.get("/workspace/api/me")
     async def workspace_me(request: Request):
@@ -1314,6 +1370,12 @@ def register_workspace_routes(app: FastAPI, runtime: WorkspaceRuntime) -> None:
             max_tokens=max_tokens,
         )
 
+    # Admin policy and block-alert routes live in a dedicated module.  The
+    # import is local because that module imports these shared guards.
+    from .workspace_admin_http import register_admin_policy_routes
+
+    register_admin_policy_routes(app, runtime)
+
 
 def _turn_error(exc: BaseException) -> dict[str, Any]:
     if isinstance(exc, Conflict):
@@ -1329,6 +1391,121 @@ def _turn_error(exc: BaseException) -> dict[str, Any]:
     return {"status": 503, "code": "UNAVAILABLE"}
 
 
+def _gateway_handle(
+    gateway: Gateway,
+    *,
+    internal_key: str,
+    body: dict[str, Any],
+    scan_context: ScanContext,
+    control: GatewayControl,
+):
+    """Call the real Gateway with an explicit control, or a legacy test double.
+
+    A configured ``Gateway`` (and any subclass override) must accept the
+    ``control`` keyword.  Only an instance-level synthetic replacement that has
+    no control parameter is supported without one; that path is for legacy test
+    doubles and can never be taken by the configured real gateway.
+    """
+
+    handle = gateway.handle
+    headers = {"Authorization": f"Bearer {internal_key}"}
+    if isinstance(gateway, Gateway) and getattr(handle, "__func__", None) is Gateway.handle:
+        return handle(
+            "POST",
+            "/v1/chat/completions",
+            headers,
+            body,
+            scan_context=scan_context,
+            control=control,
+        )
+    try:
+        parameters = inspect.signature(handle).parameters
+    except (TypeError, ValueError):
+        raise TypeError("gateway control is unsupported") from None
+    if "control" in parameters:
+        return handle(
+            "POST",
+            "/v1/chat/completions",
+            headers,
+            body,
+            scan_context=scan_context,
+            control=control,
+        )
+    if isinstance(gateway, Gateway) and getattr(handle, "__func__", None) is not None:
+        # A configured Gateway subclass that drops the control argument would
+        # bypass per-principal enforcement, so it fails closed.
+        raise TypeError("gateway control is unsupported")
+    return handle(
+        "POST",
+        "/v1/chat/completions",
+        headers,
+        body,
+        scan_context=scan_context,
+    )
+
+
+def _known_gateway_block(payload: Any) -> tuple[dict[str, str], str] | None:
+    """Return the exact fixed block detail and gateway request id, else ``None``.
+
+    The payload must be a real ``POLICY_BLOCK`` whose ``block`` object equals
+    :func:`controls.block_detail` for a known reason code.  No classifier text,
+    title, stage or extra field from the gateway is trusted or forwarded.
+    """
+
+    if not isinstance(payload, dict):
+        return None
+    error_body = payload.get("error")
+    if not isinstance(error_body, dict) or error_body.get("code") != "POLICY_BLOCK":
+        return None
+    block = error_body.get("block")
+    if not isinstance(block, dict):
+        return None
+    reason_code = block.get("reason_code")
+    if not isinstance(reason_code, str):
+        return None
+    try:
+        expected = block_detail(reason_code)
+    except (KeyError, TypeError, ValueError):
+        return None
+    if set(block) != set(expected) or any(
+        block.get(field) != value for field, value in expected.items()
+    ):
+        return None
+    request_id = error_body.get("request_id")
+    if (
+        not isinstance(request_id, str)
+        or not 1 <= len(request_id) <= 128
+        or any(ord(char) < 32 or ord(char) == 127 for char in request_id)
+    ):
+        return None
+    return expected, request_id
+
+
+def _safe_turn_block(value: Any) -> dict[str, str] | None:
+    """Rebuild only the fixed client-safe block fields plus its reference."""
+
+    if not isinstance(value, dict):
+        return None
+    reason_code = value.get("reason_code")
+    reference = value.get("ref")
+    if not isinstance(reason_code, str) or not isinstance(reference, str):
+        return None
+    try:
+        expected = block_detail(reason_code)
+    except (KeyError, TypeError, ValueError):
+        return None
+    if set(value) != set(expected) | {"ref"}:
+        return None
+    if any(value.get(field) != detail for field, detail in expected.items()):
+        return None
+    if (
+        not 1 <= len(reference) <= 128
+        or any(ord(char) < 32 or ord(char) == 127 for char in reference)
+    ):
+        return None
+    return {**expected, "ref": reference}
+
+
 def _record_turn_failure(
     store: Any,
     owner_id: str,
@@ -1338,21 +1515,30 @@ def _record_turn_failure(
     outcome: str,
     error_code: str,
     request_id: str | None = None,
+    alert: dict[str, Any] | None = None,
 ) -> bool:
     """Persist the original prompt as failed, else close the lease.
 
     The encrypted prompt is always recorded so an authorised reviewer can see
-    what was asked; no assistant text is ever stored for a failed turn.
+    what was asked; no assistant text is ever stored for a failed turn.  A
+    blocked turn may carry bounded alert metadata, which the store commits in
+    the same transaction.  The return value tells the caller whether the write
+    committed so it can fail closed instead of claiming success.
     """
+    kwargs: dict[str, Any] = {
+        "user_prompt": text,
+        "outcome": outcome,
+        "request_id": request_id,
+        "error_code": error_code,
+    }
+    if alert is not None:
+        kwargs["alert"] = alert
     try:
         store.record_failed_turn(
             owner_id,
             conversation_id,
             lease["token"],
-            user_prompt=text,
-            outcome=outcome,
-            request_id=request_id,
-            error_code=error_code,
+            **kwargs,
         )
         return True
     except Exception:
@@ -1469,8 +1655,13 @@ def _run_turn_pipeline(
     except Exception as exc:
         return _turn_error(exc)
 
-    def fail(outcome: str, error_code: str, request_id: str | None = None) -> None:
-        _record_turn_failure(
+    def fail(
+        outcome: str,
+        error_code: str,
+        request_id: str | None = None,
+        alert: dict[str, Any] | None = None,
+    ) -> bool:
+        return _record_turn_failure(
             store,
             owner_id,
             conversation_id,
@@ -1479,6 +1670,7 @@ def _run_turn_pipeline(
             outcome,
             error_code,
             request_id,
+            alert,
         )
 
     # Revalidate the session inside the worker, immediately before provider
@@ -1491,6 +1683,19 @@ def _run_turn_pipeline(
         fail("failed", "UNAUTHORIZED")
         return {"status": 401, "code": "UNAUTHORIZED"}
     except Exception:
+        fail("failed", "UNAVAILABLE")
+        return {"status": 503, "code": "UNAVAILABLE"}
+
+    # Resolve a fresh immutable control for the authenticated owner from the
+    # committed policy rows.  It is never cached and never derived from the
+    # request.  Corrupt or unavailable policy fails closed before any provider
+    # call.
+    try:
+        control = store.resolve_gateway_control(owner_id)
+    except Exception:
+        fail("failed", "UNAVAILABLE")
+        return {"status": 503, "code": "UNAVAILABLE"}
+    if not isinstance(control, GatewayControl):
         fail("failed", "UNAVAILABLE")
         return {"status": 503, "code": "UNAVAILABLE"}
 
@@ -1568,12 +1773,12 @@ def _run_turn_pipeline(
         "max_tokens": max_tokens,
     }
     try:
-        status, payload = gateway.handle(
-            "POST",
-            "/v1/chat/completions",
-            {"Authorization": f"Bearer {internal_key}"},
-            gateway_body,
+        status, payload = _gateway_handle(
+            gateway,
+            internal_key=internal_key,
+            body=gateway_body,
             scan_context=scan_context,
+            control=control,
         )
     except Exception:
         fail("failed", "UNAVAILABLE")
@@ -1631,19 +1836,52 @@ def _run_turn_pipeline(
             code = error_body.get("code")
             payload_request_id = error_body.get("request_id")
     clean_code = code if isinstance(code, str) and len(code) <= 64 else "UNAVAILABLE"
-    outcome = "blocked" if status == 403 else "failed"
-    fail(
-        outcome,
-        clean_code,
-        payload_request_id if isinstance(payload_request_id, str) else None,
+    safe_request_id = (
+        payload_request_id
+        if isinstance(payload_request_id, str)
+        and 1 <= len(payload_request_id) <= 128
+        else None
     )
 
     if status == 403:
+        # Only an exact, known POLICY_BLOCK may become a persisted alert.  A
+        # malformed or unknown block (or one that does not match the fixed
+        # detail table) fails closed without releasing anything.
+        parsed = _known_gateway_block(payload)
+        if parsed is None:
+            fail("failed", "UNAVAILABLE", safe_request_id)
+            return {"status": 503, "code": "UNAVAILABLE"}
+        block, block_request_id = parsed
+        try:
+            alert = {
+                "stage": block["stage"],
+                "reason_code": block["reason_code"],
+                "revision": control.revision,
+                "digest": control.digest,
+                "sources": control.metadata()["sources"],
+            }
+        except Exception:
+            fail("failed", "UNAVAILABLE", block_request_id)
+            return {"status": 503, "code": "UNAVAILABLE"}
+        if not fail(
+            "blocked",
+            "POLICY_BLOCK",
+            block_request_id,
+            alert=alert,
+        ):
+            # The blocked prompt and alert are one transaction.  Never claim a
+            # block was recorded when that transaction did not commit.
+            return {"status": 503, "code": "UNAVAILABLE"}
         return {
             "status": 403,
             "code": "FORBIDDEN",
-            "message": "Request did not pass safety checks.",
+            "message": block["title"],
+            "block": {**block, "ref": block_request_id},
+            "turn_request_id": block_request_id,
         }
+
+    fail("failed", clean_code, safe_request_id)
+
     if status == 413:
         return {
             "status": 413,
@@ -1672,7 +1910,21 @@ def _turn_response(request: Request, result: Any):
     code = result.get("code")
     if not isinstance(code, str) or code not in _ERROR_MESSAGES:
         code = "UNAVAILABLE" if status == 503 else "INVALID_REQUEST"
-    return _ws_error(request, code, status, result.get("message"))
+    message = result.get("message")
+    if not isinstance(message, str) or len(message) > 200:
+        message = None
+    details = None
+    if status == 403:
+        block = _safe_turn_block(result.get("block"))
+        reference = result.get("turn_request_id")
+        if (
+            block is not None
+            and isinstance(reference, str)
+            and 1 <= len(reference) <= 128
+            and not any(ord(char) < 32 or ord(char) == 127 for char in reference)
+        ):
+            details = {"block": block, "turn_request_id": reference}
+    return _ws_error(request, code, status, message, details=details)
 
 
 async def _run_turn(

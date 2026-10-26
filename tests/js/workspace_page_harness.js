@@ -370,6 +370,15 @@ const PROFILE = {
     policy_token_budget: 512,
   },
 };
+const DEFAULT_POLICY = {
+  is_default: true,
+  input_check_enabled: true,
+  output_check_enabled: true,
+  input_masks: [],
+  output_masks: [],
+};
+const EMPTY_ALERT_SUMMARY = { total: 0, unread: 0, acknowledged: 0 };
+
 const BOB_PROFILE = {
   user: {
     id: "user-bob",
@@ -487,6 +496,27 @@ async function signIn(app, profile, username) {
   }
   assert(app.elementFor("workspace-view").hidden === false,
     "a confirmed profile must reveal the workspace");
+}
+
+async function settleSummarySurfaces(app) {
+  // The page reads its own effective policy and, for an administrator, the
+  // alert count only after the initial history and readiness reads settle.
+  // Both consume bounded admission slots, so settle them before a scenario
+  // starts exercising admin list admission.
+  const policy = app.pendingCallsMatching("/workspace/api/policy").filter(
+    (call) => call.url === "/workspace/api/policy"
+  ).pop();
+  if (policy) {
+    policy.respond(DEFAULT_POLICY, 200);
+    await settle();
+  }
+  const alertSummary = app.pendingCallsMatching(
+    "/workspace/api/admin/alerts/summary"
+  ).pop();
+  if (alertSummary) {
+    alertSummary.respond(EMPTY_ALERT_SUMMARY, 200);
+    await settle();
+  }
 }
 
 async function scenarioSignInAndChat() {
@@ -1242,9 +1272,21 @@ async function scenarioAdmin() {
   await signIn(app, adminProfile);
   app.lastMatching("/workspace/api/conversations?limit=25").respond({ items: [], next: null }, 200);
   await settle();
+  await settleSummarySurfaces(app);
   assert(app.elementFor("tab-admin").hidden === false, "admin tab must appear for an admin role");
-  assert(app.callsMatching("/workspace/api/admin").length === 0,
-    "admin data must not be fetched before the admin view opens");
+  const adminReadsBeforeOpen = app.callsMatching("/workspace/api/admin");
+  assert(
+    adminReadsBeforeOpen.length === 1 &&
+      adminReadsBeforeOpen[0].url === "/workspace/api/admin/alerts/summary",
+    "only the alert summary may be fetched before the admin view opens"
+  );
+  assert(
+    app.callsMatching("/workspace/api/admin/users").length === 0 &&
+      app.callsMatching("/workspace/api/admin/departments").length === 0 &&
+      app.callsMatching("/workspace/api/admin/review-grants").length === 0 &&
+      app.callsMatching("/workspace/api/admin/access-log").length === 0,
+    "admin data must not be fetched before the admin view opens"
+  );
 
   app.elementFor("tab-admin").dispatch("click");
   await settle();
@@ -1281,6 +1323,8 @@ async function scenarioAdmin() {
     },
     200
   );
+  await settle();
+  app.elementFor("admin-tab-access").dispatch("click");
   await settle();
   const grants = app.lastMatching("/workspace/api/admin/review-grants?limit=25");
   assert(grants, "the grant list request must follow the user list");
@@ -1456,6 +1500,7 @@ async function scenarioAdmin() {
     200
   );
   await settle();
+  await settleSummarySurfaces(app);
   assert(app.elementFor("admin-panel").hidden === false, "admin self-grant must keep the admin view visible");
   assert(app.elementFor("tab-review").hidden === false, "admin self-grant must expose the review tab");
 
@@ -1489,6 +1534,7 @@ async function scenarioAdmin() {
   );
   app.lastMatching("/workspace/api/me").respond(adminProfile, 200);
   await settle();
+  await settleSummarySurfaces(app);
   assert(app.elementFor("admin-panel").hidden === false, "revoked admin self-grant must keep the admin view visible");
   assert(app.elementFor("tab-review").hidden === true, "revoked admin self-grant must hide the review tab");
   assert(app.elementFor("review-panel").hidden === true, "revoked admin self-grant must keep review hidden");
@@ -1569,6 +1615,257 @@ async function scenarioAdmin() {
   assert(app.elementFor("department-name").value === "", "logout must destroy admin form fields");
   assert(app.elementFor("new-user-password").value === "", "logout must destroy password fields");
   assert(app.elementFor("workspace-view").hidden === true, "logout must hide the workspace");
+}
+
+async function scenarioAlertProfileFallbackAndAcknowledgement() {
+  const app = createApp();
+  await start(app);
+  const adminProfile = {
+    user: { ...ALICE_USER, id: "user-admin", username: "admin", full_name: "Ada Admin", role: "admin" },
+    department: { id: "dept-accounting", name: "Accounting" },
+    review_scope: null,
+    review_department_ids: [],
+    review_grants: [],
+  };
+  await signIn(app, adminProfile);
+  app.lastMatching("/workspace/api/conversations?limit=25").respond({ items: [], next: null }, 200);
+  await settle();
+  await settleSummarySurfaces(app);
+
+  const alertId = "alert:one";
+  const conversationId = "conv-secret-alert";
+  const fullDigest = "sha256:9f2c-full-control-digest";
+  const alertItem = {
+    id: alertId,
+    request_id: "req-alert-1",
+    user_id: "user-alice",
+    username: "alice",
+    full_name: "Alice Tan",
+    department_id: "dept-accounting",
+    department_name: "Accounting",
+    conversation_id: conversationId,
+    message_id: "msg-alert-1",
+    stage: "input",
+    reason_code: "PROMPT_SECRET",
+    reason_text: "Prompt contained a secret.",
+    control_revision: "profile:unloaded-profile:7",
+    control_digest: fullDigest,
+    control_sources: [
+      {
+        scope_type: "department",
+        scope_id: "dept-accounting",
+        profile_id: "profile-not-loaded",
+        revision: 7,
+      },
+    ],
+    created_at: 1700000300,
+    read: false,
+    read_at: null,
+    acknowledged: false,
+    acknowledged_at: null,
+  };
+  const userScopeAlert = {
+    ...alertItem,
+    id: "alert:user-scope",
+    request_id: "req-alert-2",
+    control_revision: "profile:unloaded-profile:1",
+    control_digest: "sha256:user-full-control-digest",
+    control_sources: [
+      {
+        scope_type: "user",
+        scope_id: "user-alice",
+        profile_id: "profile-not-loaded",
+        revision: 1,
+      },
+    ],
+  };
+  const workspaceScopeAlert = {
+    ...alertItem,
+    id: "alert:workspace-scope",
+    request_id: "req-alert-3",
+    control_revision: "profile:unloaded-profile:1",
+    control_digest: "sha256:workspace-full-control-digest",
+    control_sources: [
+      {
+        scope_type: "workspace",
+        scope_id: "workspace-main",
+        profile_id: "profile-not-loaded",
+        revision: 1,
+      },
+    ],
+  };
+
+  app.elementFor("alerts-bell").dispatch("click");
+  await settle();
+  const departments = app.lastMatching("/workspace/api/admin/departments?limit=25");
+  assert(departments, "opening the bell must load the department filter options");
+  const alerts = app.lastMatching("/workspace/api/admin/alerts?limit=50");
+  assert(alerts, "opening the bell must request the alert list");
+  assert(!app.lastMatching("/workspace/api/admin/users?limit=25"),
+    "the user filter list must wait for the department list");
+  assert(alerts.options.credentials === "same-origin", "alert reads must use cookie credentials");
+  assert(alerts.options.headers.Authorization === undefined, "alert reads must not use bearer auth");
+  assert(alerts.options.headers["X-Workspace-User"] === "user-admin",
+    "alert reads must name the current profile");
+  // The alert list is answered before either filter list, so the concise
+  // label must not depend on department or user lookups completing.
+  alerts.respond(
+    { items: [alertItem, userScopeAlert, workspaceScopeAlert], next: null },
+    200
+  );
+  await settle();
+
+  function alertRow(id) {
+    return app.elementFor("alert-list").children.find(
+      (child) => child.getAttribute("data-alert") === id
+    );
+  }
+
+  function conciseProfileText(row) {
+    const cell = row.children[4];
+    const details = cell.children.find((child) => child.tagName === "DETAILS");
+    assert(details, "alert profile must expose technical details");
+    return cell.textContent.replace(details.textContent, "");
+  }
+
+  const rendered = alertRow(alertId);
+  assert(rendered, "a valid input alert must render without a ReferenceError");
+  const rowText = rendered.textContent;
+  assert(rowText.indexOf("Prompt contained a secret.") >= 0, "alert reason missing");
+  assert(rowText.indexOf("Reference req-alert-1") >= 0, "alert request reference missing");
+  assert(rowText.indexOf("Unread") >= 0 && rowText.indexOf("Not acknowledged") >= 0,
+    "opening the bell must leave the alert unread and unacknowledged");
+  assert(rowText.indexOf("Department · Accounting · revision 7") >= 0,
+    "an unloaded control profile must fall back to concise scope and revision");
+  const profileCell = rendered.children[4];
+  const details = profileCell.children.find((child) => child.tagName === "DETAILS");
+  assert(details, "alert profile must expose technical details");
+  const profileSummary = conciseProfileText(rendered);
+  assert(profileSummary.indexOf("Department · Accounting · revision 7") >= 0,
+    "the concise profile summary must carry scope and revision");
+  assert(details.textContent.indexOf(fullDigest) >= 0,
+    "technical details must keep the full control digest");
+  assert(details.textContent.indexOf("profile:unloaded-profile:7") >= 0,
+    "technical details must keep the full control revision");
+  assert(profileSummary.indexOf(fullDigest) < 0,
+    "the full control digest must live only in technical details");
+  assert(profileSummary.indexOf(alertItem.control_revision) < 0,
+    "the full control revision must live only in technical details");
+  assert(conciseProfileText(alertRow(userScopeAlert.id)).indexOf(
+    "User · Alice Tan · revision 1") >= 0,
+    "a user-scope alert must use the alert's own name, not an unloaded filter lookup");
+  assert(conciseProfileText(alertRow(workspaceScopeAlert.id)).indexOf(
+    "Workspace · revision 1") >= 0,
+    "a workspace-scope alert must use the concise workspace label");
+  assert(findButton(rendered, "Mark read").disabled === false,
+    "opening the bell must not disable the manual read action");
+  assert(
+    app.callsMatching("/workspace/api/admin/alerts/").filter(
+      (call) => call.options.method === "POST"
+    ).length === 0,
+    "opening the bell must not mark any alert read"
+  );
+
+  departments.respond(
+    {
+      items: [{ id: "dept-accounting", name: "Accounting", created_at: 1700000000 }],
+      next: null,
+    },
+    200
+  );
+  await settle();
+
+  const users = app.lastMatching("/workspace/api/admin/users?limit=25");
+  assert(users, "the alert user filter must load after the department list");
+  users.respond(
+    {
+      items: [
+        { id: "user-alice", username: "alice", full_name: "Alice Tan", department_id: "dept-accounting", role: "employee", disabled: false, created_at: 1700000001 },
+      ],
+      next: null,
+    },
+    200
+  );
+  await settle();
+
+  findButton(rendered, "Acknowledge").dispatch("click");
+  const ackPath = "/workspace/api/admin/alerts/" + encodeURIComponent(alertId) + "/ack";
+  const ack = app.lastMatching(ackPath);
+  assert(ack, "Acknowledge must POST to the encoded alert id");
+  assert(ack.options.method === "POST", "Acknowledge must use POST");
+  assert(ack.options.body === "{}", "Acknowledge must send an empty JSON object");
+  assert(ack.options.headers["Content-Type"] === "application/json",
+    "Acknowledge must declare a JSON Content-Type");
+  assert(ack.options.credentials === "same-origin", "Acknowledge credentials changed");
+  assert(ack.options.headers["X-Workspace-User"] === "user-admin",
+    "Acknowledge must name the current profile");
+  assert(ack.options.headers.Authorization === undefined,
+    "Acknowledge must not use bearer auth");
+  ack.respond(
+    {
+      alert_id: alertId,
+      read: true,
+      read_at: 1700000400,
+      acknowledged: true,
+      acknowledged_at: 1700000400,
+    },
+    200
+  );
+  await settle();
+
+  const summaryRefresh = app.pendingCallsMatching("/workspace/api/admin/alerts/summary").pop();
+  assert(summaryRefresh, "Acknowledge must refresh the alert summary");
+  summaryRefresh.respond({ total: 1, unread: 0, acknowledged: 1 }, 200);
+  await settle();
+  const listRefresh = app.pendingCallsMatching("/workspace/api/admin/alerts?limit=50").pop();
+  assert(listRefresh, "Acknowledge must refresh the alert list");
+  listRefresh.respond(
+    {
+      items: [
+        {
+          ...alertItem,
+          read: true,
+          read_at: 1700000400,
+          acknowledged: true,
+          acknowledged_at: 1700000400,
+        },
+      ],
+      next: null,
+    },
+    200
+  );
+  await settle();
+
+  assert(app.elementFor("alert-summary").textContent.indexOf("0 unread") >= 0,
+    "acknowledging must decrease the unread alert count");
+  assert(app.elementFor("alerts-bell").getAttribute("aria-label").indexOf("0 unread") >= 0,
+    "the bell must report the decreased unread count");
+  const acknowledged = alertRow(alertId);
+  assert(acknowledged, "the acknowledged alert must stay rendered after refresh");
+  assert(acknowledged.textContent.indexOf("Acknowledged") >= 0,
+    "the acknowledged state must render");
+  assert(findButton(acknowledged, "Acknowledge").disabled === true,
+    "an acknowledged alert must not offer Acknowledge again");
+  assert(app.elementFor("alert-state").textContent.indexOf("Alert acknowledged.") >= 0,
+    "acknowledgement success must be reported");
+
+  const reviewCallsBefore = app.callsMatching("/workspace/api/review").length;
+  const conversationCallsBefore = app.callsMatching(conversationId).length;
+  findButton(acknowledged, "View conversation").dispatch("click");
+  await settle();
+  assert(app.elementFor("alert-detail").hidden === false,
+    "View conversation must show the explicit denial panel");
+  const denial = app.elementFor("alert-detail").textContent;
+  assert(denial.indexOf("No review permission") >= 0,
+    "an admin without review scope must see an explicit denial");
+  assert(denial.indexOf(conversationId.slice(0, 8)) >= 0,
+    "the denial must name the alert's conversation");
+  assert(app.elementFor("alert-state").textContent.indexOf("No review permission") >= 0,
+    "the denial must be reported in the alert status");
+  assert(app.callsMatching("/workspace/api/review").length === reviewCallsBefore,
+    "the denial must not request review content");
+  assert(app.callsMatching(conversationId).length === conversationCallsBefore,
+    "the denial must not request conversation content");
 }
 
 async function scenarioOwnNavigationFromAdmin() {
@@ -2551,6 +2848,7 @@ async function main() {
   await scenarioQueuedAuthChangeCannotRevealLoginProfile();
   await scenarioLogoutFailureIsRetryable();
   await scenarioAdmin();
+  await scenarioAlertProfileFallbackAndAcknowledgement();
   await scenarioOwnNavigationFromAdmin();
   await scenarioConversationListRetryAndPreservation();
   await scenarioListAttemptCannotOutliveIdentityChange();

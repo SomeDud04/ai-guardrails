@@ -45,18 +45,37 @@ class Redaction(NamedTuple):
     end: int
 
 
-def find_redactions(text: str) -> list[Redaction]:
+def _selected_recognizers(entity_types: tuple[str, ...] | list[str] | None):
+    if entity_types is None:
+        return _RECOGNIZERS
+    if isinstance(entity_types, str):
+        raise ValueError("entity type selection is invalid")
+    selected = tuple(entity_types)
+    if any(item not in ENTITY_TYPES for item in selected):
+        raise ValueError("entity type selection is invalid")
+    if len(set(selected)) != len(selected):
+        raise ValueError("entity type selection is invalid")
+    wanted = set(selected)
+    return tuple(item for item in _RECOGNIZERS if item[0] in wanted)
+
+
+def find_redactions(
+    text: str, entity_types: tuple[str, ...] | list[str] | None = None
+) -> list[Redaction]:
     """Return production redaction spans in original-text coordinates.
 
     The recognizers run in the same order as ``mask_text`` (email, phone, MyKad).
     Earlier replacements become mask tokens, which contain no characters the
     later recognizers match, so later spans still lie in untouched regions.
+    ``entity_types`` optionally narrows the recognizers for an explicit
+    administrator-selected mask policy; ``None`` preserves the original
+    all-recognizer behaviour.
     """
 
     current = text
     mapping = list(range(len(text)))
     redactions: list[Redaction] = []
-    for entity_type, pattern in _RECOGNIZERS:
+    for entity_type, pattern in _selected_recognizers(entity_types):
         matches = list(pattern.finditer(current))
         if not matches:
             continue
@@ -81,12 +100,18 @@ def find_redactions(text: str) -> list[Redaction]:
     return redactions
 
 
-def mask_text(text: str) -> str:
-    """Replace every detected span with its fixed placeholder."""
+def mask_text(
+    text: str, entity_types: tuple[str, ...] | list[str] | None = None
+) -> str:
+    """Replace every detected span with its fixed placeholder.
+
+    ``entity_types`` is optional and defaults to all three recognizers.  An
+    empty selection is a deliberate no-op.
+    """
 
     pieces: list[str] = []
     last = 0
-    for redaction in find_redactions(text):
+    for redaction in find_redactions(text, entity_types):
         pieces.append(text[last:redaction.start])
         pieces.append(MASK_TOKENS[redaction.entity_type])
         last = redaction.end

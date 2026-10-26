@@ -44,6 +44,7 @@ started in this workspace because Docker is not installed.** See
 | Generation transport | Implemented; not live-verified |
 | Docker image / Compose runtime | Authored, **not built or run here**; default image/stack stays lightweight and safe-unavailable; optional `compose.pilot.yaml` adds the guard image target, policy and local model mounts as configuration scaffolding only |
 | Employee workspace (`/workspace`) | Opt-in local subset for one organisation: username/password accounts, departments, encrypted saved conversations and explicit review grants. Store/HTTP/page tests pass locally; **real PostgreSQL, Docker, VM and guard acceptance remain pending**, and multi-customer/RAG/SSO/advanced department policy are deferred. Setup: [docs/workspace-setup.md](docs/workspace-setup.md) |
+| Workspace admin policies and block alerts | Administrator-authored profiles with workspace → department → user full-profile override, immutable pinned revisions, effective-user preview and in-app per-administrator block alerts are implemented and store/HTTP tested locally. An existing schema 2 workspace requires the explicit schema 3 migration and grant reapplication. See [docs/admin-policies.md](docs/admin-policies.md) |
 | LiteLLM routing | Deferred |
 | TLS ingress | Not present; localhost HTTP by default; optional trusted-LAN demo proxy exists (`compose.demo.yaml`) |
 
@@ -51,6 +52,16 @@ This is not a completed day-2 milestone and not a production pilot. Dated
 progress by timeline item, including code-versus-deployment evidence and the
 latest test baseline, is in
 [docs/development-progress.md](docs/development-progress.md).
+
+Workspace administrator policies and in-app alerts are documented in
+[docs/admin-policies.md](docs/admin-policies.md). The release changes only the
+opt-in `/workspace` path: administrators may relax the two model-safety checks
+or the `EMAIL`/`MY_PHONE`/`MYKAD` masks for a scope, while authentication,
+limits, literal deny phrases and audit ordering remain unconditional. The
+legacy direct `/v1/chat/completions` path keeps its existing defaults. An
+existing schema-2 workspace must complete the documented explicit schema-3
+migration and reapply grants before the new gateway becomes ready; preserving
+the database volume, key and mode overlays is mandatory.
 
 ## Local development
 
@@ -764,10 +775,14 @@ variables. The administrator DSN is not used by the gateway.
   The measured ASCII fixtures do not mean every non-ASCII character is rejected:
   preserved Python regexes use Unicode `\d` and `IGNORECASE`.
 - LiteLLM routing is deferred. No streaming, tools or multimodal input exists,
-  and there is no policy editor, hot reload or approval workflow. Policy
-  activation is one validated file selected server-side and read at
-  construction; a controlled restart is the only activation/rollback mechanism.
-  The optional `/admin` view only displays read-only event metadata and cannot
+  and the startup YAML policy still has no editor, hot reload, database policy
+  management or approval workflow. Its activation is one validated file
+  selected server-side and read at construction; a controlled restart is the
+  only activation/rollback mechanism. The separate workspace administrator
+  policy profiles in [docs/admin-policies.md](docs/admin-policies.md) can
+  change only per-user workspace model checks and PII masks, take effect on the
+  next workspace turn and cannot modify the startup YAML policy or the legacy
+  direct API. The optional `/admin` event view remains read-only and cannot
   change policy.
 - No live-data approval or deployment exists.
 

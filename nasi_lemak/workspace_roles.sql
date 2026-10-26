@@ -71,7 +71,13 @@ REVOKE ALL PRIVILEGES ON TABLE
     public.ws_review_grants,
     public.ws_conversations,
     public.ws_messages,
-    public.ws_access_log
+    public.ws_access_log,
+    public.ws_policy_profiles,
+    public.ws_policy_profile_revisions,
+    public.ws_policy_assignments,
+    public.ws_policy_audit,
+    public.ws_block_alerts,
+    public.ws_alert_state
 FROM nasi_lemak_workspace;
 
 -- Migration metadata is read-only to the runtime.
@@ -88,3 +94,18 @@ GRANT SELECT, INSERT, UPDATE ON TABLE public.ws_sessions TO nasi_lemak_workspace
 GRANT SELECT, INSERT, DELETE ON TABLE public.ws_review_grants TO nasi_lemak_workspace;
 GRANT SELECT, INSERT, UPDATE, DELETE ON TABLE public.ws_conversations TO nasi_lemak_workspace;
 GRANT SELECT, INSERT, DELETE ON TABLE public.ws_messages TO nasi_lemak_workspace;
+
+-- Policy administration.  Profiles may change only their optimistic-concurrency
+-- version/timestamp; revision rows are append-only and cannot be rewritten or
+-- erased.  The policy audit trail is likewise append-only.  Assignments are the
+-- one mutable scope mapping (set, update revision, or clear).
+GRANT SELECT, INSERT, UPDATE ON TABLE public.ws_policy_profiles TO nasi_lemak_workspace;
+GRANT SELECT, INSERT ON TABLE public.ws_policy_profile_revisions TO nasi_lemak_workspace;
+GRANT SELECT, INSERT, UPDATE, DELETE ON TABLE public.ws_policy_assignments TO nasi_lemak_workspace;
+GRANT SELECT, INSERT ON TABLE public.ws_policy_audit TO nasi_lemak_workspace;
+
+-- Block alerts are the immutable metadata record of a failed turn.  The runtime
+-- may append and read them but cannot rewrite or erase alert history.  Only the
+-- per-administrator read/acknowledgement state is mutable.
+GRANT SELECT, INSERT ON TABLE public.ws_block_alerts TO nasi_lemak_workspace;
+GRANT SELECT, INSERT, UPDATE ON TABLE public.ws_alert_state TO nasi_lemak_workspace;

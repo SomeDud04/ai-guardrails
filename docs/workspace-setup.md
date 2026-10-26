@@ -12,6 +12,11 @@ review access must be granted explicitly. Existing audit metadata cannot
 reconstruct prompts or answers that were never saved by this workspace; only
 conversations created after activation are available in `/workspace`.
 
+Administrator policy profiles and in-app block alerts are described in
+[docs/admin-policies.md](admin-policies.md). That document also contains the
+mandatory **schema-2 to schema-3** upgrade procedure for an existing workspace
+database; the short procedure below is for a new workspace installation.
+
 Chat context and reply bounds are shared with the gateway and documented in
 [docs/chat-limits.md](chat-limits.md). Full history remains saved, but only a
 recent complete-pair window is sent to the model, so omitted older details may
@@ -140,6 +145,15 @@ Run the packaged role script as the PostgreSQL operator. It creates the fixed
 elevated attributes or foreign membership, and grants only explicit privileges
 on the fixed `ws_*` tables. It creates no LOGIN account and contains no password.
 
+**For an existing schema-2 deployment, do not use the `db exec "$POSTGRES_DB"`
+form below unless the operator has confirmed that this is the actual workspace
+database.** If the workspace uses a separate database, apply the grants there
+with its own migration DSN. The upgrade also requires the explicit schema-3
+migration first, then a grant reapplication; follow
+[docs/admin-policies.md](admin-policies.md#upgrading-an-existing-schema-2-deployment)
+instead of this fresh-install section. Applying grants to the audit database is
+not a valid workaround.
+
 ```bash
 sudo docker compose \
   --env-file .secrets/compose.env \
@@ -149,6 +163,11 @@ sudo docker compose \
   sh -c 'psql -U "$POSTGRES_USER" -d "$POSTGRES_DB" -v ON_ERROR_STOP=1' \
   < nasi_lemak/workspace_roles.sql
 ```
+
+The packaged script is re-runnable because each fixed table is reset to exactly
+the listed privileges. The upgrade path uses a one-off gateway Python process
+reading the migration DSN inside the container, so a DSN is never passed in
+argv or an environment variable; that path wraps the script in one transaction.
 
 ## 5. Create the dedicated runtime LOGIN
 
@@ -334,9 +353,26 @@ and mode configuration and recreate the gateway as in section 6. Do not rerun
 the installer as an update and do not regenerate the key. The key, `.secrets/`
 files, named database volume and policy are preserved.
 
+**Existing schema-2 deployments cannot use only the rebuild/recreate update.**
+The new gateway requires workspace schema version 3. Before recreating it, stop
+only the gateway, back up the workspace database and key to private paths,
+preserve any VM-only patches before pulling, run the packaged `workspace_cli
+init` with the operator migration DSN and the **same** key, and reapply the
+packaged grants to the actual workspace database. Then recreate only the
+gateway and verify readiness, an existing login, an old conversation and the
+admin policy/alert panels. The full commands, including a one-off Python grant
+step that reads the DSN inside the container, are in
+[docs/admin-policies.md](admin-policies.md#upgrading-an-existing-schema-2-deployment).
+Do not use `docker compose down -v`, do not rerun `bootstrap-admin` and do not
+point the runtime at the migration DSN. Remove the temporary migration DSN only
+after verification, and keep the database/key backups private and outside Git.
+An older image does not accept schema 3, so a code rollback needs the
+pre-migration database backup.
+
 Manual deletion by an owner removes that conversation from the workspace; it
-does not remove PostgreSQL backups or any external backup copies. Backup
-retention and verified key escrow are operator responsibilities. Production
-HTTPS, multi-customer separation, SSO and advanced department policy remain
-deferred. Model guard acceptance is still pending; this runbook does not claim
-guard efficacy or production readiness.
+does not remove PostgreSQL backups or any external backup copies. Alert
+metadata is independent of the encrypted chat content and can remain after a
+chat is deleted. Backup retention and verified key escrow are operator
+responsibilities. Production HTTPS, multi-customer separation, SSO and advanced
+department policy remain deferred. Model guard acceptance is still pending;
+this runbook does not claim guard efficacy or production readiness.

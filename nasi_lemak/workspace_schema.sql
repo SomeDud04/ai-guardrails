@@ -94,6 +94,115 @@ CREATE TABLE IF NOT EXISTS ws_access_log (
     created_at DOUBLE PRECISION NOT NULL
 );
 
+-- Reusable, administrator-authored policy profiles.  A profile has a name only;
+-- its immutable settings live in ws_policy_profile_revisions.  ``version`` is
+-- the latest revision number and is used for optimistic concurrency.
+CREATE TABLE IF NOT EXISTS ws_policy_profiles (
+    id TEXT PRIMARY KEY,
+    name TEXT NOT NULL,
+    name_key TEXT NOT NULL UNIQUE,
+    version INTEGER NOT NULL CHECK (version >= 1),
+    created_by TEXT NOT NULL REFERENCES ws_users(id) ON DELETE RESTRICT,
+    created_at DOUBLE PRECISION NOT NULL,
+    updated_at DOUBLE PRECISION NOT NULL
+);
+
+-- Append-only revisions.  A rollback creates a new row copying the selected
+-- old settings; old rows are never updated or deleted.  Mask columns hold a
+-- canonical comma-separated subset of EMAIL,MY_PHONE,MYKAD (empty = none).
+CREATE TABLE IF NOT EXISTS ws_policy_profile_revisions (
+    id TEXT PRIMARY KEY,
+    profile_id TEXT NOT NULL REFERENCES ws_policy_profiles(id) ON DELETE CASCADE,
+    revision INTEGER NOT NULL CHECK (revision >= 1),
+    input_check_enabled INTEGER NOT NULL
+        CHECK (input_check_enabled IN (0, 1)),
+    output_check_enabled INTEGER NOT NULL
+        CHECK (output_check_enabled IN (0, 1)),
+    input_masks TEXT NOT NULL,
+    output_masks TEXT NOT NULL,
+    digest TEXT NOT NULL,
+    rollback_of INTEGER,
+    created_by TEXT NOT NULL REFERENCES ws_users(id) ON DELETE RESTRICT,
+    created_at DOUBLE PRECISION NOT NULL,
+    UNIQUE (profile_id, revision)
+);
+
+-- One assignment per explicit scope.  The scope columns are constrained so a
+-- workspace row cannot reference a user/department and vice versa.  The
+-- composite foreign key pins an assignment to an immutable revision.
+CREATE TABLE IF NOT EXISTS ws_policy_assignments (
+    id TEXT PRIMARY KEY,
+    scope_type TEXT NOT NULL
+        CHECK (scope_type IN ('workspace', 'department', 'user')),
+    scope_key TEXT NOT NULL,
+    department_id TEXT REFERENCES ws_departments(id) ON DELETE CASCADE,
+    user_id TEXT REFERENCES ws_users(id) ON DELETE CASCADE,
+    profile_id TEXT NOT NULL,
+    profile_revision INTEGER NOT NULL,
+    version INTEGER NOT NULL CHECK (version >= 1),
+    created_by TEXT NOT NULL REFERENCES ws_users(id) ON DELETE RESTRICT,
+    updated_by TEXT NOT NULL REFERENCES ws_users(id) ON DELETE RESTRICT,
+    created_at DOUBLE PRECISION NOT NULL,
+    updated_at DOUBLE PRECISION NOT NULL,
+    UNIQUE (scope_type, scope_key),
+    FOREIGN KEY (profile_id, profile_revision)
+        REFERENCES ws_policy_profile_revisions(profile_id, revision)
+        ON DELETE RESTRICT,
+    CHECK (
+        (scope_type = 'workspace' AND scope_key = 'workspace'
+            AND department_id IS NULL AND user_id IS NULL)
+        OR (scope_type = 'department' AND department_id IS NOT NULL
+            AND user_id IS NULL AND scope_key = department_id)
+        OR (scope_type = 'user' AND user_id IS NOT NULL
+            AND department_id IS NULL AND scope_key = user_id)
+    )
+);
+
+-- Immutable policy-administration history (names, scope ids and revision
+-- numbers only; never conversation or prompt text).
+CREATE TABLE IF NOT EXISTS ws_policy_audit (
+    id TEXT PRIMARY KEY,
+    actor_id TEXT NOT NULL,
+    action TEXT NOT NULL,
+    profile_id TEXT,
+    revision INTEGER,
+    scope_type TEXT,
+    scope_id TEXT,
+    detail TEXT,
+    created_at DOUBLE PRECISION NOT NULL
+);
+
+-- Persistent administrator alert metadata for a blocked turn.  The original
+-- prompt remains encrypted in ws_messages; this table deliberately has no
+-- prompt, response or classifier-verdict column.  request_id is unique so the
+-- blocked-turn write is idempotent.
+CREATE TABLE IF NOT EXISTS ws_block_alerts (
+    id TEXT PRIMARY KEY,
+    request_id TEXT NOT NULL UNIQUE,
+    user_id TEXT NOT NULL REFERENCES ws_users(id) ON DELETE CASCADE,
+    department_id TEXT NOT NULL REFERENCES ws_departments(id) ON DELETE RESTRICT,
+    conversation_id TEXT,
+    message_id TEXT,
+    stage TEXT NOT NULL CHECK (stage IN ('input', 'output')),
+    reason_code TEXT NOT NULL,
+    reason_text TEXT NOT NULL,
+    control_revision TEXT NOT NULL,
+    control_digest TEXT NOT NULL,
+    control_sources TEXT NOT NULL,
+    created_at DOUBLE PRECISION NOT NULL
+);
+
+-- Per-administrator read/acknowledgement state.  Absence of a row means unread
+-- for that administrator; one administrator cannot write another's row.
+CREATE TABLE IF NOT EXISTS ws_alert_state (
+    alert_id TEXT NOT NULL REFERENCES ws_block_alerts(id) ON DELETE CASCADE,
+    admin_id TEXT NOT NULL REFERENCES ws_users(id) ON DELETE CASCADE,
+    read_at DOUBLE PRECISION,
+    acknowledged_at DOUBLE PRECISION,
+    PRIMARY KEY (alert_id, admin_id),
+    CHECK (acknowledged_at IS NULL OR read_at IS NOT NULL)
+);
+
 CREATE INDEX IF NOT EXISTS idx_ws_users_department ON ws_users(department_id);
 CREATE INDEX IF NOT EXISTS idx_ws_sessions_user ON ws_sessions(user_id);
 CREATE INDEX IF NOT EXISTS idx_ws_review_grants_user ON ws_review_grants(user_id);
@@ -104,3 +213,17 @@ CREATE INDEX IF NOT EXISTS idx_ws_conversations_department
 CREATE INDEX IF NOT EXISTS idx_ws_messages_conversation
     ON ws_messages(conversation_id, position);
 CREATE INDEX IF NOT EXISTS idx_ws_access_log_created ON ws_access_log(created_at, id);
+CREATE INDEX IF NOT EXISTS idx_ws_policy_profile_revisions_profile
+    ON ws_policy_profile_revisions(profile_id, revision);
+CREATE INDEX IF NOT EXISTS idx_ws_policy_assignments_profile
+    ON ws_policy_assignments(profile_id, profile_revision);
+CREATE INDEX IF NOT EXISTS idx_ws_policy_audit_created
+    ON ws_policy_audit(created_at, id);
+CREATE INDEX IF NOT EXISTS idx_ws_block_alerts_created
+    ON ws_block_alerts(created_at, id);
+CREATE INDEX IF NOT EXISTS idx_ws_block_alerts_user
+    ON ws_block_alerts(user_id, created_at);
+CREATE INDEX IF NOT EXISTS idx_ws_block_alerts_department
+    ON ws_block_alerts(department_id, created_at);
+CREATE INDEX IF NOT EXISTS idx_ws_alert_state_admin
+    ON ws_alert_state(admin_id, alert_id);
