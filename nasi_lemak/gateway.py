@@ -15,15 +15,27 @@ from pathlib import Path
 from typing import Any
 
 from .audit import AuditStore, SqliteAuditStore
+from .generation import conservative_byte_budget
+from .guards import GuardInputLimit
+from .limits import ChatLimits
 from .pii import mask_text
+from .scan_context import ScanContext
 
 
-MAX_TOKEN_BUDGET = 512
+MAX_TOKEN_BUDGET = 32768
 MAX_APP_ID_LENGTH = 128
 MAX_POLICY_VERSION_LENGTH = 128
 MAX_DENY_PHRASES = 64
 MAX_DENY_PHRASE_LENGTH = 256
 _APP_ID = re.compile(r"[A-Za-z0-9][A-Za-z0-9._-]*\Z")
+
+
+class _InputLimit(Exception):
+    """Internal marker: the request exceeds the configured context budget."""
+
+
+class _ScanCancelled(Exception):
+    """Internal marker: the per-request scan context is cancelled/deadlined."""
 
 
 @dataclass(frozen=True)
@@ -160,6 +172,7 @@ class Gateway:
         key_digest: str | None = None,
         audit_store: AuditStore | None = None,
         app_id: str | None = None,
+        limits: ChatLimits | None = None,
     ):
         if key_digest is not None:
             if not isinstance(key_digest, str) or len(key_digest) != 64:
@@ -185,6 +198,11 @@ class Gateway:
         self.adapters = adapters
         if not isinstance(policy, Policy):
             raise ValueError("invalid policy")
+        if limits is None:
+            limits = ChatLimits.defaults()
+        elif not isinstance(limits, ChatLimits):
+            raise ValueError("invalid chat limits")
+        self.limits = limits
         if app_id is None:
             app_id = policy.app_id
         elif app_id != policy.app_id:
@@ -237,7 +255,7 @@ class Gateway:
         messages = {"INVALID_REQUEST": "Request is not supported.", "UNAUTHORIZED": "Authentication required.", "INPUT_LIMIT": "Request exceeds the supported input limit.", "UNAVAILABLE": "Required safety control is unavailable.", "POLICY_BLOCK": "Request did not pass safety checks."}
         return status, {"error": {"code": code, "message": messages[code], "request_id": request_id}}
 
-    def handle(self, method: str, path: str, headers: Any, body: Any):
+    def handle(self, method: str, path: str, headers: Any, body: Any, *, scan_context: ScanContext | None = None):
         request_id = "req_" + uuid.uuid4().hex
         if method != "POST" or path != "/v1/chat/completions":
             return self._error(404, "INVALID_REQUEST", request_id)
@@ -264,9 +282,17 @@ class Gateway:
             return self._error(503, "UNAVAILABLE", request_id)
         serialized = serialize_messages(messages)
         try:
+            if conservative_byte_budget(serialized) > self.limits.context_budget:
+                raise _InputLimit()
             count = self.adapters.count_tokens(serialized)
             if isinstance(count, bool) or not isinstance(count, int) or count < 0:
                 raise ValueError("invalid token count")
+        except _InputLimit:
+            try:
+                self._audit(request_id, "request_blocked", "blocked", "INPUT_LIMIT")
+            except Exception:
+                return self._error(503, "UNAVAILABLE", request_id)
+            return self._error(413, "INPUT_LIMIT", request_id)
         except Exception:
             self._terminal_best_effort(request_id, "failed", "UNAVAILABLE")
             return self._error(503, "UNAVAILABLE", request_id)
@@ -277,7 +303,16 @@ class Gateway:
                 return self._error(503, "UNAVAILABLE", request_id)
             return self._error(413, "INPUT_LIMIT", request_id)
         try:
-            result = self.adapters.scan_attack(serialized)
+            if scan_context is not None and scan_context.cancelled():
+                raise _ScanCancelled()
+            if scan_context is not None and getattr(
+                self.adapters, "supports_scan_context", False
+            ):
+                result = self.adapters.scan_attack(
+                    serialized, scan_context=scan_context
+                )
+            else:
+                result = self.adapters.scan_attack(serialized)
             if not isinstance(result, dict) or result.get("decision") not in ("allow", "block"):
                 raise ValueError("invalid attack result")
             if result["decision"] == "block":
@@ -288,14 +323,26 @@ class Gateway:
             if any(self.policy.denies(message["content"]) for message in messages):
                 self._audit(request_id, "request_blocked", "blocked", "POLICY_BLOCK")
                 return self._error(403, "POLICY_BLOCK", request_id)
+            # A cancelled/deadlined workspace request must not launch new
+            # inference after a successful scan.
+            if scan_context is not None and scan_context.cancelled():
+                raise _ScanCancelled()
             safe_messages = [{"role": message["role"], "content": mask_pii(message["content"])} for message in messages]
             output = self.adapters.generate(safe_messages, self.policy.model, max_tokens)
             if not isinstance(output, str):
                 raise ValueError("invalid generation result")
+        except GuardInputLimit:
+            try:
+                self._audit(request_id, "request_blocked", "blocked", "INPUT_LIMIT")
+            except Exception:
+                return self._error(503, "UNAVAILABLE", request_id)
+            return self._error(413, "INPUT_LIMIT", request_id)
         except Exception:
             self._terminal_best_effort(request_id, "failed", "UNAVAILABLE")
             return self._error(503, "UNAVAILABLE", request_id)
         try:
+            if scan_context is not None and scan_context.cancelled():
+                raise _ScanCancelled()
             contextual_scan = getattr(self.adapters, "scan_response", None)
             if callable(contextual_scan):
                 # Each request passes its own complete sanitized conversation.
@@ -335,11 +382,15 @@ class Gateway:
             return None
         if body.get("model") != self.policy.model or body.get("stream", False) is not False:
             return None
-        max_tokens = body.get("max_tokens", 256)
-        if isinstance(max_tokens, bool) or not isinstance(max_tokens, int) or not 1 <= max_tokens <= 256:
+        max_tokens = body.get("max_tokens", self.limits.default_reply_tokens)
+        if (
+            isinstance(max_tokens, bool)
+            or not isinstance(max_tokens, int)
+            or not 1 <= max_tokens <= self.limits.max_reply_tokens
+        ):
             return None
         messages = body.get("messages")
-        if not isinstance(messages, list) or not 1 <= len(messages) <= 16:
+        if not isinstance(messages, list) or not 1 <= len(messages) <= self.limits.context_messages:
             return None
         clean = []
         for message in messages:
@@ -349,7 +400,10 @@ class Gateway:
             if not isinstance(role, str) or role not in ("user", "assistant", "system") or not isinstance(content, str) or not content:
                 return None
             clean.append({"role": role, "content": content})
-        if len(serialize_messages(clean)) > 4096:
+        serialized = serialize_messages(clean)
+        # Finite memory bound before the conservative-unit budget check that
+        # runs after the audit start.  The configured budget is authoritative.
+        if len(serialized) > self.limits.context_budget:
             return "input_limit"
         return clean, max_tokens
 

@@ -114,8 +114,9 @@ Request rules:
 - Body is streamed and bounded by actual bytes, independent of
   `Content-Length`; the default ceiling is 64 KiB (configured maximum 4 MiB).
 - Invalid UTF-8, malformed JSON, duplicate keys, non-finite numbers, unknown
-  fields, a non-`pilot-local` model, `stream: true`, more than 16 messages, or
-  invalid roles/content all return a generic `400`.
+  fields, a non-`pilot-local` model, `stream: true`, more than the configured
+  context-message limit (default 32), or invalid roles/content all return a
+  generic `400`.
 - One complete body-read deadline applies; timeouts and overload return `503`.
 - A separate, absolute server-owned chat work deadline starts when
   `Gateway.handle` is dispatched. `make_app(chat_work_timeout=...)` defaults to
@@ -126,8 +127,8 @@ Request rules:
   unavailable and the safe 60 s default. This is an HTTP response deadline, not
   thread termination or a native model/guard/audit deadline.
 - Missing/invalid auth returns `401`; attack/output guard blocks return `403`;
-  oversized actual bytes, a serialized conversation over 4096 characters, or
-  token budget returns `413`.
+  oversized actual bytes, a serialized conversation over the configured context
+  budget (default 8192 conservative units), or policy token budget returns `413`.
 - Error bodies contain only a stable `code`, fixed generic `message` and
   `request_id`. Raw exception text, request content, credentials and DSNs are
   never returned or logged.
@@ -136,6 +137,11 @@ Request rules:
 
 The exact chat contract, including the unavailable-state semantics, is in
 `docs/api-contract.yaml`.
+
+Chat context and reply bounds use the four `NASI_LEMAK_CHAT_*` settings in
+[docs/chat-limits.md](docs/chat-limits.md). The workspace keeps full saved
+history but sends only a recent complete-pair window; the model may not remember
+omitted older details.
 
 ## Operator event view
 
@@ -303,7 +309,8 @@ If a reasoning-style model returns empty or whitespace `content` because its
 budget was spent on hidden reasoning, the client rejects it with the generic
 `generation endpoint returned no text content`. It never reads or returns
 `reasoning_content`, does not retry and does not increase the request budget.
-Use an adequate `max_tokens` (the gateway accepts at most 256 per request) and a
+Use an adequate `max_tokens` (the default maximum reply is 4096 tokens and the
+configurable ceiling is 8192; see [docs/chat-limits.md](docs/chat-limits.md)) and a
 provider model that returns ordinary assistant content. See
 [docs/hosted-guard-setup.md](docs/hosted-guard-setup.md) for the deployment
 troubleshooting note.

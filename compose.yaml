@@ -56,14 +56,22 @@ services:
       - "127.0.0.1:${GATEWAY_PORT:-8000}:8000"
     environment:
       # Server reads both secrets through its _FILE support.
-      NASI_LEMAK_AUDIT_DSN_FILE: /run/secrets/audit_dsn
-      NASI_LEMAK_APP_KEY_DIGEST_FILE: /run/secrets/app_key_digest
+      - NASI_LEMAK_AUDIT_DSN_FILE=/run/secrets/audit_dsn
+      - NASI_LEMAK_APP_KEY_DIGEST_FILE=/run/secrets/app_key_digest
       # Non-secret generation settings.  Empty values fail closed; the exact
       # model ID is intentionally unset until confirmed.
-      NASI_LEMAK_GENERATION_URL: ${NASI_LEMAK_GENERATION_URL:-}
-      NASI_LEMAK_GENERATION_MODEL: ${NASI_LEMAK_GENERATION_MODEL:-}
-      NASI_LEMAK_GENERATION_AUTH: ${NASI_LEMAK_GENERATION_AUTH:-}
-      NASI_LEMAK_GENERATION_ALLOW_INSECURE_HTTP: ${NASI_LEMAK_GENERATION_ALLOW_INSECURE_HTTP:-}
+      - NASI_LEMAK_GENERATION_URL=${NASI_LEMAK_GENERATION_URL:-}
+      - NASI_LEMAK_GENERATION_MODEL=${NASI_LEMAK_GENERATION_MODEL:-}
+      - NASI_LEMAK_GENERATION_AUTH=${NASI_LEMAK_GENERATION_AUTH:-}
+      - NASI_LEMAK_GENERATION_ALLOW_INSECURE_HTTP=${NASI_LEMAK_GENERATION_ALLOW_INSECURE_HTTP:-}
+      # Optional bounded chat context/reply limits.  These are bare
+      # pass-through entries: no default is hardcoded here, and unset values
+      # keep the validated application defaults documented in
+      # docs/chat-limits.md.  Mode/workspace overlays inherit them unchanged.
+      - NASI_LEMAK_CHAT_CONTEXT_MESSAGES
+      - NASI_LEMAK_CHAT_CONTEXT_BUDGET
+      - NASI_LEMAK_CHAT_DEFAULT_REPLY_TOKENS
+      - NASI_LEMAK_CHAT_MAX_REPLY_TOKENS
     secrets:
       - audit_dsn
       - app_key_digest

@@ -30,9 +30,10 @@ from nasi_lemak.guard_api import (
     InputGuardApiAdapter,
     Qwen3GuardOutputAdapter,
 )
-from nasi_lemak.guards import GuardError
+from nasi_lemak.guards import GuardError, GuardInputLimit
 from nasi_lemak.hosted_guards import (
     CLOUDFLARE_LLAMA_GUARD_MODEL,
+    GROQ_INPUT_MAX_AGGREGATE_UNITS,
     GROQ_INPUT_MAX_SERIALIZED_BYTES,
     GROQ_PROMPT_GUARD_MODEL,
     CloudflareLlamaGuardOutputAdapter,
@@ -425,18 +426,39 @@ class GroqInputAdapterTests(FixtureMixin):
                     adapter.scan_attack("user: hello"), {"decision": "allow"}
                 )
 
-    def test_long_input_is_rejected_before_http(self) -> None:
+    def test_long_input_beyond_aggregate_cap_is_rejected_before_http(self) -> None:
+        # The old whole-conversation 480-unit refusal is obsolete: long input is
+        # now segmented.  The finite aggregate cap is still a pre-HTTP limit.
         httpd = self.start_server()
         adapter = self.input_adapter(httpd)
-        with self.assertRaises(GuardError):
-            adapter.scan_attack("user: " + "x" * (GROQ_INPUT_MAX_SERIALIZED_BYTES + 1))
+        oversized = "user: " + "x" * (GROQ_INPUT_MAX_AGGREGATE_UNITS + 1)
+        with self.assertRaises(GuardInputLimit):
+            adapter.scan_attack(oversized)
         self.assertEqual(httpd.requests, [])
-        # Just under the budget still calls exactly once.
+        # Just under the per-window budget still calls exactly once.
         httpd.responder = lambda request: groq_payload("0.05")
         self.assertEqual(
             adapter.scan_attack("user: " + "x" * 400), {"decision": "allow"}
         )
         self.assertEqual(len(httpd.requests), 1)
+
+    def test_long_valid_input_is_scanned_in_multiple_windows(self) -> None:
+        httpd = self.start_server(lambda request: groq_payload("0.05"))
+        adapter = self.input_adapter(httpd)
+        serialized = "user: " + ("hello world " * 300)
+        self.assertEqual(adapter.scan_attack(serialized), {"decision": "allow"})
+        contents = [
+            request["json"]["messages"][0]["content"] for request in httpd.requests
+        ]
+        self.assertGreater(len(contents), 1)
+        self.assertEqual(contents[0][:7], "user: h")
+        self.assertTrue(serialized.startswith(contents[0]))
+        self.assertTrue(serialized.endswith(contents[-1]))
+        self.assertEqual(contents[-1][-12:], "hello world ")
+        for content in contents:
+            self.assertLessEqual(
+                adapter.count_tokens(content), GROQ_INPUT_MAX_SERIALIZED_BYTES
+            )
 
     def test_http_errors_bad_json_and_timeout_do_not_retry_or_leak(self) -> None:
         cases = [
@@ -689,7 +711,8 @@ class CloudflareOutputAdapterTests(FixtureMixin):
         base = [{"role": "user", "content": "hello"}]
         cases = [
             ([], "answer"),
-            ([{"role": "user", "content": str(index)} for index in range(17)], "answer"),
+            # 32 messages are now accepted; 33 remain rejected.
+            ([{"role": "user", "content": str(index)} for index in range(33)], "answer"),
             ([{"role": "tool", "content": "hello"}], "answer"),
             ([{"role": "user", "content": "hello", "extra": "field"}], "answer"),
             ([{"role": "user", "content": ""}], "answer"),
@@ -701,9 +724,33 @@ class CloudflareOutputAdapterTests(FixtureMixin):
             with self.subTest(messages=messages, output=output):
                 with self.assertRaises(GuardError):
                     adapter.scan_response(messages, output)
+        # The encoded input bound is now 64 KiB; just over it still fails.
         with self.assertRaises(GuardError):
-            adapter.scan_response([{"role": "user", "content": "x" * 17000}], "answer")
+            adapter.scan_response(
+                [{"role": "user", "content": "x" * (64 * 1024 + 1)}], "answer"
+            )
         self.assertEqual(httpd.requests, [])
+
+    def test_accepts_32_messages_and_64_kib_encoded_input(self) -> None:
+        httpd = self.start_server(
+            lambda request: chat_payload("safe", model=CLOUDFLARE_LLAMA_GUARD_MODEL)
+        )
+        adapter = self.output_adapter(httpd)
+        messages = [
+            {"role": "user" if index % 2 == 0 else "assistant", "content": "turn"}
+            for index in range(30)
+        ]
+        messages += [
+            {"role": "user", "content": "hello"},
+            {"role": "assistant", "content": "earlier"},
+        ]
+        self.assertEqual(adapter.scan_response(messages, "answer"), {"safe": True})
+        large_output = "x" * 60000
+        self.assertEqual(
+            adapter.scan_response([{"role": "user", "content": "hello"}], large_output),
+            {"safe": True},
+        )
+        self.assertEqual(len(httpd.requests), 2)
 
     def test_constructor_requires_exact_model(self) -> None:
         httpd = self.start_server()

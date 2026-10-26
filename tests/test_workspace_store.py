@@ -366,7 +366,7 @@ class WorkspaceStoreTest(unittest.TestCase):
                 self.alice["id"],
                 conv["id"],
                 lease["token"],
-                user_prompt="x" * 8193,
+                user_prompt="x" * 65537,
                 assistant_response=REPLY,
             )
         self.assertEqual(

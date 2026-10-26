@@ -361,6 +361,14 @@ const PROFILE = {
   review_scope: null,
   review_department_ids: [],
   review_grants: [],
+  chat_limits: {
+    context_messages: 32,
+    context_budget: 8192,
+    default_reply_tokens: 1024,
+    max_reply_tokens: 4096,
+    max_prompt_chars: 8192,
+    policy_token_budget: 512,
+  },
 };
 const BOB_PROFILE = {
   user: {
@@ -376,6 +384,14 @@ const BOB_PROFILE = {
   review_scope: null,
   review_department_ids: [],
   review_grants: [],
+  chat_limits: {
+    context_messages: 32,
+    context_budget: 8192,
+    default_reply_tokens: 1024,
+    max_reply_tokens: 4096,
+    max_prompt_chars: 8192,
+    policy_token_budget: 512,
+  },
 };
 
 function loginPayload(user) {
@@ -609,14 +625,27 @@ async function scenarioSignInAndChat() {
 
   const hostile = "Original <img src=x onerror=alert(1)> & </script> text";
   const composer = app.elementFor("composer");
+  const reply = app.elementFor("reply-length");
+  assert(reply.disabled === false, "reply length must be enabled with server limits");
+  assert(
+    reply.children.map((option) => option.value).join(",") === "256,1024,4096",
+    "reply length choices must stay within the configured server maximum"
+  );
+  assert(reply.value === "1024", "the configured server default must be selected");
+  assert(
+    composer.getAttribute("maxlength") === "8192",
+    "the textarea must use the server prompt limit"
+  );
+  reply.value = "4096";
   composer.value = hostile;
   app.elementFor("composer-form").dispatch("submit");
   const send = app.lastMatching("/workspace/api/conversations/conv-alpha-1234/messages");
   assert(send, "message request missing");
-  assert(
-    send.options.body === JSON.stringify({ text: hostile }),
-    "message payload must contain exactly the original prompt text"
-  );
+  const sendBody = JSON.parse(send.options.body);
+  assert(sendBody.text === hostile,
+    "message payload must contain exactly the original prompt text");
+  assert(sendBody.max_tokens === 4096,
+    "every message must carry the selected reply length");
   app.elementFor("composer-form").dispatch("submit");
   assert(
     app.callsMatching("/workspace/api/conversations/conv-alpha-1234/messages").length === 1,
@@ -2367,9 +2396,146 @@ async function scenarioAuthChangeRejectsStaleProfile() {
     "a changed cookie identity must clear drafts");
 }
 
+async function scenarioReplyLengthContextNoticeAndIdentityReset() {
+  const app = createApp();
+  await start(app);
+  const configured = {
+    ...PROFILE,
+    chat_limits: {
+      ...PROFILE.chat_limits,
+      default_reply_tokens: 700,
+      max_reply_tokens: 2048,
+    },
+  };
+  await signIn(app, configured);
+  const list = app.lastMatching("/workspace/api/conversations?limit=25");
+  list.respond(
+    {
+      items: [
+        { id: "conv-limit-a", created_at: 1700000100, updated_at: 1700000100 },
+        { id: "conv-limit-b", created_at: 1700000050, updated_at: 1700000050 },
+      ],
+      next: null,
+    },
+    200
+  );
+  await settle();
+  app.elementFor("conversation-list").children[0].dispatch("click");
+  app.lastMatching("/workspace/api/conversations/conv-limit-a").respond(
+    { id: "conv-limit-a", created_at: 1700000100, messages: [] },
+    200
+  );
+  await settle();
+
+  const reply = app.elementFor("reply-length");
+  assert(reply.disabled === false, "configured reply control must be enabled");
+  assert(
+    reply.children.map((option) => option.value).join(",") === "256,700,2048",
+    "unusual configured default and maximum must appear exactly"
+  );
+  assert(reply.value === "700", "the configured server default must be selected");
+  assert(
+    app.elementFor("composer").getAttribute("maxlength") === "8192",
+    "the textarea must follow max_prompt_chars rather than a hardcoded value"
+  );
+
+  reply.value = "2048";
+  app.elementFor("composer").value = "how much history?";
+  app.elementFor("composer-form").dispatch("submit");
+  const send = app.lastMatching("/workspace/api/conversations/conv-limit-a/messages");
+  assert(reply.children[0].textContent.indexOf("Short") === 0,
+    "the smallest reply option must be labelled Short");
+  assert(reply.children[1].textContent === "Standard (700 tokens)",
+    "the configured server default must be labelled Standard (700 tokens)");
+  assert(reply.children[2].textContent === "Longer (2048 tokens)",
+    "the server maximum must be labelled Longer (2048 tokens)");
+  assert(JSON.parse(send.options.body).max_tokens === 2048,
+    "the selected maximum must be posted");
+  send.respond(
+    {
+      content: "answer",
+      conversation_id: "conv-limit-a",
+      role: "assistant",
+      context: { selected_messages: 5, omitted_messages: 7 },
+    },
+    200
+  );
+  await settle();
+  app.lastMatching("/workspace/api/conversations/conv-limit-a").respond(
+    {
+      id: "conv-limit-a",
+      created_at: 1700000100,
+      messages: [
+        { id: "a1", role: "user", outcome: "allowed", text: "how much history?", created_at: 1700000101 },
+        { id: "a2", role: "assistant", outcome: "allowed", text: "answer", created_at: 1700000102 },
+      ],
+    },
+    200
+  );
+  await settle();
+  assert(
+    app.elementFor("context-notice").textContent.indexOf("7 older") >= 0,
+    "successful turn must report how many older messages were omitted"
+  );
+
+  // Same-user revalidation keeps a still-valid explicit choice even when the
+  // server's maximum grows.
+  app.window.dispatch("focus");
+  const check = app.lastMatching("/workspace/api/me");
+  check.respond(
+    {
+      ...configured,
+      chat_limits: { ...configured.chat_limits, max_reply_tokens: 4096 },
+    },
+    200
+  );
+  await settle();
+  assert(reply.value === "2048",
+    "same-user revalidation must preserve a valid reply choice");
+
+  // A delayed reply for the old chat must not paint the new chat notice or
+  // clear the new chat's draft.
+  app.elementFor("composer").value = "second question";
+  app.elementFor("composer-form").dispatch("submit");
+  const staleSend = app.lastMatching("/workspace/api/conversations/conv-limit-a/messages");
+  app.elementFor("conversation-list").children[1].dispatch("click");
+  app.lastMatching("/workspace/api/conversations/conv-limit-b").respond(
+    { id: "conv-limit-b", created_at: 1700000050, messages: [] },
+    200
+  );
+  await settle();
+  app.elementFor("composer").value = "draft B stays";
+  app.elementFor("composer").dispatch("input");
+  staleSend.respond(
+    { content: "late answer", context: { selected_messages: 9, omitted_messages: 99 } },
+    200
+  );
+  await settle();
+  assert(
+    app.elementFor("context-notice").textContent.indexOf("99") < 0,
+    "a stale reply must not paint the current chat context notice"
+  );
+  assert(app.elementFor("composer").value === "draft B stays",
+    "a stale reply must not clear the current chat draft");
+
+  // Identity changes reset the reply choice and the precise context notice.
+  app.window.dispatch("focus");
+  app.lastMatching("/workspace/api/me").respond(BOB_PROFILE, 200);
+  await settle();
+  assert(app.elementFor("reply-length").disabled === true,
+    "identity change must disable the previous reply control");
+  assert(app.elementFor("reply-length").value === "",
+    "identity change must clear the previous reply choice");
+  assert(
+    app.elementFor("context-notice").textContent.indexOf("7 older") < 0,
+    "identity change must clear the previous precise context count"
+  );
+}
+
 async function main() {
   await scenarioInitialRestoreWithholdsSurfaces();
   await scenarioSignInAndChat();
+  await scenarioReplyLengthContextNoticeAndIdentityReset();
   await scenarioReviewer();
   await scenarioReviewRevoked();
   await scenarioExpiredSession();

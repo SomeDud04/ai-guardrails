@@ -53,14 +53,14 @@ class GatewayTests(unittest.TestCase):
             request(max_tokens=True),
             request(max_tokens=0),
             request([{"role": "user", "content": ""}]),
-            request([{"role": "user", "content": "x"}] * 17),
+            request([{"role": "user", "content": "x"}] * 33),
         ]
         for body in invalid:
             with self.subTest(body=str(body)[:80]):
                 self.assertEqual(self.call(body)[0], 400)
 
     def test_oversized_character_budget_returns_input_limit(self):
-        status, body = self.call(request([{"role": "user", "content": "x" * 4097}]))
+        status, body = self.call(request([{"role": "user", "content": "x" * 8193}]))
         self.assertEqual(status, 413)
         self.assertEqual(body["error"]["code"], "INPUT_LIMIT")
 
@@ -148,7 +148,7 @@ class GatewayTests(unittest.TestCase):
         policy = self.gateway.policy
         self.assertEqual(len(policy.digest), 64)
         self.assertEqual(self.call(request())[0], 200)
-        self.assertEqual(self.adapters.generate_options, [("pilot-local", 256)])
+        self.assertEqual(self.adapters.generate_options, [("pilot-local", 1024)])
         response = self.call(request(max_tokens=17))
         self.assertEqual(response[0], 200)
         self.assertEqual(self.adapters.generate_options[-1], ("pilot-local", 17))

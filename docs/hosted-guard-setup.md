@@ -127,16 +127,27 @@ key file or HTTP call. Both hosted providers require `AUTH=bearer`; `none` is
 rejected for this pair. The input threshold is explicit and uncalibrated; the
 example uses `0.5`.
 
-## 4. Respect the complete-input size limit
+## 4. Respect the configured context and reply limits
 
-The Groq adapter sends the **complete serialized accepted conversation** as one
-user message, including every role, every turn and the `role: content` framing.
-That complete serialized text must fit the conservative 480-byte UTF-8 budget
-before any Groq request. This is a byte budget, not 480 user characters, not a
-token count and not a chunking allowance. Longer single prompts, or a
-multi-turn conversation whose accumulated serialized turns exceed the budget,
-fail closed with no HTTP request. The adapter does not tokenize, truncate or
-split input; a long-context design needs separate approval.
+The Groq adapter receives sequential bounded windows, not the whole saved
+conversation in one request. Each window is at most 480 conservative units
+including framing, with a 64-UTF-8-byte overlap, at most 128 segments and a
+32768 sum-of-window-units cap before any HTTP request. It also uses a 30 s
+deadline, request cancellation and the remaining timeout. Every window must be
+valid for the result to allow. A latest prompt that cannot fit the selected
+context returns `413`; a guard outage returns the existing generic `503`.
+
+More segments mean more provider requests, quota use and latency; this is not a
+detection or throughput guarantee. Cross-window semantic attack efficacy is
+unverified, and the overlapping lexical fixture is not live quality proof.
+Native and custom guards keep their own coverage, message and response caps;
+Groq chunking does not activate for them, so configure lower context/reply
+bounds if their limits are smaller.
+
+Existing policy files may still use `token_budget: 256`; larger Groq context
+requires a new explicitly reviewed policy version. See
+[docs/chat-limits.md](chat-limits.md) for the four chat settings and a reviewed
+`token_budget: 8192` example.
 
 ## 5. Data flow and approval status
 
@@ -162,12 +173,28 @@ container, never reads secret file contents, never contacts a provider and never
 prints the rendered configuration or child stderr. If your Docker socket requires
 `sudo`, prefix the preflight command with `sudo` as well.
 
+The commands below already place
+`--env-file .secrets/compose.chat-limits.env` after every existing env file.
+Before the first command, create that non-secret file only if it is absent, then
+edit it; never overwrite an existing file:
+
+```bash
+test -e .secrets/compose.chat-limits.env || \
+  cp docs/compose.chat-limits.env.example .secrets/compose.chat-limits.env
+chmod 600 .secrets/compose.chat-limits.env
+${EDITOR:-nano} .secrets/compose.chat-limits.env
+```
+
+The settings, mode-specific commands and a reviewed `token_budget: 8192` policy
+example are in [docs/chat-limits.md](chat-limits.md).
+
 Without the workspace or demo ingress:
 
 ```bash
 python3 scripts/check_hosted_setup.py \
   --env-file .secrets/compose.env \
   --env-file .secrets/compose.hosted-guards.env \
+  --env-file .secrets/compose.chat-limits.env \
   -f compose.yaml -f compose.api.yaml
 ```
 
@@ -179,6 +206,7 @@ python3 scripts/check_hosted_setup.py \
   --env-file .secrets/compose.hosted-guards.env \
   --env-file .secrets/compose.workspace.env \
   --env-file .secrets/compose.demo.env \
+  --env-file .secrets/compose.chat-limits.env \
   -f compose.yaml -f compose.api.yaml -f compose.workspace.yaml -f compose.demo.yaml
 ```
 
@@ -202,12 +230,14 @@ Without the workspace or demo ingress:
 sudo docker compose \
   --env-file .secrets/compose.env \
   --env-file .secrets/compose.hosted-guards.env \
+  --env-file .secrets/compose.chat-limits.env \
   -f compose.yaml -f compose.api.yaml \
   build gateway
 
 sudo docker compose \
   --env-file .secrets/compose.env \
   --env-file .secrets/compose.hosted-guards.env \
+  --env-file .secrets/compose.chat-limits.env \
   -f compose.yaml -f compose.api.yaml \
   up -d --no-deps --force-recreate gateway
 ```
@@ -220,6 +250,7 @@ sudo docker compose \
   --env-file .secrets/compose.hosted-guards.env \
   --env-file .secrets/compose.workspace.env \
   --env-file .secrets/compose.demo.env \
+  --env-file .secrets/compose.chat-limits.env \
   -f compose.yaml -f compose.api.yaml -f compose.workspace.yaml -f compose.demo.yaml \
   build gateway nginx
 
@@ -228,6 +259,7 @@ sudo docker compose \
   --env-file .secrets/compose.hosted-guards.env \
   --env-file .secrets/compose.workspace.env \
   --env-file .secrets/compose.demo.env \
+  --env-file .secrets/compose.chat-limits.env \
   -f compose.yaml -f compose.api.yaml -f compose.workspace.yaml -f compose.demo.yaml \
   up -d --no-deps --force-recreate gateway nginx
 ```
@@ -324,6 +356,7 @@ left running is not deployment evidence:
 sudo docker compose \
   --env-file .secrets/compose.env \
   --env-file .secrets/compose.hosted-guards.env \
+  --env-file .secrets/compose.chat-limits.env \
   -f compose.yaml -f compose.api.yaml ps gateway
 
 # Record the actual built image ID, not just the tag.
@@ -333,6 +366,7 @@ sudo docker image inspect nasi-lemak-gateway:0.1.0 --format '{{.Id}}'
 container_id="$(sudo docker compose \
   --env-file .secrets/compose.env \
   --env-file .secrets/compose.hosted-guards.env \
+  --env-file .secrets/compose.chat-limits.env \
   -f compose.yaml -f compose.api.yaml ps -q gateway)"
 sudo docker inspect \
   --format '{{.Image}} {{.Created}} {{.State.StartedAt}}' \
@@ -367,8 +401,9 @@ If the generation provider returns empty or whitespace `content` while also
 returning a hidden `reasoning_content` field, the transport rejects it with the
 generic `generation endpoint returned no text content`. It never reads, returns
 or logs `reasoning_content`, and it does not retry or silently increase the token
-budget. Use an adequate generation budget (this gateway accepts a request
-`max_tokens` of at most 256) and a provider model that returns ordinary assistant
+budget. Use an adequate generation budget (the default maximum reply is 4096
+tokens and the configurable ceiling is 8192; see
+[docs/chat-limits.md](chat-limits.md)) and a provider model that returns ordinary assistant
 content. A budget consumed entirely by hidden reasoning can leave no visible
 answer even though the provider call succeeded.
 
@@ -378,8 +413,9 @@ acceptance**:
 
 - Groq must return one chat completion whose `model` is exactly
   `meta-llama/llama-prompt-guard-2-86m`, whose assistant content is a single
-  finite probability in `[0, 1]`, and whose `usage.prompt_tokens` is a positive
-  integer below 512.
+  finite probability in `[0, 1]`, and whose `usage.prompt_tokens` is a strict
+  integer with `0 < usage.prompt_tokens < 512` per window, independent of the
+  operator policy `token_budget`.
 - Cloudflare must return one completed non-streaming Llama Guard completion that
   echoes exactly `@cf/meta/llama-guard-3-8b`, with only canonical `safe` or
   `unsafe` plus S1..S14 categories.

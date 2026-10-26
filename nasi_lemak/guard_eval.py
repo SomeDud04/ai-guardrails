@@ -14,10 +14,11 @@ identifiers, labels, counts, generic error codes and timings only: never raw
 messages, candidate output, URLs, keys, headers or exception text.
 
 The dataset is fully validated before the first HTTP request, so a malformed
-late case cannot cause a partial run. Input cases use the gateway's conservative
-UTF-8 byte budget (512 bytes, including framing) before the classifier call; an
-over-budget case is reported as a separate ``INPUT_WINDOW`` error and is never
-sent. There is no retry, truncation or default-allow behaviour, and an invalid
+late case cannot cause a partial run. Input cases use the legacy custom
+classifier's fixed conservative budget (512 units, mirroring
+``INPUT_GUARD_MAX_TOKENS``, including framing) before the classifier call; this
+window is independent of the gateway's request policy ceiling. An over-budget
+case is reported as a separate ``INPUT_WINDOW`` error and is never sent. There is no retry, truncation or default-allow behaviour, and an invalid
 or timed-out guard reply is an error rather than a successful block.
 """
 
@@ -35,7 +36,7 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Mapping, Sequence
 
-from .gateway import MAX_TOKEN_BUDGET, serialize_messages
+from .gateway import serialize_messages
 from .generation import (
     GenerationClient,
     GenerationConfigError,
@@ -43,6 +44,7 @@ from .generation import (
 )
 from .guard_api import (
     INPUT_GUARD_CONTRACT_V1,
+    INPUT_GUARD_MAX_TOKENS,
     MAX_ENCODED_INPUT_BYTES,
     InputGuardApiAdapter,
     Qwen3GuardOutputAdapter,
@@ -76,6 +78,12 @@ ENV_INPUT_GUARD_CONTRACT = f"{INPUT_GUARD_ENV_PREFIX}_CONTRACT"
 ERROR_INPUT_WINDOW = "INPUT_WINDOW"
 ERROR_INPUT_API = "INPUT_API"
 ERROR_OUTPUT_API = "OUTPUT_API"
+
+# Fixed evaluation window for the legacy custom InputGuardApiAdapter preflight.
+# It mirrors that adapter's own ``max_input_tokens`` contract and is
+# deliberately independent of the gateway's generation request policy ceiling,
+# so a policy change cannot silently widen this classifier-only check.
+INPUT_EVAL_WINDOW_BUDGET = INPUT_GUARD_MAX_TOKENS
 
 
 class DatasetError(ValueError):
@@ -293,8 +301,12 @@ def input_serialized(case: GuardCase) -> str:
 
 
 def input_window_exceeded(case: GuardCase) -> bool:
-    """True when the conservative UTF-8 budget exceeds the gateway limit."""
-    return conservative_byte_budget(input_serialized(case)) > MAX_TOKEN_BUDGET
+    """True when the conservative budget exceeds the classifier eval window.
+
+    The window is the legacy custom classifier's fixed budget, not the
+    gateway's generation policy ceiling.
+    """
+    return conservative_byte_budget(input_serialized(case)) > INPUT_EVAL_WINDOW_BUDGET
 
 
 def _guard_threshold(value: Any) -> float:

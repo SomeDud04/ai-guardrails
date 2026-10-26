@@ -223,9 +223,12 @@ textarea:focus-visible { outline-offset: -2px; }
   border: 0; border-radius: 0; background: transparent;
 }
 .composer textarea:focus-visible { outline: none; }
-.composer-row { display: flex; align-items: flex-end; justify-content: flex-end; gap: var(--space-2); margin-top: var(--space-1); }
+.composer-row { display: flex; align-items: flex-end; justify-content: flex-end; flex-wrap: wrap; gap: var(--space-2); margin-top: var(--space-1); }
 .composer-hint { flex: 1 1 auto; min-width: 0; color: var(--muted-dim); font-size: .75rem; }
 .composer-row button { min-width: 76px; min-height: 32px; align-self: flex-end; }
+.reply-choice { display: flex; align-items: center; gap: var(--space-1); color: var(--muted); font-size: .75rem; white-space: nowrap; }
+.reply-choice select { width: auto; min-height: 32px; padding: 0 var(--space-2); font-size: .75rem; }
+.context-notice { margin: var(--space-2) 0 0; max-width: 72ch; color: var(--muted-dim); font-size: .75rem; overflow-wrap: anywhere; }
 .privacy-disclosure { margin-top: var(--space-2); color: var(--muted-dim); font-size: .75rem; }
 .privacy-disclosure summary { width: fit-content; cursor: pointer; color: var(--muted); list-style: none; }
 .privacy-disclosure summary::-webkit-details-marker { display: none; }
@@ -306,8 +309,10 @@ textarea:focus-visible { outline-offset: -2px; }
   .chat-actions button { padding: 0 var(--space-2); }
   .conversation-head h2 { font-size: .92rem; }
   .message-head { flex-wrap: wrap; }
-  .composer-row { gap: var(--space-2); }
+  .composer-row { gap: var(--space-2); align-items: stretch; }
   .composer-row button { min-width: 76px; }
+  .reply-choice { flex: 1 1 100%; justify-content: space-between; }
+  .reply-choice select { flex: 0 1 auto; min-width: 0; }
   .auth-view { width: calc(100% - 1.5rem); }
   .review-view, .admin-view { padding: var(--space-2) var(--space-3) var(--space-3); }
   .admin-card { padding: var(--space-3); }
@@ -329,6 +334,7 @@ _WORKSPACE_JS = """
   // The conversation list is a safe idempotent read.  Only transient read
   // failures are retried, and an exhausted retry leaves an explicit control.
   var LIST_RETRY_MS = [300, 800];
+  var GENERIC_CONTEXT_NOTICE = "Full saved history is kept. Older messages may be left out of a model request to fit the configured context.";
 
   function byId(id) { return document.getElementById(id); }
   var appEl = byId("app");
@@ -372,6 +378,8 @@ _WORKSPACE_JS = """
   var composer = byId("composer");
   var sendButton = byId("send");
   var composerHint = byId("composer-hint");
+  var replyLength = byId("reply-length");
+  var contextNotice = byId("context-notice");
   var reviewList = byId("review-list");
   var reviewState = byId("review-state");
   var reviewLoadMore = byId("review-load-more");
@@ -415,6 +423,8 @@ _WORKSPACE_JS = """
   var signedIn = false;
   var profile = null;
   var drafts = Object.create(null);
+  var chatLimits = null;
+  var selectedReplyTokens = null;
   var authChannel = null;
   var revalidating = false;
   var logoutBusy = false;
@@ -637,6 +647,13 @@ _WORKSPACE_JS = """
     logoutButton.textContent = "Sign out";
     revalidateRetry.hidden = true;
     composer.value = "";
+    composer.removeAttribute("maxlength");
+    clearNode(replyLength);
+    replyLength.value = "";
+    replyLength.disabled = true;
+    chatLimits = null;
+    selectedReplyTokens = null;
+    contextNotice.textContent = GENERIC_CONTEXT_NOTICE;
     clearNode(conversationList);
     clearNode(messagesEl);
     clearNode(reviewList);
@@ -700,6 +717,7 @@ _WORKSPACE_JS = """
       throw new Error("invalid profile");
     }
     var previous = profile;
+    var sameUser = !!(previous && previous.user && previous.user.id === data.user.id);
     profile = {
       user: data.user,
       department: data.department,
@@ -708,6 +726,8 @@ _WORKSPACE_JS = """
       reviewGrants: Array.isArray(data.review_grants) ? data.review_grants : []
     };
     signedIn = true;
+    if (!sameUser) { selectedReplyTokens = null; }
+    applyChatLimits(data.chat_limits);
     // A confirmed profile is the authoritative identity; a pending login or
     // failed sign-out identity is no longer needed.
     logoutExpectedUid = null;
@@ -1189,10 +1209,98 @@ _WORKSPACE_JS = """
     });
   });
 
+  function positiveInt(value) {
+    return typeof value === "number" && isFinite(value) &&
+      Math.floor(value) === value && value > 0 ? value : null;
+  }
+
+  function parseChatLimits(raw) {
+    if (!isObject(raw)) { return null; }
+    var maxReply = positiveInt(raw.max_reply_tokens);
+    var defaultReply = positiveInt(raw.default_reply_tokens);
+    var maxPrompt = positiveInt(raw.max_prompt_chars);
+    if (maxReply === null || defaultReply === null || maxPrompt === null) { return null; }
+    if (defaultReply > maxReply) { defaultReply = maxReply; }
+    return {
+      maxReplyTokens: maxReply,
+      defaultReplyTokens: defaultReply,
+      maxPromptChars: maxPrompt,
+      contextMessages: positiveInt(raw.context_messages),
+      contextBudget: positiveInt(raw.context_budget),
+      policyTokenBudget: positiveInt(raw.policy_token_budget)
+    };
+  }
+
+  function applyChatLimits(raw) {
+    var next = parseChatLimits(raw);
+    chatLimits = next;
+    clearNode(replyLength);
+    replyLength.value = "";
+    if (!next) {
+      selectedReplyTokens = null;
+      replyLength.disabled = true;
+      composer.removeAttribute("maxlength");
+      return;
+    }
+    composer.setAttribute("maxlength", String(next.maxPromptChars));
+    var current = positiveInt(selectedReplyTokens);
+    if (current !== null && current > next.maxReplyTokens) { current = null; }
+    selectedReplyTokens = current;
+    var short = Math.min(next.defaultReplyTokens, 256);
+    var values = [];
+    var candidates = [short, next.defaultReplyTokens, next.maxReplyTokens];
+    for (var i = 0; i < candidates.length; i += 1) {
+      var value = positiveInt(candidates[i]);
+      if (value !== null && value <= next.maxReplyTokens && values.indexOf(value) < 0) {
+        values.push(value);
+      }
+    }
+    if (selectedReplyTokens !== null && values.indexOf(selectedReplyTokens) < 0) {
+      values.push(selectedReplyTokens);
+    }
+    values.sort(function (left, right) { return left - right; });
+    for (var index = 0; index < values.length; index += 1) {
+      var tokenValue = values[index];
+      var label = tokenValue === next.defaultReplyTokens ? "Standard" :
+        tokenValue === next.maxReplyTokens ? "Longer" :
+        tokenValue === short ? "Short" : "Selected";
+      var option = document.createElement("option");
+      option.value = String(tokenValue);
+      option.textContent = label + " (" + tokenValue + " tokens)";
+      replyLength.appendChild(option);
+    }
+    if (selectedReplyTokens === null || values.indexOf(selectedReplyTokens) < 0) {
+      selectedReplyTokens = next.defaultReplyTokens;
+    }
+    replyLength.value = String(selectedReplyTokens);
+    replyLength.disabled = false;
+  }
+
+  function contextNoticeText(context) {
+    if (isObject(context)) {
+      var selected = positiveInt(context.selected_messages);
+      var omitted = typeof context.omitted_messages === "number" &&
+        isFinite(context.omitted_messages) && context.omitted_messages >= 0
+        ? context.omitted_messages : null;
+      if (selected !== null && omitted !== null) {
+        if (omitted > 0) {
+          return "Full saved history is kept. The latest model request included " +
+            selected + " messages; " + omitted + " older saved " +
+            (omitted === 1 ? "message was" : "messages were") +
+            " not included to fit the configured context.";
+        }
+        return "Full saved history is kept. The latest model request included all " +
+          selected + " messages.";
+      }
+    }
+    return GENERIC_CONTEXT_NOTICE;
+  }
+
   function updateComposer() {
     var ready = !!(signedIn && currentConversation);
     composer.disabled = !ready || sending;
     sendButton.disabled = !ready || sending;
+    replyLength.disabled = !ready || sending || !chatLimits;
     composer.setAttribute(
       "placeholder",
       ready ? "Type your message…" : "Select or create a conversation to send a message."
@@ -1285,6 +1393,7 @@ _WORKSPACE_JS = """
       restoreDraft(id);
     }
     sending = false;
+    if (!settings.quiet) { contextNotice.textContent = GENERIC_CONTEXT_NOTICE; }
     deleteConfirm.hidden = true;
     clearNode(messagesEl);
     chatEmpty.hidden = true;
@@ -1374,6 +1483,16 @@ _WORKSPACE_JS = """
       return;
     }
     var conversationId = currentConversation.id;
+    var replyTokens = positiveInt(Number(replyLength.value));
+    if (replyTokens === null || !chatLimits || replyTokens > chatLimits.maxReplyTokens) {
+      replyTokens = positiveInt(selectedReplyTokens);
+    } else {
+      selectedReplyTokens = replyTokens;
+    }
+    var body = { text: text };
+    if (replyTokens !== null && chatLimits && replyTokens <= chatLimits.maxReplyTokens) {
+      body.max_tokens = replyTokens;
+    }
     var seq = chatSeq;
     var epoch = sessionEpoch;
     var send = ++sendSeq;
@@ -1383,7 +1502,7 @@ _WORKSPACE_JS = """
     setStatus(chatStatus, "Sending…");
     api("/workspace/api/conversations/" + encodeURIComponent(conversationId) + "/messages", {
       method: "POST",
-      body: JSON.stringify({ text: text })
+      body: JSON.stringify(body)
     }).then(function (result) {
       if (epoch !== sessionEpoch) { return; }
       if (send !== sendSeq) { return; }
@@ -1393,6 +1512,7 @@ _WORKSPACE_JS = """
       var message;
       var kind = "error";
       var keepText = false;
+      var noticeText = GENERIC_CONTEXT_NOTICE;
       if (result.timeout) {
         message = "Completion is uncertain: the request timed out and the server may still finish. Refresh this conversation before retrying; your text has been kept.";
         kind = "warning";
@@ -1405,6 +1525,7 @@ _WORKSPACE_JS = """
         message = "The message was blocked by the safety checks. The original prompt is saved with a Blocked label.";
         kind = "denied";
       } else if (result.ok) {
+        noticeText = contextNoticeText(result.data && result.data.context);
         message = "Answer received and saved.";
         kind = "ok";
       } else if (result.status === 409) {
@@ -1418,6 +1539,10 @@ _WORKSPACE_JS = """
       } else if (result.status === 503) {
         message = "The workspace could not confirm completion. The server may still finish; refresh before retrying.";
         kind = "warning";
+        keepText = true;
+      } else if (result.status === 413) {
+        message = "The latest message is over the configured input limit. Shorten it or ask an administrator about the workspace context budget. Your text has been kept.";
+        kind = "denied";
         keepText = true;
       } else if (result.status === 400 || result.status === 404) {
         message = serverMessage(result, "The message could not be sent.") + " Your text has been kept.";
@@ -1447,6 +1572,7 @@ _WORKSPACE_JS = """
         // this is a safe read of the first page and does not touch the current
         // conversation, its draft or the message transcript.
         loadConversations(true);
+        contextNotice.textContent = noticeText;
         if (reloaded) { setStatus(chatStatus, message, kind); }
         else if (!keepText) { composer.value = text; }
       });
@@ -1466,6 +1592,16 @@ _WORKSPACE_JS = """
     if (event.key === "Enter" && (event.ctrlKey || event.metaKey)) {
       event.preventDefault();
       submitMessage();
+    }
+  });
+
+  replyLength.addEventListener("change", function () {
+    var value = positiveInt(Number(replyLength.value));
+    if (chatLimits && value !== null && value <= chatLimits.maxReplyTokens) {
+      selectedReplyTokens = value;
+    } else if (chatLimits) {
+      selectedReplyTokens = chatLimits.defaultReplyTokens;
+      replyLength.value = String(selectedReplyTokens);
     }
   });
 
@@ -2556,6 +2692,8 @@ _WORKSPACE_JS = """
   deleteConfirm.hidden = true;
   composer.disabled = true;
   sendButton.disabled = true;
+  contextNotice.textContent = GENERIC_CONTEXT_NOTICE;
+  applyChatLimits(null);
   updateComposer();
   loadGuardStatus();
   restoreSession();
@@ -2669,11 +2807,15 @@ WORKSPACE_HTML = """<!doctype html>
 <div class="composer-wrap">
 <form id="composer-form" class="composer" novalidate>
 <label class="sr-only" for="composer">Message</label>
-<textarea id="composer" maxlength="4096" rows="2" disabled placeholder="Select or create a conversation to send a message."></textarea>
+<textarea id="composer" rows="2" disabled placeholder="Select or create a conversation to send a message."></textarea>
 <div class="composer-row">
+<label class="reply-choice" for="reply-length">Reply length
+<select id="reply-length" disabled></select>
+</label>
 <span id="composer-hint" class="composer-hint">Select or create a conversation to send a message.</span>
 <button id="send" class="primary" type="submit" disabled>Send</button>
 </div>
+<p id="context-notice" class="context-notice" role="status" aria-live="polite">Full saved history is kept. Older messages may be left out of a model request to fit the configured context.</p>
 </form>
 <details class="privacy-disclosure">
 <summary>Privacy and storage</summary>

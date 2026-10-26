@@ -12,13 +12,21 @@ review access must be granted explicitly. Existing audit metadata cannot
 reconstruct prompts or answers that were never saved by this workspace; only
 conversations created after activation are available in `/workspace`.
 
+Chat context and reply bounds are shared with the gateway and documented in
+[docs/chat-limits.md](chat-limits.md). Full history remains saved, but only a
+recent complete-pair window is sent to the model, so omitted older details may
+not be remembered.
+
 ## 0. Prerequisites
 
 - Existing checkout and Ubuntu Docker Compose v2 deployment.
 - The already-configured mode env files and secret files are in place, for
   example `.secrets/compose.env`, `.secrets/compose.test.env` (or
   `compose.pilot.env`) and, for the trusted-LAN demo, `.secrets/compose.demo.env`.
-  The commands below use the test-mode example. An existing API-mode deployment
+- Optional non-secret chat limits in `.secrets/compose.chat-limits.env`, added
+  after the existing env files. See [docs/chat-limits.md](chat-limits.md).
+
+The commands below use the test-mode example. An existing API-mode deployment
   with hosted guards must keep its own hosted API env file, guard env file and
   overlays exactly as documented in
   [docs/hosted-guard-setup.md](hosted-guard-setup.md); do not replace them with

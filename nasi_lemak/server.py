@@ -63,6 +63,7 @@ from .guard_api import (
     Qwen3GuardOutputAdapter,
     guard_client_config,
 )
+from .limits import ChatLimits, ChatLimitsError, has_explicit_env
 from .hosted_guards import (
     CLOUDFLARE_LLAMA_GUARD_MODEL,
     GROQ_PROMPT_GUARD_MODEL,
@@ -609,6 +610,31 @@ def make_adapters_from_env(
         return None
 
 
+def _clone_gateway_with_limits(gateway: Gateway, limits: ChatLimits) -> Gateway:
+    """Return an app-owned Gateway sharing the injected safety dependencies.
+
+    The injected object is never mutated: test fixtures and other applications
+    can keep using it with their original limits.
+    """
+    if not isinstance(gateway, Gateway):
+        raise ValueError("invalid gateway")
+    digest = getattr(gateway, "_key_digest", None)
+    if (
+        not getattr(gateway, "_key_valid", False)
+        or not isinstance(digest, (bytes, bytearray))
+        or len(digest) != 32
+    ):
+        raise ValueError("invalid gateway key")
+    return Gateway(
+        key_digest=bytes(digest).hex(),
+        audit_store=gateway.audit_store,
+        adapters=gateway.adapters,
+        policy=gateway.policy,
+        app_id=gateway.app_id,
+        limits=limits,
+    )
+
+
 def _build_runtime_gateway(
     environ: dict[str, str],
     app_key_digest: str | None,
@@ -616,6 +642,7 @@ def _build_runtime_gateway(
     adapters: Any,
     policy: Policy | None,
     app_id: str,
+    limits: ChatLimits | None = None,
 ) -> tuple[Gateway, bool, str]:
     config_ready = True
     activation = POLICY_ACTIVATION_UNAVAILABLE
@@ -687,6 +714,7 @@ def _build_runtime_gateway(
             adapters=adapters,
             policy=resolved,
             app_id=gateway_app_id,
+            limits=limits,
         )
     except Exception:
         config_ready = False
@@ -696,6 +724,7 @@ def _build_runtime_gateway(
             audit_store=UnreadyAuditStore(),
             adapters=None,
             policy=Policy(),
+            limits=limits,
         )
 
     if not _gateway_static_ready(gateway):
@@ -974,6 +1003,16 @@ def make_app(
     """
     env = os.environ if environ is None else environ
 
+    # Parse the shared chat limits exactly once.  An explicit invalid value is
+    # a configuration failure: the app stays live but not ready, so it can
+    # report the problem without ever silently substituting a wider window.
+    try:
+        chat_limits = ChatLimits.from_env(env)
+        chat_limits_ok = True
+    except ChatLimitsError:
+        chat_limits = ChatLimits.defaults()
+        chat_limits_ok = False
+
     numeric_ok = (
         _valid_positive_int(max_body_bytes, MAX_CONFIGURED_BODY_BYTES)
         and _valid_positive_float(body_read_timeout, MAX_CONFIGURED_BODY_READ_TIMEOUT)
@@ -992,10 +1031,21 @@ def make_app(
     runtime_writer_dsn = (
         _file_env("NASI_LEMAK_AUDIT_DSN", env) if audit_dsn is None else audit_dsn
     )
+    explicit_chat_limits = has_explicit_env(env)
     if gateway is not None:
         runtime_gateway = gateway
         config_ready = True
         policy_activation = POLICY_ACTIVATION_GATEWAY
+        if explicit_chat_limits and chat_limits_ok:
+            # An explicit environment setting is app-owned configuration.  Build
+            # a clone instead of mutating a caller/fixture Gateway in place.
+            try:
+                runtime_gateway = _clone_gateway_with_limits(gateway, chat_limits)
+            except Exception:
+                runtime_gateway = gateway
+                config_ready = False
+        elif explicit_chat_limits:
+            config_ready = False
     else:
         runtime_gateway, config_ready, policy_activation = _build_runtime_gateway(
             env,
@@ -1004,12 +1054,13 @@ def make_app(
             adapters,
             policy,
             app_id,
+            limits=chat_limits,
         )
     # An unknown mode is never treated as guarded or test. It keeps the app
     # live but not ready, and the header/admin surface must not imply either
     # supported safety posture.
     valid_mode = _mode_from_env(env)
-    config_ready = config_ready and numeric_ok and valid_mode != ""
+    config_ready = config_ready and numeric_ok and valid_mode != "" and chat_limits_ok
 
     operator_state = _resolve_operator(
         env,
@@ -1031,6 +1082,11 @@ def make_app(
         audit_reader_dsn=_file_env(ENV_OPERATOR_AUDIT_DSN, env),
         chat_work_timeout=chat_timeout,
     )
+    if workspace_runtime.enabled and not chat_limits_ok:
+        # The workspace has its own readiness component; make invalid shared
+        # limits close it as well, before any provider work can be dispatched.
+        workspace_runtime.ready = False
+        workspace_runtime.error = "chat limits configuration is invalid"
 
     @asynccontextmanager
     async def lifespan(_app: FastAPI):

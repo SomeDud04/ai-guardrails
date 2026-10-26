@@ -66,7 +66,11 @@ MAX_LIMIT = 100
 
 PASSWORD_MIN_LENGTH = 12
 PASSWORD_MAX_LENGTH = 128
-TEXT_MAX_LENGTH = 8192
+# Finite storage/decryption envelope bound.  This matches the largest
+# accepted prompt character limit so valid configured conversations cannot be
+# accepted and then fail persistence with a 503.  Existing shorter history is
+# fully compatible; content is never truncated.
+TEXT_MAX_LENGTH = 65536
 TITLE_MAX_LENGTH = 120
 FULL_NAME_MAX_LENGTH = 120
 DEPARTMENT_NAME_MAX_LENGTH = 80

@@ -35,6 +35,17 @@ BASE_ENV_KEYS = {
     "NASI_LEMAK_GENERATION_MODEL",
     "NASI_LEMAK_GENERATION_AUTH",
     "NASI_LEMAK_GENERATION_ALLOW_INSECURE_HTTP",
+    "NASI_LEMAK_CHAT_CONTEXT_MESSAGES",
+    "NASI_LEMAK_CHAT_CONTEXT_BUDGET",
+    "NASI_LEMAK_CHAT_DEFAULT_REPLY_TOKENS",
+    "NASI_LEMAK_CHAT_MAX_REPLY_TOKENS",
+}
+
+CHAT_LIMIT_ENV_KEYS = {
+    "NASI_LEMAK_CHAT_CONTEXT_MESSAGES",
+    "NASI_LEMAK_CHAT_CONTEXT_BUDGET",
+    "NASI_LEMAK_CHAT_DEFAULT_REPLY_TOKENS",
+    "NASI_LEMAK_CHAT_MAX_REPLY_TOKENS",
 }
 
 OVERLAY_ENV_KEYS = {
@@ -127,6 +138,9 @@ class ComposeConfigTests(unittest.TestCase):
         cls.pilot = _load("compose.pilot.yaml")
         cls.base_text = (ROOT / "compose.yaml").read_text(encoding="utf-8")
         cls.pilot_text = (ROOT / "compose.pilot.yaml").read_text(encoding="utf-8")
+        cls.chat_limits_text = (
+            ROOT / "docs" / "compose.chat-limits.env.example"
+        ).read_text(encoding="utf-8")
 
     def test_base_stack_keeps_lightweight_safe_defaults(self):
         gateway = self.base["services"]["gateway"]
@@ -139,13 +153,43 @@ class ComposeConfigTests(unittest.TestCase):
         self.assertEqual(gateway["cpus"], 1.0)
         self.assertEqual(gateway["ports"], ["127.0.0.1:${GATEWAY_PORT:-8000}:8000"])
         self.assertEqual(gateway["depends_on"]["db"]["condition"], "service_healthy")
-        self.assertEqual(set(gateway["environment"]), BASE_ENV_KEYS)
+        gateway_env = _environment_map(gateway["environment"])
+        self.assertEqual(set(gateway_env), BASE_ENV_KEYS)
+        self.assertEqual(
+            gateway_env["NASI_LEMAK_AUDIT_DSN_FILE"], "/run/secrets/audit_dsn"
+        )
+        self.assertEqual(
+            gateway_env["NASI_LEMAK_APP_KEY_DIGEST_FILE"],
+            "/run/secrets/app_key_digest",
+        )
+        self.assertEqual(
+            gateway_env["NASI_LEMAK_GENERATION_URL"],
+            "${NASI_LEMAK_GENERATION_URL:-}",
+        )
 
         db = self.base["services"]["db"]
         self.assertNotIn("ports", db)
         self.assertEqual(db["networks"], ["db_internal"])
         self.assertTrue(self.base["networks"]["db_internal"]["internal"])
         self.assertEqual(set(gateway["networks"]), {"default", "db_internal"})
+
+    def test_chat_limits_are_bare_pass_through_with_a_documented_example(self):
+        gateway = self.base["services"]["gateway"]
+        gateway_env = _environment_map(gateway["environment"])
+        for name in CHAT_LIMIT_ENV_KEYS:
+            with self.subTest(name=name):
+                self.assertEqual(gateway_env[name], "")
+                self.assertIn(f"- {name}\n", self.base_text)
+                self.assertNotIn(f"{name}=", self.base_text)
+                self.assertNotIn(f"{name}=", self.pilot_text)
+        # Compose resolves unset bare entries to the application defaults; no
+        # secret or provider-capacity claim may be embedded in the example.
+        self.assertIn("NASI_LEMAK_CHAT_CONTEXT_MESSAGES=32", self.chat_limits_text)
+        self.assertIn("NASI_LEMAK_CHAT_CONTEXT_BUDGET=8192", self.chat_limits_text)
+        self.assertIn(
+            "NASI_LEMAK_CHAT_DEFAULT_REPLY_TOKENS=1024", self.chat_limits_text
+        )
+        self.assertIn("NASI_LEMAK_CHAT_MAX_REPLY_TOKENS=4096", self.chat_limits_text)
 
     def test_base_secrets_require_absolute_file_interpolation(self):
         expected = {"db_admin_password", "audit_dsn", "app_key_digest"}

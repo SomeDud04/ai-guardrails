@@ -410,7 +410,24 @@ class GenerationClient:
         method: str,
         payload: dict[str, Any] | None = None,
         strict_json: bool = False,
+        timeout: float | None = None,
     ) -> Any:
+        # A caller may narrow (never extend) the configured transport timeout
+        # for one request, for example to stay inside a remaining scan deadline.
+        # The shared configuration is never mutated.
+        if timeout is None:
+            request_timeout = self.config.timeout
+        else:
+            if isinstance(timeout, bool) or not isinstance(timeout, (int, float)):
+                raise ValueError("generation timeout override is invalid")
+            candidate = float(timeout)
+            if (
+                candidate != candidate
+                or candidate in (float("inf"), float("-inf"))
+                or not 0 < candidate <= self.config.timeout
+            ):
+                raise ValueError("generation timeout override is invalid")
+            request_timeout = candidate
         headers = {
             "Accept": "application/json",
             "User-Agent": APPLICATION_USER_AGENT,
@@ -428,7 +445,7 @@ class GenerationClient:
         request = urllib.request.Request(url, data=data, headers=headers, method=method)
         limit = self.config.max_response_bytes
         try:
-            with self._opener().open(request, timeout=self.config.timeout) as response:
+            with self._opener().open(request, timeout=request_timeout) as response:
                 if response.status != 200:
                     raise GenerationError("generation endpoint returned an unsupported status")
                 declared = response.headers.get("Content-Length")
@@ -510,6 +527,7 @@ class GenerationClient:
         payload: dict[str, Any],
         *,
         strict_json: bool = False,
+        timeout: float | None = None,
     ) -> Any:
         """POST one bounded JSON object to a configured relative path.
 
@@ -518,6 +536,7 @@ class GenerationClient:
         size bound as generation, and does not add retries.  Callers remain
         responsible for the payload and response schema.  ``strict_json``
         additionally rejects duplicate keys and non-finite numbers.
+        ``timeout`` may only narrow the configured timeout for this one call.
         """
         relative = _validate_json_path(path)
         if not isinstance(payload, dict):
@@ -527,6 +546,7 @@ class GenerationClient:
             method="POST",
             payload=payload,
             strict_json=strict_json,
+            timeout=timeout,
         )
 
     def probe(self) -> dict[str, Any]:
@@ -560,6 +580,10 @@ class RealGatewayAdapters:
     guards, synthetic tokenizers or memory generation.
     """
 
+    # Tells the gateway that an explicit per-request scan context may be
+    # forwarded.  The context is still per call; nothing is cached here.
+    supports_scan_context = True
+
     def __init__(self, client: Any, *, tokenizer: Any, attack_guard: Any, output_guard: Any):
         if client is None or not callable(getattr(client, "generate", None)):
             raise ValueError("real gateway requires an explicit generation client")
@@ -574,8 +598,13 @@ class RealGatewayAdapters:
     def count_tokens(self, serialized: str) -> Any:
         return self.tokenizer.count_tokens(serialized)
 
-    def scan_attack(self, text: str) -> Any:
-        return self.attack_guard.scan_attack(text)
+    def scan_attack(self, text: str, *, scan_context: Any = None) -> Any:
+        guard = self.attack_guard
+        if scan_context is not None and getattr(
+            guard, "supports_scan_context", False
+        ):
+            return guard.scan_attack(text, scan_context=scan_context)
+        return guard.scan_attack(text)
 
     def generate(self, messages: list[dict[str, str]], model: str, max_tokens: int) -> str:
         if model != PUBLIC_MODEL_ALIAS:

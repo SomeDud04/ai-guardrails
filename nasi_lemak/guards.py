@@ -53,6 +53,15 @@ class GuardError(RuntimeError):
     """Fail-closed guard failure carrying no request text, path or token data."""
 
 
+class GuardInputLimit(GuardError):
+    """Known oversize input rejected before any provider request.
+
+    The gateway maps this to the stable ``INPUT_LIMIT`` error instead of a
+    generic unavailable-guard ``503``; callers must not include raw input,
+    provider data or paths in its message.
+    """
+
+
 def _local_directory(model_dir: Any) -> str:
     """Return an existing local directory path, or fail closed.
 

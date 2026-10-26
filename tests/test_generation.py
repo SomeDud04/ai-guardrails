@@ -438,6 +438,37 @@ class TransportTests(FixtureMixin):
         self.assertNotIn(KEY, str(caught.exception))
         self.assertEqual(len(httpd.requests), 1)
 
+    def test_timeout_override_only_narrows_and_fails_before_http(self):
+        httpd = self.start_server(delay=0.4)
+        client = GenerationClient(self.config(httpd, timeout=1.0))
+        configured = client.config.timeout
+
+        # A value at or below the configured timeout is accepted and used by
+        # this one request; the shared configuration is not mutated.
+        with self.assertRaises(GenerationError) as caught:
+            client.post_json("/guard", {"probe": "synthetic"}, timeout=0.05)
+        self.assertIn("timed out", str(caught.exception))
+        self.assertEqual(len(httpd.requests), 1)
+        self.assertEqual(client.config.timeout, configured)
+
+        # Extension, booleans, non-finite and non-positive values are refused
+        # before any HTTP request is opened.
+        for timeout in (
+            1.5,
+            True,
+            False,
+            float("nan"),
+            float("inf"),
+            float("-inf"),
+            0,
+            -0.1,
+        ):
+            with self.subTest(timeout=timeout):
+                with self.assertRaises(ValueError):
+                    client.post_json("/guard", {"probe": "synthetic"}, timeout=timeout)
+        self.assertEqual(len(httpd.requests), 1)
+        self.assertEqual(client.config.timeout, configured)
+
     def test_oversized_invalid_json_and_invalid_utf8_are_rejected(self):
         httpd = self.start_server(body=b"x" * 2048)
         client = GenerationClient(self.config(httpd, max_response_bytes=1024))

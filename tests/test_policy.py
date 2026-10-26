@@ -246,7 +246,7 @@ class PolicyLoaderTests(unittest.TestCase):
     def test_invalid_types_and_bounds_are_rejected(self) -> None:
         cases = {
             "budget-zero": _policy_data(token_budget=0),
-            "budget-too-high": _policy_data(token_budget=513),
+            "budget-too-high": _policy_data(token_budget=32769),
             "budget-bool": _policy_data(token_budget=True),
             "budget-string": _policy_data(token_budget="10"),
             "budget-float": _policy_data(token_budget=1.5),

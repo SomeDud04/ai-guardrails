@@ -46,7 +46,10 @@ from urllib.parse import urlsplit
 from fastapi import FastAPI, Request
 from fastapi.responses import JSONResponse
 
-from .gateway import Gateway
+from .gateway import Gateway, serialize_messages
+from .generation import conservative_byte_budget
+from .limits import ChatLimits
+from .scan_context import ScanContext
 from .workspace_store import (
     LEASE_TTL_SECONDS,
     SESSION_TTL_SECONDS,
@@ -66,9 +69,7 @@ ENV_ALLOW_HTTP = "NASI_LEMAK_WORKSPACE_ALLOW_HTTP"
 WORKSPACE_BODY_BYTES = 64 * 1024
 SECRET_FILE_MAX_BYTES = 8192
 WORKSPACE_DB_TIMEOUT = 5.0
-MAX_MESSAGES = 16
-MAX_TEXT_CHARS = 4096
-MAX_TOKENS = 256
+# Input/reply bounds now come from the immutable shared ChatLimits object.
 LOGIN_WINDOW_SECONDS = 60.0
 SESSION_COOKIE = "nasi_lemak_workspace"
 COOKIE_PATH = "/workspace"
@@ -231,6 +232,7 @@ class WorkspaceRuntime:
         "ready",
         "store",
         "internal_gateway",
+        "chat_limits",
         "_internal_key",
         "allow_http",
         "job_deadline",
@@ -246,6 +248,7 @@ class WorkspaceRuntime:
         self.ready = False
         self.store: Any = None
         self.internal_gateway: Gateway | None = None
+        self.chat_limits: ChatLimits | None = None
         self._internal_key: str | None = None
         self.allow_http = False
         self.job_deadline = 0.0
@@ -401,6 +404,7 @@ def load_workspace_runtime(
             adapters=gateway.adapters,
             policy=gateway.policy,
             app_id=gateway.app_id,
+            limits=getattr(gateway, "limits", None),
         )
     except Exception:
         runtime.error = "workspace safety gateway is unavailable"
@@ -408,6 +412,7 @@ def load_workspace_runtime(
 
     runtime.store = store
     runtime.internal_gateway = internal_gateway
+    runtime.chat_limits = internal_gateway.limits
     runtime._internal_key = internal_key
     runtime.ready = True
     return runtime
@@ -878,7 +883,23 @@ def register_workspace_routes(app: FastAPI, runtime: WorkspaceRuntime) -> None:
             profile = await _db_call(app, runtime.store.get_profile, user["id"])
         except Exception as exc:
             return _store_error(request, exc)
-        return _ok(profile)
+        payload = dict(profile) if isinstance(profile, dict) else profile
+        limits = runtime.chat_limits
+        if isinstance(payload, dict) and isinstance(limits, ChatLimits):
+            # Non-secret effective configuration only; profile facts and
+            # identity stay exactly as the store returned them.
+            info = limits.public()
+            info["max_prompt_chars"] = limits.max_prompt_chars()
+            policy = getattr(runtime.internal_gateway, "policy", None)
+            policy_budget = getattr(policy, "token_budget", None)
+            if (
+                isinstance(policy_budget, int)
+                and not isinstance(policy_budget, bool)
+                and policy_budget >= 1
+            ):
+                info["policy_token_budget"] = policy_budget
+            payload["chat_limits"] = info
+        return _ok(payload)
 
     # -- admin account management ---------------------------------------
     async def admin_principal(request: Request):
@@ -1256,19 +1277,20 @@ def register_workspace_routes(app: FastAPI, runtime: WorkspaceRuntime) -> None:
         csrf = _cookie_mutation_guard(request, source)
         if csrf is not None:
             return csrf
+        limits = runtime.chat_limits or ChatLimits.defaults()
         try:
             body = await _read_json(request, app)
             _body_fields(body, {"text", "max_tokens"}, {"text"})
             text = body["text"]
             if not isinstance(text, str) or not text.strip():
                 raise ValueError("message text is invalid")
-            if len(text) > MAX_TEXT_CHARS:
+            if len(text) > limits.max_prompt_chars():
                 raise _BodyProblem(413)
-            max_tokens = body.get("max_tokens", MAX_TOKENS)
+            max_tokens = body.get("max_tokens", limits.default_reply_tokens)
             if (
                 isinstance(max_tokens, bool)
                 or not isinstance(max_tokens, int)
-                or not 1 <= max_tokens <= MAX_TOKENS
+                or not 1 <= max_tokens <= limits.max_reply_tokens
             ):
                 raise ValueError("max_tokens is invalid")
         except _BodyProblem as exc:
@@ -1276,6 +1298,7 @@ def register_workspace_routes(app: FastAPI, runtime: WorkspaceRuntime) -> None:
                 request,
                 "INPUT_LIMIT" if exc.status == 413 else "INVALID_REQUEST",
                 exc.status,
+                _INPUT_LIMIT_MESSAGE if exc.status == 413 else None,
             )
         except ValueError:
             return _ws_error(request, "INVALID_REQUEST", 400)
@@ -1340,6 +1363,87 @@ def _record_turn_failure(
         return False
 
 
+_INPUT_LIMIT_MESSAGE = (
+    "Message exceeds the configured input limit; shorten the message or ask an "
+    "administrator to increase the chat limits."
+)
+
+
+def _runtime_chat_limits(runtime: WorkspaceRuntime) -> ChatLimits:
+    limits = getattr(runtime, "chat_limits", None)
+    return limits if isinstance(limits, ChatLimits) else ChatLimits.defaults()
+
+
+def _valid_history(history: Any) -> bool:
+    """Strict complete user/assistant pairing; malformed history never filters."""
+    if not isinstance(history, list) or len(history) % 2:
+        return False
+    for index, item in enumerate(history):
+        expected = "user" if index % 2 == 0 else "assistant"
+        if (
+            not isinstance(item, dict)
+            or set(item) != {"role", "content"}
+            or item.get("role") != expected
+            or not isinstance(item.get("content"), str)
+            or not item["content"]
+        ):
+            return False
+    return True
+
+
+def _context_fits(
+    messages: list[dict[str, str]],
+    limits: ChatLimits,
+    policy_budget: int,
+    counter: Any,
+) -> bool:
+    serialized = serialize_messages(messages)
+    if conservative_byte_budget(serialized) > limits.context_budget:
+        return False
+    if callable(counter):
+        count = counter(serialized)
+        if isinstance(count, bool) or not isinstance(count, int) or count < 0:
+            raise ValueError("invalid token count")
+        if count > policy_budget:
+            return False
+    return True
+
+
+def _select_context(
+    history: list[dict[str, str]],
+    prompt: dict[str, str],
+    limits: ChatLimits,
+    policy_budget: int,
+    counter: Any,
+) -> tuple[list[dict[str, str]], int] | None:
+    """Newest complete allowed pairs plus the full newest prompt.
+
+    Only complete pairs are removed, and only from the oldest end.  A newer
+    pair that does not fit stops selection so a smaller older pair can never be
+    spliced around it.  ``Gateway.handle`` re-checks the conservative byte
+    budget and adapter token count immediately before inference.
+    """
+    pairs = [
+        (history[index], history[index + 1])
+        for index in range(0, len(history), 2)
+    ]
+    max_pairs = max(0, (limits.context_messages - 1) // 2)
+    selected: list[dict[str, str]] = []
+    for pair in reversed(pairs):
+        if len(selected) // 2 >= max_pairs:
+            break
+        candidate = [pair[0], pair[1], *selected, prompt]
+        if not _context_fits(candidate, limits, policy_budget, counter):
+            break
+        selected = [pair[0], pair[1], *selected]
+    messages = [*selected, prompt]
+    if not _context_fits(messages, limits, policy_budget, counter):
+        # The newest prompt alone cannot fit.  Never trim it or claim a new
+        # conversation would help; that is an honest configured-limit error.
+        return None
+    return messages, len(history) - len(selected)
+
+
 def _run_turn_pipeline(
     *,
     runtime: WorkspaceRuntime,
@@ -1349,7 +1453,7 @@ def _run_turn_pipeline(
     conversation_id: str,
     text: str,
     max_tokens: int,
-    cancel_event: threading.Event,
+    scan_context: ScanContext,
     cancel_reason: dict[str, str],
 ) -> dict[str, Any]:
     """One synchronous chat turn, run in a single bounded worker thread.
@@ -1396,46 +1500,66 @@ def _run_turn_pipeline(
         fail("failed", "CONTEXT_UNAVAILABLE")
         return _turn_error(exc)
 
-    # Fail closed: a malformed or extended history is never silently filtered.
+    # Fail closed: malformed, extended or unpaired history is never filtered.
     if not isinstance(context, dict) or set(context) != {"messages"}:
         fail("failed", "CONTEXT_INVALID")
         return {"status": 503, "code": "UNAVAILABLE"}
     history = context["messages"]
-    if not isinstance(history, list):
+    if not _valid_history(history):
         fail("failed", "CONTEXT_INVALID")
-        return {"status": 503, "code": "UNAVAILABLE"}
-    messages: list[dict[str, str]] = []
-    for item in history:
-        if (
-            not isinstance(item, dict)
-            or set(item) != {"role", "content"}
-            or item.get("role") not in ("user", "assistant")
-            or not isinstance(item.get("content"), str)
-            or not item["content"]
-        ):
-            fail("failed", "CONTEXT_INVALID")
-            return {"status": 503, "code": "UNAVAILABLE"}
-        messages.append({"role": item["role"], "content": item["content"]})
-    messages.append({"role": "user", "content": text})
-
-    if len(messages) > MAX_MESSAGES or any(
-        len(message["content"]) > MAX_TEXT_CHARS for message in messages
-    ):
-        fail("failed", "INPUT_LIMIT")
-        return {
-            "status": 413,
-            "code": "INPUT_LIMIT",
-            "message": "Conversation limit reached; start a new conversation.",
-        }
-
-    if cancel_event.is_set():
-        fail("failed", cancel_reason.get("value", "CANCELLED"))
         return {"status": 503, "code": "UNAVAILABLE"}
 
     gateway = runtime.internal_gateway
     internal_key = runtime._internal_key
     if gateway is None or not internal_key:
         fail("failed", "UNAVAILABLE")
+        return {"status": 503, "code": "UNAVAILABLE"}
+
+    limits = _runtime_chat_limits(runtime)
+    policy_budget = getattr(gateway.policy, "token_budget", None)
+    if (
+        isinstance(policy_budget, bool)
+        or not isinstance(policy_budget, int)
+        or policy_budget < 1
+    ):
+        fail("failed", "CONTEXT_INVALID")
+        return {"status": 503, "code": "UNAVAILABLE"}
+    if len(text) > limits.max_prompt_chars():
+        fail("failed", "INPUT_LIMIT")
+        return {
+            "status": 413,
+            "code": "INPUT_LIMIT",
+            "message": _INPUT_LIMIT_MESSAGE,
+        }
+    try:
+        selected = _select_context(
+            history,
+            {"role": "user", "content": text},
+            limits,
+            policy_budget,
+            getattr(gateway.adapters, "count_tokens", None),
+        )
+    except Exception:
+        fail("failed", "CONTEXT_INVALID")
+        return {"status": 503, "code": "UNAVAILABLE"}
+    if selected is None:
+        fail("failed", "INPUT_LIMIT")
+        return {
+            "status": 413,
+            "code": "INPUT_LIMIT",
+            "message": _INPUT_LIMIT_MESSAGE,
+        }
+    messages, omitted = selected
+    context_meta = {
+        "selected_messages": len(messages),
+        "omitted_messages": omitted,
+        "context_messages": limits.context_messages,
+        "context_budget": limits.context_budget,
+        "policy_token_budget": policy_budget,
+    }
+
+    if scan_context.cancelled():
+        fail("failed", cancel_reason.get("value", "CANCELLED"))
         return {"status": 503, "code": "UNAVAILABLE"}
 
     gateway_body = {
@@ -1449,6 +1573,7 @@ def _run_turn_pipeline(
             "/v1/chat/completions",
             {"Authorization": f"Bearer {internal_key}"},
             gateway_body,
+            scan_context=scan_context,
         )
     except Exception:
         fail("failed", "UNAVAILABLE")
@@ -1456,7 +1581,7 @@ def _run_turn_pipeline(
 
     # The HTTP deadline/cancellation is checked after the real provider call
     # and before any reply is persisted or released.
-    if cancel_event.is_set():
+    if scan_context.cancelled():
         fail("failed", cancel_reason.get("value", "CANCELLED"))
         return {"status": 503, "code": "UNAVAILABLE"}
 
@@ -1494,6 +1619,7 @@ def _run_turn_pipeline(
                 "conversation_id": conversation_id,
                 "role": "assistant",
                 "content": delivered,
+                "context": context_meta,
             },
         }
 
@@ -1522,7 +1648,7 @@ def _run_turn_pipeline(
         return {
             "status": 413,
             "code": "INPUT_LIMIT",
-            "message": "Conversation limit reached; start a new conversation.",
+            "message": _INPUT_LIMIT_MESSAGE,
         }
     if status == 401:
         return {"status": 401, "code": "UNAUTHORIZED"}
@@ -1576,6 +1702,10 @@ async def _run_turn(
 
     cancel_event = threading.Event()
     cancel_reason = {"value": "CANCELLED"}
+    scan_context = ScanContext(
+        cancel_event=cancel_event,
+        deadline=time.monotonic() + runtime.job_deadline,
+    )
     release_lock = threading.Lock()
     released = {"done": False}
     outcome: dict[str, Any] = {}
@@ -1601,7 +1731,7 @@ async def _run_turn(
                 conversation_id=conversation_id,
                 text=text,
                 max_tokens=max_tokens,
-                cancel_event=cancel_event,
+                scan_context=scan_context,
                 cancel_reason=cancel_reason,
             )
         except BaseException:

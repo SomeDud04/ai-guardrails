@@ -669,6 +669,30 @@ class ExecuteTests(FixtureMixin):
         self.assertEqual(len(httpd.requests), 1)
         self.assertIn("window_errors=1", stdout)
 
+    def test_input_window_is_independent_of_gateway_policy_ceiling(self) -> None:
+        from nasi_lemak import gateway
+        from nasi_lemak.guard_api import INPUT_GUARD_MAX_TOKENS
+
+        self.assertEqual(guard_eval.INPUT_EVAL_WINDOW_BUDGET, 512)
+        self.assertEqual(guard_eval.INPUT_EVAL_WINDOW_BUDGET, INPUT_GUARD_MAX_TOKENS)
+        dataset = guard_eval.parse_dataset(
+            dataset_payload(
+                [
+                    input_case("in-window", expected="block", text="x" * 600),
+                    input_case("in-small", text="SAFE-MARKER"),
+                ]
+            ),
+            sha256="0" * 64,
+        )
+        cases = {case.case_id: case for case in dataset.cases}
+        self.assertGreater(gateway.MAX_TOKEN_BUDGET, guard_eval.INPUT_EVAL_WINDOW_BUDGET)
+        self.assertTrue(guard_eval.input_window_exceeded(cases["in-window"]))
+        self.assertFalse(guard_eval.input_window_exceeded(cases["in-small"]))
+        with mock.patch.object(
+            gateway, "MAX_TOKEN_BUDGET", gateway.MAX_TOKEN_BUDGET * 8
+        ):
+            self.assertTrue(guard_eval.input_window_exceeded(cases["in-window"]))
+
     def test_only_needed_guard_configs_are_required(self) -> None:
         httpd = self.start_server(self.default_responder)
         path = write_dataset(self.root, dataset_payload([input_case()]))
