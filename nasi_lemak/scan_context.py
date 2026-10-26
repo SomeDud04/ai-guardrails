@@ -25,6 +25,7 @@ class ScanContext:
 
     cancel_event: Any | None = None
     deadline: float | None = None
+    diagnostic: Any | None = None
 
     def __post_init__(self) -> None:
         if self.deadline is not None:
@@ -54,3 +55,18 @@ class ScanContext:
         if self.deadline is None:
             return None
         return max(0.0, self.deadline - time.monotonic())
+
+    def note(self, code: str) -> None:
+        """Record one bounded internal signal on the optional sink.
+
+        This never raises: diagnostics must not change fail-closed behaviour.
+        Only fixed codes are meaningful; the sink is responsible for rejecting
+        anything else.
+        """
+        sink = self.diagnostic
+        if sink is None or not callable(getattr(sink, "record", None)):
+            return
+        try:
+            sink.record(code)
+        except Exception:
+            return

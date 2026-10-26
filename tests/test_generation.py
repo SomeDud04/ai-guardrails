@@ -9,6 +9,11 @@ from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 
 from nasi_lemak import generation_cli
+from nasi_lemak.diagnostics import (
+    GENERATION_NO_FINAL_CONTENT,
+    GENERATION_TRUNCATED,
+    SafeDiagnostics,
+)
 from nasi_lemak.gateway import MemoryAdapters
 from nasi_lemak.generation import (
     APPLICATION_USER_AGENT,
@@ -17,6 +22,7 @@ from nasi_lemak.generation import (
     ENV_API_KEY,
     ENV_AUTH,
     ENV_CA_FILE,
+    ENV_ENABLE_THINKING,
     ENV_MAX_RESPONSE_BYTES,
     ENV_MODEL,
     ENV_TIMEOUT,
@@ -28,6 +34,7 @@ from nasi_lemak.generation import (
     RealGatewayAdapters,
     make_real_gateway,
 )
+from nasi_lemak.scan_context import ScanContext
 
 KEY = "unit-test-key-not-real"
 
@@ -280,7 +287,13 @@ class ConfigTests(FixtureMixin):
 
     def test_invalid_environment_values_are_rejected(self):
         base = {ENV_URL: "https://host/v1", ENV_MODEL: "m", ENV_API_KEY: KEY}
-        for name, value in ((ENV_TIMEOUT, "0"), (ENV_TIMEOUT, "nan"), (ENV_MAX_RESPONSE_BYTES, "12"), (ENV_CA_FILE, "Z:/missing/ca.pem")):
+        for name, value in (
+            (ENV_TIMEOUT, "0"),
+            (ENV_TIMEOUT, "nan"),
+            (ENV_MAX_RESPONSE_BYTES, "12"),
+            (ENV_CA_FILE, "Z:/missing/ca.pem"),
+            (ENV_ENABLE_THINKING, "sometimes"),
+        ):
             with self.subTest(name=name, value=value):
                 env = dict(base)
                 env[name] = value
@@ -376,6 +389,86 @@ class TransportTests(FixtureMixin):
         client.generate([{"role": "user", "content": "x"}], 8)
         self.assertEqual(httpd.requests[0]["path"], "/v1/chat/completions")
         self.assertNotIn("/v1/v1", httpd.requests[0]["path"])
+
+    def test_enable_thinking_env_adds_only_the_optional_chat_template_field(self):
+        httpd = self.start_server()
+        base = {
+            ENV_URL: f"http://127.0.0.1:{httpd.server_address[1]}/v1",
+            ENV_MODEL: "upstream-model-1",
+            ENV_API_KEY: KEY,
+        }
+        unset_client = GenerationClient(GenerationConfig.from_env(base))
+        self.assertEqual(
+            unset_client.generate([{"role": "user", "content": "hello"}], 8),
+            "safe answer",
+        )
+        self.assertNotIn(
+            "chat_template_kwargs", json.loads(httpd.requests[0]["body"])
+        )
+
+        disabled_env = dict(base)
+        disabled_env[ENV_ENABLE_THINKING] = "false"
+        disabled_client = GenerationClient(GenerationConfig.from_env(disabled_env))
+        self.assertIs(disabled_client.config.enable_thinking, False)
+        disabled_client.generate([{"role": "user", "content": "hello"}], 8)
+        disabled_payload = json.loads(httpd.requests[1]["body"])
+        self.assertEqual(
+            disabled_payload["chat_template_kwargs"],
+            {"enable_thinking": False},
+        )
+        self.assertEqual(
+            {
+                name: value
+                for name, value in disabled_payload.items()
+                if name != "chat_template_kwargs"
+            },
+            json.loads(httpd.requests[0]["body"]),
+        )
+
+    def test_finish_reason_diagnostics_are_specific_and_never_expose_reasoning(self):
+        httpd = self.start_server()
+        client = GenerationClient(self.config(httpd))
+        hidden = "HIDDEN-REASONING-MUST-NOT-LEAK"
+        cases = (
+            (
+                "length_empty_visible",
+                chat_payload(
+                    "", finish="length", message_extra={"reasoning_content": hidden}
+                ),
+                GENERATION_TRUNCATED,
+            ),
+            (
+                "length_blank_visible",
+                chat_payload(
+                    "   ", finish="length", message_extra={"reasoning_content": hidden}
+                ),
+                GENERATION_TRUNCATED,
+            ),
+            (
+                "stop_blank_visible",
+                chat_payload(
+                    "  \n", finish="stop", message_extra={"reasoning_content": hidden}
+                ),
+                GENERATION_NO_FINAL_CONTENT,
+            ),
+        )
+        for label, payload, expected in cases:
+            with self.subTest(label=label):
+                self.set_json(httpd, payload)
+                with self.assertRaises(GenerationError) as caught:
+                    client.generate([{"role": "user", "content": "hello"}], 8)
+                self.assertEqual(caught.exception.diagnostic_code, expected)
+                self.assertNotIn(hidden, str(caught.exception))
+                self.assertNotIn(hidden, repr(caught.exception))
+
+        for finish in ("content_filter", "tool_calls", "error", None):
+            with self.subTest(finish=finish):
+                self.set_json(httpd, chat_payload("visible", finish=finish))
+                with self.assertRaises(GenerationError) as caught:
+                    client.generate([{"role": "user", "content": "hello"}], 8)
+                # Only ``length`` is a truncation; other unsupported reasons
+                # must stay generic instead of incrementing that counter.
+                self.assertIsNone(caught.exception.diagnostic_code)
 
     def test_malformed_or_unsupported_completions_are_rejected(self):
         httpd = self.start_server()
@@ -609,13 +702,52 @@ class GatewayIntegrationTests(FixtureMixin):
         )
         return gateway, tokenizer, attack, output
 
-    def call(self, gateway, content="Hello"):
+    def call(self, gateway, content="Hello", *, scan_context=None):
         return gateway.handle(
             "POST",
             "/v1/chat/completions",
             {"Authorization": "Bearer app-key"},
             gateway_request(content),
+            scan_context=scan_context,
         )
+
+    def test_generation_finish_reason_failures_are_503_without_release_or_mislabelling(self):
+        httpd = self.start_server()
+        gateway, _, _, _ = self.build(httpd)
+        diagnostics = SafeDiagnostics()
+
+        self.set_json(
+            httpd,
+            chat_payload(
+                "",
+                finish="length",
+                message_extra={"reasoning_content": "hidden reasoning"},
+            ),
+        )
+        status, body = self.call(
+            gateway, scan_context=ScanContext(diagnostic=diagnostics)
+        )
+        self.assertEqual(status, 503)
+        self.assertEqual(body["error"]["code"], "UNAVAILABLE")
+        self.assertNotIn("choices", body)
+        self.assertNotIn("hidden reasoning", json.dumps(body))
+        counters = diagnostics.snapshot()
+        self.assertEqual(counters[GENERATION_TRUNCATED], 1)
+        self.assertEqual(counters[GENERATION_NO_FINAL_CONTENT], 0)
+
+        self.set_json(
+            httpd, chat_payload("would have been released", finish="content_filter")
+        )
+        status, body = self.call(
+            gateway, scan_context=ScanContext(diagnostic=diagnostics)
+        )
+        self.assertEqual(status, 503)
+        self.assertEqual(body["error"]["code"], "UNAVAILABLE")
+        self.assertNotIn("choices", body)
+        self.assertNotIn("would have been released", json.dumps(body))
+        counters = diagnostics.snapshot()
+        self.assertEqual(counters[GENERATION_TRUNCATED], 1)
+        self.assertEqual(counters[GENERATION_NO_FINAL_CONTENT], 0)
 
     def test_only_masked_text_reaches_real_transport_and_alias_maps_to_upstream(self):
         httpd = self.start_server(body=json.dumps(chat_payload("answer test@example.com")).encode("utf-8"))

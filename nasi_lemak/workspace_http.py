@@ -48,6 +48,7 @@ from fastapi import FastAPI, Request
 from fastapi.responses import JSONResponse
 
 from .controls import BLOCK_REASONS, GatewayControl, block_detail
+from .diagnostics import BLOCK_PAYLOAD_REJECTED, SafeDiagnostics
 from .gateway import Gateway, serialize_messages
 from .generation import conservative_byte_budget
 from .limits import ChatLimits
@@ -243,6 +244,7 @@ class WorkspaceRuntime:
         "_principal_guard",
         "_inflight_lock",
         "_inflight_conversations",
+        "diagnostics",
     )
 
     def __init__(self, *, enabled: bool) -> None:
@@ -259,6 +261,8 @@ class WorkspaceRuntime:
         self._principal_guard = _PrincipalGuard()
         self._inflight_lock = threading.Lock()
         self._inflight_conversations: set[str] = set()
+        # Fixed-code, content-free counters shared by every workspace turn.
+        self.diagnostics = SafeDiagnostics()
 
     def __repr__(self) -> str:
         return (
@@ -335,6 +339,7 @@ def _required_store_methods() -> tuple[str, ...]:
         "list_users",
         "create_user",
         "disable_user",
+        "set_user_role",
         "list_grants",
         "grant_review",
         "revoke_grant",
@@ -1083,6 +1088,33 @@ def register_workspace_routes(app: FastAPI, runtime: WorkspaceRuntime) -> None:
         except Exception as exc:
             return admin_body_error(request, exc)
         return _ok({"status": "disabled"})
+
+    @app.post("/workspace/api/admin/users/{user_id}/role")
+    async def admin_set_user_role(request: Request, user_id: str):
+        guard = _request_guard(request, runtime)
+        if guard is not None:
+            return guard
+        actor, source, error = await admin_principal(request)
+        if error is not None:
+            return error
+        csrf = _cookie_mutation_guard(request, source)
+        if csrf is not None:
+            return csrf
+        try:
+            body = await _read_json(request, app)
+            _body_fields(body, {"role"}, {"role"})
+            result = await _db_call(
+                app,
+                runtime.store.set_user_role,
+                actor["id"],
+                user_id,
+                body["role"],
+            )
+        except _BodyProblem as exc:
+            return _ws_error(request, "INVALID_REQUEST", exc.status)
+        except Exception as exc:
+            return admin_body_error(request, exc)
+        return _ok(result)
 
     @app.post("/workspace/api/admin/users/{user_id}/reset-password")
     async def admin_reset_password(request: Request, user_id: str):
@@ -1849,6 +1881,7 @@ def _run_turn_pipeline(
         # detail table) fails closed without releasing anything.
         parsed = _known_gateway_block(payload)
         if parsed is None:
+            scan_context.note(BLOCK_PAYLOAD_REJECTED)
             fail("failed", "UNAVAILABLE", safe_request_id)
             return {"status": 503, "code": "UNAVAILABLE"}
         block, block_request_id = parsed
@@ -1957,6 +1990,7 @@ async def _run_turn(
     scan_context = ScanContext(
         cancel_event=cancel_event,
         deadline=time.monotonic() + runtime.job_deadline,
+        diagnostic=runtime.diagnostics,
     )
     release_lock = threading.Lock()
     released = {"done": False}

@@ -56,6 +56,10 @@ function findByClass(root, className) {
   return collect(root).find((element) => String(element.className).split(" ").indexOf(className) >= 0);
 }
 
+function findDataRow(root, attribute, value) {
+  return collect(root).find((element) => element.getAttribute(attribute) === value);
+}
+
 function makeElement(id) {
   const listeners = Object.create(null);
   const attributes = Object.create(null);
@@ -819,6 +823,11 @@ async function scenarioSignInAndChat() {
   assert(pendingDetail !== lateDetail, "harness sanity: a new pending request was created");
   assert(app.callsMatching("/workspace/api/admin").length === 0, "non-admin must never fetch admin endpoints");
   assert(app.elementFor("tab-admin").hidden === true, "non-admin must not see the admin tab");
+  assert(
+    !findButton(app.elementFor("user-list"), "Grant admin") &&
+      !findButton(app.elementFor("user-list"), "Revoke admin"),
+    "non-admin must not be offered administrator role actions"
+  );
 }
 
 async function scenarioReviewer() {
@@ -1365,6 +1374,111 @@ async function scenarioAdmin() {
   );
   assert(adminDisableButtons.length === 1, "the current admin must not be offered self-disable");
 
+  let aliceRow = findDataRow(app.elementFor("user-list"), "data-user", "user-alice");
+  assert(aliceRow, "the employee row was not rendered");
+  assert(findButton(aliceRow, "Grant admin"), "an employee must be offered Grant admin");
+  let selfRow = findDataRow(app.elementFor("user-list"), "data-user", "user-admin");
+  assert(findButton(selfRow, "Revoke admin"), "an administrator must be offered Revoke admin");
+  findButton(aliceRow, "Grant admin").dispatch("click");
+  const cancelRoleBox = findByClass(aliceRow, "admin-confirm");
+  assert(cancelRoleBox, "a role change must open an inline confirmation");
+  const cancelRoleText = cancelRoleBox.textContent;
+  assert(
+    cancelRoleText.indexOf("Alice Tan") >= 0 &&
+      cancelRoleText.indexOf("@alice") >= 0 &&
+      cancelRoleText.indexOf("Administrator") >= 0,
+    "the role confirmation must name the selected full name, username and intended role"
+  );
+  assert(
+    findButton(cancelRoleBox, "Cancel").focused > 0,
+    "a role confirmation must focus the safe action"
+  );
+  findButton(cancelRoleBox, "Cancel").dispatch("click");
+  assert(
+    app.callsMatching("/workspace/api/admin/users/user-alice/role").length === 0,
+    "cancelling a role change must not send a request"
+  );
+
+  findButton(aliceRow, "Grant admin").dispatch("click");
+  findButton(aliceRow, "Confirm grant").dispatch("click");
+  const grantRole = app.lastMatching("/workspace/api/admin/users/user-alice/role");
+  assert(grantRole && grantRole.options.method === "POST", "confirmed grant was not sent");
+  assert(JSON.parse(grantRole.options.body).role === "admin", "grant payload mismatch");
+  assert(grantRole.options.credentials === "same-origin", "role changes must use same-origin cookies");
+  assert(grantRole.options.headers["Content-Type"] === "application/json",
+    "role changes must declare a JSON Content-Type");
+  assert(grantRole.options.headers["X-Workspace-User"] === "user-admin",
+    "role changes must name the current profile");
+  grantRole.respond(
+    { id: "user-alice", username: "alice", full_name: "Alice Tan", department_id: "dept-accounting", role: "admin", disabled: false, created_at: 1700000001 },
+    200
+  );
+  await settle();
+  const grantRoleRefresh = app.lastMatching("/workspace/api/admin/users?limit=25");
+  assert(grantRoleRefresh && !grantRoleRefresh.settled,
+    "a successful role change must refresh the user list");
+  grantRoleRefresh.respond(
+    {
+      items: [
+        { id: "user-admin", username: "admin", full_name: "Ada Admin", department_id: "dept-accounting", role: "admin", disabled: false, created_at: 1700000002 },
+        { id: "user-alice", username: "alice", full_name: "Alice Tan", department_id: "dept-accounting", role: "admin", disabled: false, created_at: 1700000001 },
+      ],
+      next: "user-cursor",
+    },
+    200
+  );
+  await settle();
+  assert(app.elementFor("admin-status").textContent.indexOf("granted") >= 0,
+    "a successful grant must be reported");
+  aliceRow = findDataRow(app.elementFor("user-list"), "data-user", "user-alice");
+  assert(findButton(aliceRow, "Revoke admin"), "the refreshed administrator row must offer Revoke admin");
+
+  findButton(aliceRow, "Revoke admin").dispatch("click");
+  const revokeRoleBox = findByClass(aliceRow, "admin-confirm");
+  assert(revokeRoleBox && revokeRoleBox.textContent.indexOf("Employee") >= 0,
+    "revoking admin must state the intended employee role");
+  findButton(revokeRoleBox, "Confirm revoke").dispatch("click");
+  const revokeRole = app.lastMatching("/workspace/api/admin/users/user-alice/role");
+  assert(JSON.parse(revokeRole.options.body).role === "employee", "revoke payload mismatch");
+  revokeRole.respond(
+    { id: "user-alice", username: "alice", full_name: "Alice Tan", department_id: "dept-accounting", role: "employee", disabled: false, created_at: 1700000001 },
+    200
+  );
+  await settle();
+  app.lastMatching("/workspace/api/admin/users?limit=25").respond(
+    {
+      items: [
+        { id: "user-admin", username: "admin", full_name: "Ada Admin", department_id: "dept-accounting", role: "admin", disabled: false, created_at: 1700000002 },
+        { id: "user-alice", username: "alice", full_name: "Alice Tan", department_id: "dept-accounting", role: "employee", disabled: false, created_at: 1700000001 },
+      ],
+      next: "user-cursor",
+    },
+    200
+  );
+  await settle();
+  assert(app.elementFor("admin-status").textContent.indexOf("revoked") >= 0,
+    "a successful revoke must be reported");
+
+  const meCallsBeforeConflict = app.callsMatching("/workspace/api/me").length;
+  selfRow = findDataRow(app.elementFor("user-list"), "data-user", "user-admin");
+  findButton(selfRow, "Revoke admin").dispatch("click");
+  findButton(selfRow, "Confirm revoke").dispatch("click");
+  const lastAdmin = app.lastMatching("/workspace/api/admin/users/user-admin/role");
+  assert(JSON.parse(lastAdmin.options.body).role === "employee", "self-revoke payload mismatch");
+  lastAdmin.respond(
+    { error: { code: "CONFLICT", message: "The resource is busy." } },
+    409
+  );
+  await settle();
+  assert(
+    app.elementFor("admin-status").textContent.indexOf("at least one administrator") >= 0,
+    "a 409 last-admin refusal must be visible"
+  );
+  assert(app.elementFor("admin-status").getAttribute("data-kind") === "error",
+    "a refused role change must be reported as an error");
+  assert(app.callsMatching("/workspace/api/me").length === meCallsBeforeConflict,
+    "a refused role change must not refresh the profile");
+
   app.elementFor("department-more").dispatch("click");
   await settle();
   const departmentMoreCall = app.lastMatching("/workspace/api/admin/departments?limit=25&after=dept-cursor");
@@ -1421,8 +1535,8 @@ async function scenarioAdmin() {
   app.elementFor("new-user-password").value = "short";
   app.elementFor("user-form").dispatch("submit");
   assert(
-    app.callsMatching("/workspace/api/admin/users").filter(
-      (call) => call.options.method === "POST"
+    app.calls.filter(
+      (call) => call.url === "/workspace/api/admin/users" && call.options.method === "POST"
     ).length === 0,
     "a password shorter than 12 characters must be rejected client-side"
   );
@@ -1559,6 +1673,11 @@ async function scenarioAdmin() {
     200
   );
   await settle();
+  assert(
+    !findButton(app.elementFor("user-list"), "Grant admin") &&
+      !findButton(app.elementFor("user-list"), "Revoke admin"),
+    "a disabled user must not be offered a role change"
+  );
 
   findButton(app.elementFor("user-list"), "Reset password").dispatch("click");
   const resetInput = findByClass(app.elementFor("user-list"), "admin-reset-input");
@@ -1615,6 +1734,65 @@ async function scenarioAdmin() {
   assert(app.elementFor("department-name").value === "", "logout must destroy admin form fields");
   assert(app.elementFor("new-user-password").value === "", "logout must destroy password fields");
   assert(app.elementFor("workspace-view").hidden === true, "logout must hide the workspace");
+}
+
+async function scenarioAdminOwnRoleChange() {
+  const app = createApp({ maxInflight: 2 });
+  await start(app);
+  const adminProfile = {
+    user: { ...ALICE_USER, id: "user-admin", username: "admin", full_name: "Ada Admin", role: "admin" },
+    department: { id: "dept-accounting", name: "Accounting" },
+    review_scope: null,
+    review_department_ids: [],
+    review_grants: [],
+  };
+  const adminRow = {
+    id: "user-admin", username: "admin", full_name: "Ada Admin",
+    department_id: "dept-accounting", role: "admin", disabled: false, created_at: 1700000002,
+  };
+  const secondAdmin = {
+    id: "user-alice", username: "alice", full_name: "Alice Tan",
+    department_id: "dept-accounting", role: "admin", disabled: false, created_at: 1700000001,
+  };
+  await signIn(app, adminProfile);
+  app.lastMatching("/workspace/api/conversations?limit=25").respond({ items: [], next: null }, 200);
+  await settle();
+  await settleSummarySurfaces(app);
+  app.elementFor("tab-admin").dispatch("click");
+  await settle();
+  app.lastMatching("/workspace/api/admin/departments?limit=25").respond(
+    { items: [{ id: "dept-accounting", name: "Accounting", created_at: 1700000000 }], next: null },
+    200
+  );
+  await settle();
+  app.lastMatching("/workspace/api/admin/users?limit=25").respond(
+    { items: [adminRow, secondAdmin], next: null },
+    200
+  );
+  await settle();
+
+  const selfRow = findDataRow(app.elementFor("user-list"), "data-user", "user-admin");
+  findButton(selfRow, "Revoke admin").dispatch("click");
+  findButton(selfRow, "Confirm revoke").dispatch("click");
+  const request = app.lastMatching("/workspace/api/admin/users/user-admin/role");
+  assert(request && JSON.parse(request.options.body).role === "employee",
+    "own role change payload mismatch");
+  request.respond({ ...adminRow, role: "employee" }, 200);
+  await settle();
+  const profileRefresh = app.lastMatching("/workspace/api/me");
+  assert(profileRefresh && !profileRefresh.settled,
+    "an own role change must refresh the current profile");
+  profileRefresh.respond(
+    { ...adminProfile, user: { ...adminProfile.user, role: "employee" } },
+    200
+  );
+  await settle();
+  assert(app.elementFor("tab-admin").hidden === true,
+    "an own demotion must hide the admin tab");
+  assert(app.elementFor("admin-panel").hidden === true,
+    "an own demotion must leave the admin view");
+  assert(app.elementFor("global-status").textContent.indexOf("no longer available") >= 0,
+    "an own demotion must explain that admin tools are gone");
 }
 
 async function scenarioAlertProfileFallbackAndAcknowledgement() {
@@ -2293,6 +2471,333 @@ async function scenarioDraftSurvivesListNavigation() {
     "B to A to B navigation must restore B's draft, not clear it");
 }
 
+async function scenarioChatEmptyCtaAndBusy() {
+  const app = createApp();
+  await start(app);
+  await signIn(app);
+  app.lastMatching("/workspace/api/conversations?limit=25").respond(
+    { items: [], next: null },
+    200
+  );
+  await settle();
+  assert(app.elementFor("chat-empty").hidden === false,
+    "an account with no conversations must show the empty state");
+  assert(app.elementFor("chat-empty-title").textContent === "No conversation selected",
+    "the empty state must explain that no conversation is selected");
+  assert(app.elementFor("empty-cta").hidden === false,
+    "the empty state must offer a start control");
+  assert(app.elementFor("empty-new-chat").disabled === false,
+    "the empty start control must be enabled");
+
+  app.elementFor("empty-new-chat").dispatch("click");
+  const create = app.lastMatching("/workspace/api/conversations");
+  assert(create && create.options.method === "POST" && !create.settled,
+    "the empty CTA must start a new conversation");
+  assert(app.elementFor("empty-new-chat").disabled === true &&
+    app.elementFor("new-chat").disabled === true,
+    "both new-chat controls must pause while the create request is pending");
+  assert(app.elementFor("chat-status").getAttribute("data-kind") === "pending",
+    "starting a chat must be reported as pending");
+  app.elementFor("empty-new-chat").dispatch("click");
+  assert(
+    app.callsMatching("/workspace/api/conversations").filter(
+      (call) => call.options.method === "POST"
+    ).length === 1,
+    "the empty CTA must not start a second conversation while one is pending"
+  );
+
+  create.respond({ id: "conv-new-empty", created_at: 1700000100 }, 201);
+  await settle();
+  const createdList = app.lastMatching("/workspace/api/conversations?limit=25");
+  assert(createdList && !createdList.settled,
+    "a created chat must refresh the conversation list before opening");
+  assert(app.elementFor("empty-new-chat").disabled === false,
+    "the empty start control must recover after the create answer");
+  createdList.respond(
+    {
+      items: [{ id: "conv-new-empty", created_at: 1700000100, updated_at: 1700000100 }],
+      next: null,
+    },
+    200
+  );
+  await settle();
+  const detail = app.lastMatching("/workspace/api/conversations/conv-new-empty");
+  assert(detail && !detail.settled, "the created chat detail request missing");
+  assert(app.elementFor("messages").getAttribute("aria-busy") === "true",
+    "a pending conversation load must mark the transcript busy");
+  assert(app.elementFor("chat-empty").hidden === true && app.elementFor("empty-cta").hidden === true,
+    "the empty state must stay hidden while the new chat loads");
+  assert(app.elementFor("chat-status").getAttribute("data-kind") === "pending",
+    "loading the new chat must remain visibly pending");
+  detail.respond({ id: "conv-new-empty", created_at: 1700000100, messages: [] }, 200);
+  await settle();
+  assert(app.elementFor("messages").getAttribute("aria-busy") === null,
+    "a settled conversation load must clear aria-busy");
+  assert(app.elementFor("chat-empty").hidden === false,
+    "an empty new chat must show the empty state");
+  assert(app.elementFor("chat-empty-title").textContent === "No messages yet" &&
+    app.elementFor("chat-empty-text").textContent === "Send the first prompt below.",
+    "an empty new chat must invite the first prompt");
+  assert(app.elementFor("empty-cta").hidden === true,
+    "the start control must not remain inside an opened empty chat");
+  assert(app.elementFor("composer").disabled === false &&
+    app.elementFor("delete-conversation").hidden === false,
+    "an opened empty chat must enable its composer and delete control");
+}
+
+async function scenarioChatGatewayFailureKeepsDraft() {
+  const app = createApp();
+  await start(app);
+  await signIn(app);
+  app.lastMatching("/workspace/api/conversations?limit=25").respond(
+    {
+      items: [{ id: "conv-draft", created_at: 1700000001, updated_at: 1700000002 }],
+      next: null,
+    },
+    200
+  );
+  await settle();
+  app.elementFor("conversation-list").children[0].dispatch("click");
+  app.lastMatching("/workspace/api/conversations/conv-draft").respond(
+    {
+      id: "conv-draft",
+      created_at: 1700000001,
+      messages: [{ id: "m1", role: "assistant", outcome: "allowed", text: "Previous answer", created_at: 1700000002 }],
+    },
+    200
+  );
+  await settle();
+
+  const draft = "keep this draft through the gateway failure";
+  const composer = app.elementFor("composer");
+  composer.value = draft;
+  const keyEvent = composer.dispatch("keydown", { key: "Enter", ctrlKey: true });
+  assert(keyEvent.defaultPrevented, "Ctrl+Enter must suppress the textarea default");
+  const send = app.lastMatching("/workspace/api/conversations/conv-draft/messages");
+  assert(send && send.options.method === "POST", "Ctrl+Enter must send the message");
+  assert(JSON.parse(send.options.body).text === draft, "Ctrl+Enter payload mismatch");
+  assert(app.elementFor("messages").getAttribute("aria-busy") === "true",
+    "a pending turn must mark the transcript busy");
+  composer.dispatch("keydown", { key: "Enter" });
+  assert(app.callsMatching("/workspace/api/conversations/conv-draft/messages").length === 1,
+    "a plain Enter must not submit while a turn is pending");
+
+  send.respond({ error: { code: "UNAVAILABLE", message: "Busy." } }, 503);
+  await settle();
+  const reload = app.lastMatching("/workspace/api/conversations/conv-draft");
+  assert(reload && reload !== send && !reload.settled,
+    "a gateway failure must reload the conversation once");
+  reload.respond(
+    {
+      id: "conv-draft",
+      created_at: 1700000001,
+      messages: [{ id: "m1", role: "assistant", outcome: "allowed", text: "Previous answer", created_at: 1700000002 }],
+    },
+    200
+  );
+  await settle();
+  assert(app.elementFor("composer").value === draft,
+    "a 503 must preserve the unsent draft");
+  assert(app.elementFor("chat-status").getAttribute("data-kind") === "warning",
+    "an unconfirmed gateway result must be reported as a warning");
+  const statusText = app.elementFor("chat-status").textContent;
+  assert(statusText.indexOf("Your text has been kept") >= 0 &&
+    statusText.indexOf("no automatic retry") >= 0,
+    "a 503 must explain the kept draft and the absence of an automatic retry");
+  assert(app.elementFor("messages").getAttribute("aria-busy") === null,
+    "the turn and its reload must clear aria-busy");
+  const recency = app.lastMatching("/workspace/api/conversations?limit=25");
+  if (recency && !recency.settled) {
+    recency.respond(
+      {
+        items: [{ id: "conv-draft", created_at: 1700000001, updated_at: 1700000002 }],
+        next: null,
+      },
+      200
+    );
+    await settle();
+  }
+  app.fireAllTimers();
+  await settle();
+  assert(app.callsMatching("/workspace/api/conversations/conv-draft/messages").length === 1,
+    "a 503 must never auto-retry the turn write");
+}
+
+async function scenarioChatBlockNoticeDeduplicated() {
+  const app = createApp();
+  await start(app);
+  await signIn(app);
+  app.lastMatching("/workspace/api/conversations?limit=25").respond(
+    {
+      items: [{ id: "conv-block", created_at: 1700000001, updated_at: 1700000002 }],
+      next: null,
+    },
+    200
+  );
+  await settle();
+  app.elementFor("conversation-list").children[0].dispatch("click");
+  app.lastMatching("/workspace/api/conversations/conv-block").respond(
+    {
+      id: "conv-block",
+      created_at: 1700000001,
+      messages: [{ id: "m1", role: "assistant", outcome: "allowed", text: "Ready", created_at: 1700000002 }],
+    },
+    200
+  );
+  await settle();
+
+  const prompt = "blocked prompt text";
+  const savedBlock = {
+    stage: "input",
+    reason_code: "INPUT_POLICY_BLOCK",
+    title: "Prompt blocked",
+    reason: "The prompt contains content disallowed by policy.",
+    ref: "block-ref-1",
+  };
+  app.elementFor("composer").value = prompt;
+  app.elementFor("composer-form").dispatch("submit");
+  const send = app.lastMatching("/workspace/api/conversations/conv-block/messages");
+  send.respond(
+    {
+      error: {
+        code: "FORBIDDEN",
+        message: "Prompt blocked",
+        block: savedBlock,
+        request_id: "block-ref-1",
+        turn_request_id: "block-ref-1",
+      },
+    },
+    403
+  );
+  await settle();
+  const reload = app.lastMatching("/workspace/api/conversations/conv-block");
+  assert(reload && reload !== send && !reload.settled,
+    "a block must reload the saved transcript");
+  reload.respond(
+    {
+      id: "conv-block",
+      created_at: 1700000001,
+      messages: [
+        {
+          id: "m2",
+          role: "user",
+          outcome: "blocked",
+          error_code: "POLICY_BLOCK",
+          text: prompt,
+          created_at: 1700000003,
+          block: savedBlock,
+        },
+      ],
+    },
+    200
+  );
+  await settle();
+  const messagesText = app.elementFor("messages").textContent;
+  assert(messagesText.indexOf("Prompt blocked") >= 0 &&
+    messagesText.indexOf("The prompt contains content disallowed by policy.") >= 0,
+    "the saved transcript must state the block reason");
+  assert(messagesText.indexOf("Reference ID: block-ref-1") >= 0,
+    "the saved transcript must state the block reference");
+  assert(messagesText.split("block-ref-1").length - 1 === 1,
+    "the block reference must be rendered exactly once");
+  assert(app.elementFor("chat-block").hidden === true &&
+    app.elementFor("chat-block").textContent === "",
+    "the global block notice must not duplicate the saved notice");
+  assert(app.elementFor("composer").value === "",
+    "a known blocked prompt must clear after the saved transcript reloads");
+  assert(app.elementFor("chat-status").textContent.indexOf("Prompt blocked") >= 0,
+    "the block outcome must remain visible in status");
+  const recency = app.lastMatching("/workspace/api/conversations?limit=25");
+  if (recency && !recency.settled) {
+    recency.respond(
+      {
+        items: [{ id: "conv-block", created_at: 1700000001, updated_at: 1700000003 }],
+        next: null,
+      },
+      200
+    );
+    await settle();
+  }
+}
+
+async function scenarioChatMobileCloseAndDeletedEmptyState() {
+  const app = createApp();
+  await start(app);
+  await signIn(app);
+  app.lastMatching("/workspace/api/conversations?limit=25").respond(
+    {
+      items: [{ id: "conv-delete", created_at: 1700000001, updated_at: 1700000002 }],
+      next: null,
+    },
+    200
+  );
+  await settle();
+  app.elementFor("conversation-list").children[0].dispatch("click");
+  app.lastMatching("/workspace/api/conversations/conv-delete").respond(
+    {
+      id: "conv-delete",
+      created_at: 1700000001,
+      messages: [{ id: "m1", role: "assistant", outcome: "allowed", text: "Delete me", created_at: 1700000002 }],
+    },
+    200
+  );
+  await settle();
+
+  app.elementFor("sidebar-toggle").dispatch("click");
+  assert(app.elementFor("app").getAttribute("data-nav") === "open" &&
+    app.elementFor("sidebar-toggle").getAttribute("aria-expanded") === "true",
+    "the mobile sidebar toggle must open the navigation");
+  app.elementFor("sidebar-close").dispatch("click");
+  assert(app.elementFor("app").getAttribute("data-nav") === "closed" &&
+    app.elementFor("sidebar-toggle").getAttribute("aria-expanded") === "false",
+    "the mobile close control must close the navigation");
+  assert(app.elementFor("sidebar-toggle").focused >= 1,
+    "closing the mobile navigation must restore focus to its toggle");
+  app.elementFor("sidebar-toggle").dispatch("click");
+  assert(app.elementFor("app").getAttribute("data-nav") === "open",
+    "the sidebar must reopen before the Escape check");
+  app.window.dispatch("keydown", { key: "Escape" });
+  assert(app.elementFor("app").getAttribute("data-nav") === "closed" &&
+    app.elementFor("sidebar-toggle").getAttribute("aria-expanded") === "false",
+    "Escape must close the mobile sidebar");
+
+  app.elementFor("delete-conversation").dispatch("click");
+  assert(app.elementFor("delete-confirm").hidden === false,
+    "delete must open an explicit confirmation");
+  app.elementFor("delete-yes").dispatch("click");
+  const deletion = app.callsMatching("/workspace/api/conversations/conv-delete").filter(
+    (call) => call.options.method === "DELETE"
+  ).pop();
+  assert(deletion, "confirmed delete did not issue DELETE");
+  deletion.respond({ status: "deleted" }, 200);
+  await settle();
+  const emptyList = app.lastMatching("/workspace/api/conversations?limit=25");
+  assert(emptyList && !emptyList.settled,
+    "a deleted conversation must refresh the conversation list");
+  emptyList.respond({ items: [], next: null }, 200);
+  await settle();
+  assert(app.elementFor("chat-empty").hidden === false,
+    "a deleted conversation must show the empty state");
+  assert(app.elementFor("chat-empty-title").textContent === "Conversation deleted",
+    "the deleted empty state must confirm the deletion");
+  assert(app.elementFor("chat-empty-text").textContent === "Start a new conversation when ready.",
+    "the deleted empty state must point at the next safe action");
+  assert(app.elementFor("empty-cta").hidden === false,
+    "the deleted empty state must offer a new chat");
+  assert(app.elementFor("empty-new-chat").focused >= 1,
+    "deletion should move focus to the new chat CTA");
+  assert(app.elementFor("composer").disabled === true &&
+    app.elementFor("composer").value === "",
+    "deletion must disable and clear the composer");
+  assert(app.elementFor("messages").children.length === 0 &&
+    app.elementFor("messages").getAttribute("aria-busy") === null,
+    "deletion must clear the transcript and its busy state");
+  assert(app.elementFor("delete-conversation").hidden === true,
+    "deletion must hide the delete control");
+  assert(app.elementFor("chat-status").textContent.indexOf("deleted") >= 0,
+    "deletion must be reported in status");
+}
+
 async function scenarioRevalidationHidesPrivateState() {
   const app = createApp();
   await start(app);
@@ -2839,6 +3344,10 @@ async function main() {
   await scenarioComposerIsolation();
   await scenarioDraftSurvivesListNavigation();
   await scenarioStaleQuietReloadKeepsCurrentDraft();
+  await scenarioChatEmptyCtaAndBusy();
+  await scenarioChatGatewayFailureKeepsDraft();
+  await scenarioChatBlockNoticeDeduplicated();
+  await scenarioChatMobileCloseAndDeletedEmptyState();
   await scenarioRevalidationHidesPrivateState();
   await scenarioAuthChangeRejectsStaleProfile();
   await scenarioGuardReadiness();
@@ -2848,6 +3357,7 @@ async function main() {
   await scenarioQueuedAuthChangeCannotRevealLoginProfile();
   await scenarioLogoutFailureIsRetryable();
   await scenarioAdmin();
+  await scenarioAdminOwnRoleChange();
   await scenarioAlertProfileFallbackAndAcknowledgement();
   await scenarioOwnNavigationFromAdmin();
   await scenarioConversationListRetryAndPreservation();

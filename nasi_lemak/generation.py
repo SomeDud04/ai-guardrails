@@ -20,6 +20,12 @@ Configuration is read only from server-side environment variables:
 * ``NASI_LEMAK_GENERATION_MAX_RESPONSE_BYTES``: optional response size bound.
 * ``NASI_LEMAK_GENERATION_ALLOW_INSECURE_HTTP``: optional explicit ``true``/``1``
   opt-in for a non-loopback plain-HTTP endpoint. Defaults to off.
+* ``NASI_LEMAK_GENERATION_ENABLE_THINKING``: optional strict ``true`` or
+  ``false``.  Unset preserves the existing request body exactly.  When set, the
+  value is forwarded only as ``chat_template_kwargs.enable_thinking``.  Whether
+  the served model honours that provider-specific argument must be verified by
+  the operator; this client makes no such claim and never adds arbitrary
+  ``extra_body`` fields.
 
 Plain HTTP is accepted for loopback hosts by default. A non-loopback plain-HTTP
 endpoint additionally requires the explicit insecure-HTTP opt-in; TLS
@@ -49,6 +55,7 @@ ENV_TIMEOUT = "NASI_LEMAK_GENERATION_TIMEOUT"
 ENV_CA_FILE = "NASI_LEMAK_GENERATION_CA_FILE"
 ENV_MAX_RESPONSE_BYTES = "NASI_LEMAK_GENERATION_MAX_RESPONSE_BYTES"
 ENV_ALLOW_INSECURE_HTTP = "NASI_LEMAK_GENERATION_ALLOW_INSECURE_HTTP"
+ENV_ENABLE_THINKING = "NASI_LEMAK_GENERATION_ENABLE_THINKING"
 
 AUTH_BEARER = "bearer"
 AUTH_NONE = "none"
@@ -79,7 +86,13 @@ class GenerationError(RuntimeError):
     """Safe, generic generation transport failure.
 
     Messages never contain prompts, response bodies, credentials or the URL.
+    ``diagnostic_code`` is an optional fixed internal signal (see
+    :mod:`nasi_lemak.diagnostics`) and is never rendered to a client.
     """
+
+    def __init__(self, message: str, *, diagnostic_code: str | None = None) -> None:
+        super().__init__(message)
+        self.diagnostic_code = diagnostic_code
 
 
 def conservative_byte_budget(serialized: str) -> int:
@@ -186,12 +199,17 @@ class GenerationConfig:
     ca_file: str | None = None
     auth_mode: str = AUTH_BEARER
     allow_insecure_http: bool = False
+    enable_thinking: bool | None = None
 
     def __post_init__(self) -> None:
         if self.auth_mode not in AUTH_MODES:
             raise GenerationConfigError("generation auth mode must be 'bearer' or 'none'")
         if not isinstance(self.allow_insecure_http, bool):
             raise GenerationConfigError("generation insecure-HTTP opt-in must be a boolean")
+        if self.enable_thinking is not None and not isinstance(self.enable_thinking, bool):
+            raise GenerationConfigError(
+                "generation thinking opt-in must be true, false or unset"
+            )
         _validate_url(self.url, allow_insecure_http=self.allow_insecure_http)
         if self.model is None:
             object.__setattr__(self, "model", "")
@@ -260,6 +278,17 @@ class GenerationConfig:
             raise GenerationConfigError(
                 "generation insecure-HTTP opt-in must be true/false or 1/0"
             )
+        enable_thinking_raw = env.get(ENV_ENABLE_THINKING)
+        if enable_thinking_raw is None or enable_thinking_raw.strip() == "":
+            enable_thinking = None
+        elif enable_thinking_raw.strip().lower() in TRUE_VALUES:
+            enable_thinking = True
+        elif enable_thinking_raw.strip().lower() in FALSE_VALUES:
+            enable_thinking = False
+        else:
+            raise GenerationConfigError(
+                "generation thinking opt-in must be true/false or unset"
+            )
         api_key = None if auth_mode == AUTH_NONE else (
             env[ENV_API_KEY] if api_key_override is None else api_key_override
         )
@@ -272,6 +301,7 @@ class GenerationConfig:
             ca_file=env.get(ENV_CA_FILE) or None,
             auth_mode=auth_mode,
             allow_insecure_http=allow_insecure_http,
+            enable_thinking=enable_thinking,
         )
 
     @property
@@ -301,6 +331,7 @@ class GenerationConfig:
             "timeout_seconds": self.timeout,
             "max_response_bytes": self.max_response_bytes,
             "ca_file_configured": self.ca_file is not None,
+            "enable_thinking": self.enable_thinking,
         }
 
 
@@ -367,8 +398,22 @@ def _extract_content(payload: Any) -> str:
         raise GenerationError("generation endpoint returned an unsupported response")
     if choice.get("index", 0) != 0:
         raise GenerationError("generation endpoint returned an unsupported response")
-    if choice.get("finish_reason") != "stop":
-        raise GenerationError("generation endpoint returned a truncated or unsupported completion")
+    finish_reason = choice.get("finish_reason")
+    if finish_reason != "stop":
+        # A reasoning-style model can spend its whole budget on hidden
+        # reasoning_content and report ``length`` with empty visible content.
+        # That is a failed turn, never a partial answer.  The fixed internal
+        # signal helps an operator distinguish it without exposing reasoning.
+        # Only ``length`` receives that code; any other unsupported reason is
+        # still a safe generic failure and must not be mislabelled as truncation.
+        if finish_reason == "length":
+            raise GenerationError(
+                "generation endpoint returned a truncated or unsupported completion",
+                diagnostic_code="generation_truncated",
+            )
+        raise GenerationError(
+            "generation endpoint returned a truncated or unsupported completion"
+        )
     message = choice.get("message")
     if not isinstance(message, dict):
         raise GenerationError("generation endpoint returned an unsupported response")
@@ -380,7 +425,11 @@ def _extract_content(payload: Any) -> str:
         raise GenerationError("generation endpoint returned a refusal response")
     content = message.get("content")
     if not isinstance(content, str) or not content.strip():
-        raise GenerationError("generation endpoint returned no text content")
+        # ``reasoning_content`` is deliberately ignored and never returned.
+        raise GenerationError(
+            "generation endpoint returned no text content",
+            diagnostic_code="generation_no_final_content",
+        )
     return content
 
 
@@ -504,6 +553,11 @@ class GenerationClient:
             "max_tokens": max_tokens,
             "stream": False,
         }
+        if self.config.enable_thinking is not None:
+            # Only the fixed Qwen chat-template switch; no arbitrary extra_body.
+            payload["chat_template_kwargs"] = {
+                "enable_thinking": self.config.enable_thinking
+            }
         return _extract_content(self._request_json(self.config.chat_completions_url, method="POST", payload=payload))
 
     def list_models(self) -> list[str]:

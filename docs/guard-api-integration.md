@@ -13,6 +13,12 @@ of model quality, latency or availability.
 | Input / attack screening | `meta-llama/Llama-Prompt-Guard-2-86M` | API adapter and gateway-owned `/classify` contract v1 implemented and fixture-tested; live endpoint pending |
 | Output screening | `Qwen/Qwen3Guard-Gen-4B` | API adapter runtime-wired for `NASI_LEMAK_GUARD_BACKEND=api`; live endpoint pending |
 
+Prompt Guard 2 is a binary injection/jailbreak classifier, not a harmful-topic
+moderator or a semantic policy engine. Topical output screening is the output
+guard's role; literal deny phrases remain separate deterministic policy checks.
+See [guardrails-comparison.md](guardrails-comparison.md) for the full scope
+comparison.
+
 Official references:
 
 - <https://huggingface.co/Qwen/Qwen3Guard-Gen-4B> — OpenAI-compatible serving,

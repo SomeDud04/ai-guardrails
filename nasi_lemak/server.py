@@ -1219,6 +1219,9 @@ def make_app(
                 request.app.state.control_admission
             )
             payload["workspace"] = "ready" if workspace_ready else "not_ready"
+            # Fixed-key, content-free counters only; never prompt, response,
+            # provider payload or credential material.
+            payload["diagnostics"] = workspace.diagnostics.snapshot()
             if not workspace_ready:
                 ready = False
                 payload["status"] = "not_ready"

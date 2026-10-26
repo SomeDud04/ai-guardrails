@@ -91,6 +91,9 @@ _DUMMY_SALT = b"workspace-dummy!"
 _AUTH_FAILURE = "authentication failed"
 _DEFAULT_TITLE = "Untitled conversation"
 _KEY_VERIFIER_PREFIX = b"workspace-key-verifier:"
+# Stable application namespace for the transaction-scoped PostgreSQL advisory
+# lock shared by role edits and account disable.
+_ADMIN_ROLE_LOCK = 724_919_284_619
 
 
 class WorkspaceError(RuntimeError):
@@ -679,6 +682,18 @@ class WorkspaceStore(PolicyAdminMixin, AlertAdminMixin):
             "created_at": float(row["created_at"]),
         }
 
+    @staticmethod
+    def _lock_admin_roles(db: _Db) -> None:
+        """Serialise role mutations that must preserve the last active admin.
+
+        PostgreSQL uses a transaction-scoped advisory lock so concurrent
+        connections cannot both observe the same admin count and then remove
+        the final active administrator.  SQLite's ``BEGIN IMMEDIATE`` already
+        takes the database write lock before this helper runs.
+        """
+        if db.dialect == "postgres":
+            db.query("SELECT pg_advisory_xact_lock(?)", (_ADMIN_ROLE_LOCK,))
+
     def _require_admin(self, db: _Db, actor_id: str) -> dict[str, Any]:
         row = db.query_one(
             "SELECT id, role, disabled FROM ws_users WHERE id = ?", (actor_id,)
@@ -958,12 +973,21 @@ class WorkspaceStore(PolicyAdminMixin, AlertAdminMixin):
     def disable_user(self, actor_id: str, user_id: str) -> None:
         now = self._now()
         with self._backend.transaction() as db:
+            self._lock_admin_roles(db)
             self._require_admin(db, actor_id)
             row = db.query_one(
-                "SELECT id, department_id FROM ws_users WHERE id = ?", (user_id,)
+                "SELECT id, department_id, role, disabled FROM ws_users WHERE id = ?",
+                (user_id,),
             )
             if not row:
                 raise NotFound("user not found")
+            if row["role"] == "admin" and int(row["disabled"]) == 0:
+                active = db.query_one(
+                    "SELECT COUNT(*) AS total FROM ws_users "
+                    "WHERE role = 'admin' AND disabled = 0"
+                )
+                if int(active["total"]) <= 1:
+                    raise Conflict("last active admin cannot be disabled")
             db.execute(
                 "UPDATE ws_users SET disabled = 1 WHERE id = ?", (user_id,)
             )
@@ -979,6 +1003,60 @@ class WorkspaceStore(PolicyAdminMixin, AlertAdminMixin):
                 department_id=row["department_id"],
                 now=now,
             )
+
+    @_guard
+    def set_user_role(
+        self, actor_id: str, user_id: str, role: str
+    ) -> dict[str, Any]:
+        """Change an existing active user's role, preserving one active admin.
+
+        The actor's persisted admin role is re-read inside the transaction.  A
+        disabled target and the last active administrator are rejected.  Role
+        changes deliberately do not revoke sessions: ``resolve_session`` joins
+        ``ws_users`` on every call and therefore returns the current role.
+        """
+        if not isinstance(role, str) or role not in ("employee", "admin"):
+            raise ValueError("role is invalid")
+        if not isinstance(user_id, str) or not 1 <= len(user_id) <= 64:
+            # A malformed identifier cannot refer to a stored user.
+            raise NotFound("user not found")
+        now = self._now()
+        with self._backend.transaction() as db:
+            self._lock_admin_roles(db)
+            self._require_admin(db, actor_id)
+            row = db.query_one(
+                "SELECT id, username, full_name, department_id, role, disabled, "
+                "created_at FROM ws_users WHERE id = ?",
+                (user_id,),
+            )
+            if not row:
+                raise NotFound("user not found")
+            if int(row["disabled"]) != 0:
+                raise Conflict("user is disabled")
+            if row["role"] == "admin" and role == "employee":
+                active = db.query_one(
+                    "SELECT COUNT(*) AS total FROM ws_users "
+                    "WHERE role = 'admin' AND disabled = 0"
+                )
+                if int(active["total"]) <= 1:
+                    raise Conflict("last active admin cannot be demoted")
+            db.execute(
+                "UPDATE ws_users SET role = ? WHERE id = ?", (role, user_id)
+            )
+            updated = db.query_one(
+                "SELECT id, username, full_name, department_id, role, disabled, "
+                "created_at FROM ws_users WHERE id = ?",
+                (user_id,),
+            )
+            self._log_access(
+                db,
+                actor_id,
+                f"admin.set_user_role:{user_id}:{role}",
+                conversation_id=None,
+                department_id=updated["department_id"],
+                now=now,
+            )
+            return self._public_user(updated)
 
     @_guard
     def grant_review(

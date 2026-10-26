@@ -113,7 +113,8 @@ textarea:focus-visible { outline-offset: -2px; }
   display: flex; flex-direction: column; min-width: 0; min-height: 0;
   background: var(--panel); border-right: 1px solid var(--line);
 }
-.brand { display: flex; align-items: center; gap: .75rem; padding: var(--space-4) var(--space-3) var(--space-3); border-bottom: 1px solid var(--line); }
+.brand { position: relative; display: flex; align-items: center; gap: .75rem; padding: var(--space-4) var(--space-3) var(--space-3); border-bottom: 1px solid var(--line); }
+.nav-close { display: none; position: absolute; top: var(--space-2); right: var(--space-2); }
 .brand-mark { flex: none; color: var(--amber); }
 .brand h1 { margin: 0; font-size: .95rem; letter-spacing: .01em; }
 .brand p { margin: .125rem 0 0; color: var(--muted); font-size: .75rem; }
@@ -200,15 +201,30 @@ textarea:focus-visible { outline-offset: -2px; }
 .confirm button { min-height: 32px; font-size: .76rem; margin-right: var(--space-2); }
 .messages { flex: 1 1 auto; min-height: 0; overflow-y: auto; padding: var(--space-2) 0 var(--space-4); display: flex; flex-direction: column; gap: var(--space-5); }
 .message { width: 100%; margin: 0; }
-.message-head { display: flex; align-items: baseline; gap: var(--space-2); margin-bottom: var(--space-1); color: var(--muted-dim); font-size: .75rem; }
+.message-head { display: flex; align-items: baseline; gap: var(--space-2); margin-bottom: var(--space-2); color: var(--muted-dim); font-size: .75rem; }
 .message-role { color: var(--text-soft); font-weight: 650; letter-spacing: .02em; }
 .message-flag { color: var(--danger); font-weight: 650; }
 .message-flag[data-outcome="blocked"] { color: var(--amber); }
-.message-text { margin: 0; white-space: pre-wrap; overflow-wrap: anywhere; color: var(--text); font-size: .93rem; line-height: 1.62; }
+.message-text { margin: 0; max-width: 74ch; white-space: pre-wrap; overflow-wrap: anywhere; color: var(--text); font-size: .93rem; line-height: 1.62; }
+.message.assistant {
+  padding: var(--space-3); border: 1px solid var(--line);
+  border-radius: var(--radius-lg); background: var(--panel);
+}
 .message.user .message-text { color: var(--text-soft); }
+.message.user { padding-left: var(--space-1); }
 .empty-state { margin: auto; padding: var(--space-5) var(--space-3); max-width: 520px; text-align: center; color: var(--muted); font-size: .88rem; }
 .empty-state strong { display: block; margin-bottom: var(--space-1); color: var(--text-soft); }
+.empty-cta { display: flex; flex-wrap: wrap; justify-content: center; gap: var(--space-2); margin-top: var(--space-4); }
+.empty-cta button { min-width: 148px; }
+.empty-note { margin: var(--space-3) 0 0; color: var(--muted-dim); font-size: .75rem; }
 .chat-status { padding-bottom: var(--space-2); }
+.chat-status[data-kind="pending"]::before {
+  content: ""; display: inline-block; width: .48rem; height: .48rem; margin-right: .45rem;
+  border-radius: 50%; background: var(--amber); vertical-align: .06em;
+  animation: workspace-pulse 1s ease-in-out infinite;
+}
+.messages[aria-busy="true"] { opacity: .55; transition: opacity .16s ease; }
+@keyframes workspace-pulse { 0%, 100% { opacity: .35; } 50% { opacity: 1; } }
 .composer-wrap { padding: var(--space-2) 0 var(--space-4); border-top: 1px solid var(--line); background: var(--bg); }
 .composer {
   display: flex; flex-direction: column; max-width: none; margin: 0;
@@ -229,6 +245,19 @@ textarea:focus-visible { outline-offset: -2px; }
 .reply-choice { display: flex; align-items: center; gap: var(--space-1); color: var(--muted); font-size: .75rem; white-space: nowrap; }
 .reply-choice select { width: auto; min-height: 32px; padding: 0 var(--space-2); font-size: .75rem; }
 .context-notice { margin: var(--space-2) 0 0; max-width: 72ch; color: var(--muted-dim); font-size: .75rem; overflow-wrap: anywhere; }
+.policy-disclosure { margin-top: var(--space-2); }
+.policy-disclosure > summary {
+  width: fit-content; cursor: pointer; color: var(--muted); font-size: .72rem;
+  list-style: none;
+}
+.policy-disclosure > summary::-webkit-details-marker { display: none; }
+.policy-disclosure > summary::after {
+  content: ""; display: inline-block; width: .3rem; height: .3rem; margin-left: .35rem;
+  border-right: 1px solid currentColor; border-bottom: 1px solid currentColor;
+  transform: rotate(45deg) translateY(-1px); vertical-align: .08em;
+}
+.policy-disclosure[open] > summary::after { transform: rotate(225deg) translateY(-1px); }
+.policy-disclosure .policy-summary { margin-top: var(--space-1); }
 .privacy-disclosure { margin-top: var(--space-2); color: var(--muted-dim); font-size: .75rem; }
 .privacy-disclosure summary { width: fit-content; cursor: pointer; color: var(--muted); list-style: none; }
 .privacy-disclosure summary::-webkit-details-marker { display: none; }
@@ -267,6 +296,7 @@ textarea:focus-visible { outline-offset: -2px; }
 .admin-row-meta { color: var(--muted-dim); font-size: .75rem; }
 .admin-row-actions { display: flex; flex-wrap: wrap; gap: var(--space-1); }
 .admin-row-actions button { min-height: 30px; padding: 0 var(--space-2); font-size: .75rem; }
+.admin-role-note { color: var(--muted-dim); font-size: .72rem; align-self: center; }
 .admin-confirm { border: 1px solid #6b332d; border-radius: var(--radius); background: var(--danger-soft); padding: var(--space-2) var(--space-3); display: grid; gap: var(--space-2); margin-top: var(--space-1); }
 .admin-confirm p { margin: 0; color: var(--text-soft); font-size: .75rem; }
 .admin-confirm button { min-height: 30px; font-size: .75rem; }
@@ -356,6 +386,8 @@ textarea:focus-visible { outline-offset: -2px; }
   .sidebar { position: fixed; z-index: 20; inset: 0 auto 0 0; width: min(276px, 86vw); transform: translateX(-102%); transition: transform .18s ease; box-shadow: 18px 0 40px rgba(0,0,0,.45); }
   .app[data-nav="open"] .sidebar { transform: translateX(0); }
   .icon-button { display: grid; }
+  .nav-close { display: grid; }
+  .brand { padding-right: calc(var(--control-h) + var(--space-4)); }
   .topbar { min-height: 52px; padding: var(--space-2) var(--space-3); flex-wrap: wrap; }
   .topbar-title { flex: 1 1 auto; }
   .identity-name, .identity-meta { max-width: 140px; }
@@ -448,6 +480,11 @@ _WORKSPACE_JS = """
   var deleteNo = byId("delete-no");
   var messagesEl = byId("messages");
   var chatEmpty = byId("chat-empty");
+  var chatEmptyTitle = byId("chat-empty-title");
+  var chatEmptyText = byId("chat-empty-text");
+  var emptyCta = byId("empty-cta");
+  var emptyNewChat = byId("empty-new-chat");
+  var sidebarClose = byId("sidebar-close");
   var chatStatus = byId("chat-status");
   var composerForm = byId("composer-form");
   var composer = byId("composer");
@@ -876,10 +913,14 @@ _WORKSPACE_JS = """
     deleteConfirm.hidden = true;
     chatBlock.hidden = true;
     clearNode(chatBlock);
+    messagesEl.removeAttribute("aria-busy");
     policySummary.textContent = "Workspace policy summary loading…";
     newChatButton.disabled = false;
+    emptyNewChat.disabled = false;
     chatEmpty.hidden = false;
-    chatEmpty.textContent = "Select a conversation or start a new one.";
+    chatEmptyTitle.textContent = "No conversation selected";
+    chatEmptyText.textContent = "Choose a saved conversation or start a new chat.";
+    emptyCta.hidden = false;
     messagesEl.hidden = false;
     composer.disabled = true;
     sendButton.disabled = true;
@@ -2471,6 +2512,7 @@ _WORKSPACE_JS = """
     var button = document.createElement("button");
     button.className = "conversation-item";
     button.type = "button";
+    button.setAttribute("aria-label", title + ", " + meta);
     var titleEl = document.createElement("span");
     titleEl.className = "item-title";
     titleEl.textContent = title;
@@ -2496,13 +2538,29 @@ _WORKSPACE_JS = """
     }
   }
 
+  function conversationLabel(item) {
+    // A saved conversation has no trustworthy human title: the list endpoint
+    // never returns one derived from private message text.  Use a neutral
+    // date label instead, with the short id kept in the secondary line so two
+    // chats from the same day stay distinguishable.
+    var stamp = typeof item.updated_at === "number" ? item.updated_at : item.created_at;
+    var date = new Date((typeof stamp === "number" ? stamp : 0) * 1000);
+    if (isNaN(date.getTime())) { return "Chat · " + shortId(item.id); }
+    try {
+      return "Chat · " + date.toLocaleDateString(undefined, { month: "short", day: "numeric" }) +
+        ", " + date.toLocaleTimeString(undefined, { hour: "2-digit", minute: "2-digit" });
+    } catch (error) {
+      return "Chat · " + shortId(item.id);
+    }
+  }
+
   function renderConversationList(items, reset) {
     if (reset) { clearNode(conversationList); }
     for (var i = 0; i < items.length; i += 1) {
       (function (item) {
         if (!isObject(item) || typeof item.id !== "string") { return; }
-        var label = "Conversation " + shortId(item.id);
-        var meta = formatDate(item.updated_at || item.created_at) + " · saved chat";
+        var label = conversationLabel(item);
+        var meta = "ID " + shortId(item.id) + " · saved chat";
         var button = makeItem(label, meta, function () {
           openConversation(item.id);
           setSidebar(false);
@@ -2777,6 +2835,31 @@ _WORKSPACE_JS = """
     }
   }
 
+  function setMessagesBusy(busy) {
+    if (busy) { messagesEl.setAttribute("aria-busy", "true"); }
+    else { messagesEl.removeAttribute("aria-busy"); }
+  }
+
+  function scrollMessagesToEnd() {
+    // Keep the newest turn in view after a reply or a conversation switch.
+    // The harness DOM has no layout, so a missing scrollHeight is harmless.
+    try {
+      messagesEl.scrollTop = typeof messagesEl.scrollHeight === "number"
+        ? messagesEl.scrollHeight : 0;
+    } catch (error) { /* layout is not available in every host */ }
+  }
+
+  function messageShowsBlockReference(reference) {
+    // The saved prompt carries its own block notice.  Looking at the rendered
+    // text avoids a second global banner with the same reason and reference.
+    if (typeof reference !== "string" || !reference) { return false; }
+    var nodes = messagesEl.children || [];
+    for (var i = 0; i < nodes.length; i += 1) {
+      if (String(nodes[i].textContent).indexOf(reference) >= 0) { return true; }
+    }
+    return false;
+  }
+
   function storeDraft(conversationId) {
     if (typeof conversationId !== "string") { return; }
     var value = composer.value;
@@ -2821,23 +2904,29 @@ _WORKSPACE_JS = """
     if (!settings.quiet) { showChatBlock(null); }
     clearNode(messagesEl);
     chatEmpty.hidden = true;
-    chatEmpty.textContent = "";
+    chatEmptyTitle.textContent = "";
+    chatEmptyText.textContent = "";
+    emptyCta.hidden = true;
     deleteButton.hidden = true;
-    if (!settings.quiet) { setStatus(chatStatus, "Loading conversation…"); }
+    setMessagesBusy(true);
+    if (!settings.quiet) { setStatus(chatStatus, "Loading conversation…", "pending"); }
     updateComposer();
     return api("/workspace/api/conversations/" + encodeURIComponent(id)).then(function (result) {
       if (seq !== chatSeq || epoch !== sessionEpoch) { return false; }
       if (authFailure(result)) { return false; }
       if (result.status === 403) {
+        setMessagesBusy(false);
         setStatus(chatStatus, "You do not have permission to open this conversation.", "denied");
         return false;
       }
       if (result.status === 404) {
+        setMessagesBusy(false);
         setStatus(chatStatus, "Conversation not found. It may already have been deleted.", "error");
         return false;
       }
       if (!result.ok || !isObject(result.data) || typeof result.data.id !== "string" ||
           !Array.isArray(result.data.messages)) {
+        setMessagesBusy(false);
         setStatus(chatStatus, serverMessage(result, timeoutOrNetwork(result)), "error");
         return false;
       }
@@ -2847,7 +2936,13 @@ _WORKSPACE_JS = """
         formatDate(result.data.created_at) + " · " + (result.data.messages.length) + " messages";
       renderMessages(messagesEl, result.data.messages);
       chatEmpty.hidden = result.data.messages.length > 0;
-      chatEmpty.textContent = "No messages yet. Send the first prompt below.";
+      if (result.data.messages.length === 0) {
+        chatEmptyTitle.textContent = "No messages yet";
+        chatEmptyText.textContent = "Send the first prompt below.";
+        emptyCta.hidden = true;
+      }
+      setMessagesBusy(false);
+      scrollMessagesToEnd();
       deleteButton.hidden = false;
       markCurrent();
       updateComposer();
@@ -2857,13 +2952,14 @@ _WORKSPACE_JS = """
     });
   }
 
-  newChatButton.addEventListener("click", function () {
+  function startNewChat() {
     if (!signedIn || creating) { return; }
     enterChatView();
     if (currentConversation) { storeDraft(currentConversation.id); }
     creating = true;
     newChatButton.disabled = true;
-    setStatus(chatStatus, "Creating conversation…");
+    emptyNewChat.disabled = true;
+    setStatus(chatStatus, "Creating conversation…", "pending");
     var epoch = sessionEpoch;
     var startSeq = chatSeq;
     var startConversation = currentConversation ? currentConversation.id : null;
@@ -2871,10 +2967,12 @@ _WORKSPACE_JS = """
       if (epoch !== sessionEpoch) { return; }
       creating = false;
       newChatButton.disabled = false;
+      emptyNewChat.disabled = false;
       if (authFailure(result)) { return; }
       if (!result.ok || !isObject(result.data) || typeof result.data.id !== "string") {
         if (chatSeq === startSeq) {
           setStatus(chatStatus, serverMessage(result, timeoutOrNetwork(result)), "error");
+          try { emptyNewChat.focus(); } catch (error) { /* non-fatal */ }
         }
         return;
       }
@@ -2896,6 +2994,13 @@ _WORKSPACE_JS = """
       });
       setSidebar(false);
     });
+  }
+
+  newChatButton.addEventListener("click", startNewChat);
+  emptyNewChat.addEventListener("click", startNewChat);
+  sidebarClose.addEventListener("click", function () {
+    setSidebar(false);
+    try { sidebarToggle.focus(); } catch (error) { /* non-fatal */ }
   });
 
   function submitMessage() {
@@ -2921,21 +3026,28 @@ _WORKSPACE_JS = """
     var epoch = sessionEpoch;
     var send = ++sendSeq;
     drafts[conversationId] = text;
+    // A new turn is an explicit user action, so a stale block notice from the
+    // previous turn is no longer current.  Writes are never retried by the
+    // page; a gateway failure below asks the user to retry manually.
+    showChatBlock(null);
     sending = true;
     updateComposer();
-    setStatus(chatStatus, "Sending…");
+    setMessagesBusy(true);
+    setStatus(chatStatus, "Sending…", "pending");
     api("/workspace/api/conversations/" + encodeURIComponent(conversationId) + "/messages", {
       method: "POST",
       body: JSON.stringify(body)
     }).then(function (result) {
-      if (epoch !== sessionEpoch) { return; }
+      if (epoch !== sessionEpoch) { setMessagesBusy(false); return; }
       if (send !== sendSeq) { return; }
-      if (authFailure(result)) { return; }
+      if (authFailure(result)) { setMessagesBusy(false); return; }
       var sameConversation = currentConversation && currentConversation.id === conversationId &&
         chatSeq === seq;
       var message;
       var kind = "error";
       var keepText = false;
+      var pendingBlock = null;
+      var reportOnReloadFailure = false;
       var noticeText = GENERIC_CONTEXT_NOTICE;
       if (result.timeout) {
         message = "Completion is uncertain: the request timed out and the server may still finish. Refresh this conversation before retrying; your text has been kept.";
@@ -2953,11 +3065,15 @@ _WORKSPACE_JS = """
             ? errorBody.turn_request_id
             : (isObject(errorBody.block) ? errorBody.block.ref : "")
         );
+        showChatBlock(null);
         if (parsedBlock) {
-          showChatBlock(parsedBlock);
+          // The saved prompt renders the reason and reference inline.  Only
+          // fall back to the global notice below if that saved copy is not
+          // available, so the detail is never shown twice.
+          pendingBlock = parsedBlock;
+          reportOnReloadFailure = true;
           message = parsedBlock.title + ". The original prompt is saved with a Blocked label.";
         } else {
-          showChatBlock(null);
           message = "The message was blocked by the safety checks. The original prompt is saved with a Blocked label.";
         }
         kind = "denied";
@@ -2973,10 +3089,16 @@ _WORKSPACE_JS = """
         message = "Too many requests. Your text has been kept; wait a moment and retry.";
         kind = "warning";
         keepText = true;
-      } else if (result.status === 503) {
-        message = "The workspace could not confirm completion. The server may still finish; refresh before retrying.";
+      } else if (result.status === 502 || result.status === 503 || result.status === 504) {
+        // A gateway error never triggers an automatic retry: the turn may or
+        // may not have been stored upstream.  Keep the draft and point at the
+        // safe manual check.
+        message = result.status === 503
+          ? "The gateway could not confirm completion. The server may still finish; refresh this conversation before retrying. Your text has been kept and no automatic retry was attempted."
+          : "The gateway returned " + result.status + " before the turn was confirmed. Your text has been kept; no automatic retry was attempted. Retry manually when the gateway is reachable.";
         kind = "warning";
         keepText = true;
+        reportOnReloadFailure = true;
       } else if (result.status === 413) {
         message = "The latest message is over the configured input limit. Shorten it or ask an administrator about the workspace context budget. Your text has been kept.";
         kind = "denied";
@@ -2992,6 +3114,7 @@ _WORKSPACE_JS = """
       else { delete drafts[conversationId]; }
       if (!sameConversation) {
         sending = false;
+        setMessagesBusy(false);
         updateComposer();
         return;
       }
@@ -3004,6 +3127,7 @@ _WORKSPACE_JS = """
           return;
         }
         sending = false;
+        setMessagesBusy(false);
         updateComposer();
         // A saved turn changes recency.  Refresh only the existing list data;
         // this is a safe read of the first page and does not touch the current
@@ -3013,8 +3137,22 @@ _WORKSPACE_JS = """
           loadAlertSummary();
         }
         contextNotice.textContent = noticeText;
-        if (reloaded) { setStatus(chatStatus, message, kind); }
-        else if (!keepText) { composer.value = text; }
+        // The saved transcript is authoritative for a block: its inline notice
+        // shows the reason and reference once.  If the reload did not deliver
+        // that notice, show the global notice instead of duplicating it.
+        if (pendingBlock && !(reloaded && messageShowsBlockReference(pendingBlock.ref))) {
+          showChatBlock(pendingBlock);
+        }
+        if (reloaded) {
+          scrollMessagesToEnd();
+          setStatus(chatStatus, message, kind);
+        } else {
+          if (!keepText) { composer.value = text; }
+          // A gateway failure must stay visible even when its quiet reload
+          // also failed; otherwise the generic reload error would hide the
+          // retry guidance and the kept draft.
+          if (reportOnReloadFailure) { setStatus(chatStatus, message, kind); }
+        }
       });
     });
   }
@@ -3090,10 +3228,15 @@ _WORKSPACE_JS = """
       deleteButton.hidden = true;
       clearNode(messagesEl);
       chatEmpty.hidden = false;
-      chatEmpty.textContent = "Conversation deleted. Start a new conversation when ready.";
+      chatEmptyTitle.textContent = "Conversation deleted";
+      chatEmptyText.textContent = "Start a new conversation when ready.";
+      emptyCta.hidden = false;
+      emptyNewChat.disabled = false;
+      setMessagesBusy(false);
       composer.value = "";
       updateComposer();
       setStatus(chatStatus, "Conversation and messages deleted.", "ok");
+      try { emptyNewChat.focus(); } catch (error) { /* non-fatal */ }
     });
   });
 
@@ -3629,6 +3772,86 @@ _WORKSPACE_JS = """
     try { input.focus(); } catch (error) { /* non-fatal */ }
   }
 
+  function closeRoleConfirm(box, row) {
+    if (box && box.parentNode) { box.parentNode.removeChild(box); }
+    if (adminActiveConfirm === box) { adminActiveConfirm = null; }
+    try { row.focus(); } catch (error) { /* non-fatal */ }
+  }
+
+  function openRoleChange(row, item, fullName) {
+    var nextRole = item.role === "admin" ? "employee" : "admin";
+    var nextLabel = nextRole === "admin" ? "Administrator" : "Employee";
+    var selfChange = !!(profile && profile.user && profile.user.id === item.id);
+    var question = (nextRole === "admin"
+      ? "Grant administrator access to "
+      : "Revoke administrator access from ") +
+      fullName + " (@" + item.username + ")? Their role will be " + nextLabel + "." +
+      (selfChange && nextRole === "employee"
+        ? " You will lose account administration access. The server refuses a change that would leave the workspace without an administrator."
+        : "");
+    askConfirm(row, question, nextRole === "admin" ? "Confirm grant" : "Confirm revoke", function (box) {
+      var epoch = sessionEpoch;
+      var token = adminStateEpoch;
+      setStatus(adminStatus, (nextRole === "admin"
+        ? "Granting administrator access to "
+        : "Revoking administrator access from ") + fullName + "…");
+      api("/workspace/api/admin/users/" + encodeURIComponent(item.id) + "/role", {
+        method: "POST",
+        body: JSON.stringify({ role: nextRole })
+      }).then(function (result) {
+        if (epoch !== sessionEpoch || token !== adminStateEpoch) { return; }
+        if (adminGuard(result, adminStatus)) {
+          closeRoleConfirm(box, row);
+          return;
+        }
+        if (!result.ok) {
+          // The server is authoritative; a 409 means the requested change
+          // would have removed the last administrator.
+          setStatus(adminStatus, result.status === 409
+            ? "The role change was refused because the workspace must keep at least one administrator. Nothing was changed."
+            : serverMessage(result, timeoutOrNetwork(result)), "error");
+          closeRoleConfirm(box, row);
+          return;
+        }
+        var success = (nextRole === "admin"
+          ? "Administrator access granted to "
+          : "Administrator access revoked from ") +
+          fullName + " (@" + item.username + ").";
+        setStatus(adminStatus, success);
+        closeRoleConfirm(box, row);
+        if (selfChange) {
+          // A role change to this account changes what the cookie profile may
+          // do.  Refresh it before touching admin lists; a demotion ends admin
+          // access immediately and clears the loaded list.
+          loadProfile({ quiet: true }).then(function (ok) {
+            if (epoch !== sessionEpoch) { return; }
+            if (!ok) {
+              setStatus(adminStatus,
+                "The role changed, but your profile could not be refreshed. Reload the page before continuing.",
+                "warning");
+              return;
+            }
+            if (!profile || !profile.user || profile.user.role !== "admin") {
+              setStatus(globalStatus, success + " Administrator tools are no longer available.", "ok");
+              return;
+            }
+            queueAdminList(function () { return loadUsers(true); }).then(function (refreshed) {
+              if (!refreshed && epoch === sessionEpoch && token === adminStateEpoch) {
+                setStatus(adminStatus, success + " The user list could not be refreshed.", "warning");
+              }
+            });
+          });
+          return;
+        }
+        queueAdminList(function () { return loadUsers(true); }).then(function (ok) {
+          if (!ok && epoch === sessionEpoch && token === adminStateEpoch) {
+            setStatus(adminStatus, success + " The user list could not be refreshed.", "warning");
+          }
+        });
+      });
+    });
+  }
+
   function renderUsers(items, reset) {
     if (reset) {
       clearNode(userList);
@@ -3692,6 +3915,16 @@ _WORKSPACE_JS = """
           };
         }(row, item));
         actions.appendChild(disableButton);
+      }
+      if (!item.disabled) {
+        var roleButton = document.createElement("button");
+        roleButton.type = "button";
+        roleButton.className = item.role === "admin" ? "danger" : "ghost";
+        roleButton.textContent = item.role === "admin" ? "Revoke admin" : "Grant admin";
+        roleButton.addEventListener("click", function (target, userItem, displayName) {
+          return function () { openRoleChange(target, userItem, displayName); };
+        }(row, item, fullName));
+        actions.appendChild(roleButton);
       }
       var resetButton = document.createElement("button");
       resetButton.type = "button";
@@ -4875,6 +5108,10 @@ WORKSPACE_HTML = """<!doctype html>
 <body>
 <div class="app" id="app" data-nav="closed">
 <aside class="sidebar" id="sidebar" aria-label="Workspace navigation">
+<button id="sidebar-close" class="icon-button nav-close" type="button">
+<span class="sr-only">Close navigation</span>
+<svg width="16" height="16" viewBox="0 0 16 16" fill="none" aria-hidden="true" focusable="false"><path d="M3.5 3.5l9 9m0-9l-9 9" stroke="currentColor" stroke-width="1.4" stroke-linecap="round"/></svg>
+</button>
 <div class="brand">
 <svg class="brand-mark" width="24" height="24" viewBox="0 0 24 24" fill="none" aria-hidden="true" focusable="false">
 <circle cx="12" cy="12" r="9.2" stroke="currentColor" stroke-width="1.3"/>
@@ -4963,14 +5200,14 @@ WORKSPACE_HTML = """<!doctype html>
 <button id="delete-yes" class="danger" type="button">Delete permanently</button>
 <button id="delete-no" class="ghost" type="button">Cancel</button>
 </div>
-<div id="messages" class="messages" aria-label="Conversation messages"></div>
-<div id="chat-empty" class="empty-state"><strong>No conversation selected</strong>Choose a saved conversation or start a new chat. Original prompts and delivered answers remain encrypted on the server.</div>
+<div id="messages" class="messages" role="log" aria-label="Conversation messages"></div>
+<div id="chat-empty" class="empty-state"><strong id="chat-empty-title">No conversation selected</strong><span id="chat-empty-text">Choose a saved conversation or start a new chat. Original prompts and delivered answers remain encrypted on the server.</span><div id="empty-cta" class="empty-cta"><button id="empty-new-chat" class="primary" type="button">Start a new chat</button></div><p class="empty-note">Your saved conversations stay in the sidebar. New chats begin with an empty transcript.</p></div>
 <div id="chat-block" class="chat-block" role="status" aria-live="polite" hidden></div>
 <p id="chat-status" class="chat-status" role="status" aria-live="polite"></p>
 <div class="composer-wrap">
 <form id="composer-form" class="composer" novalidate>
 <label class="sr-only" for="composer">Message</label>
-<textarea id="composer" rows="2" disabled placeholder="Select or create a conversation to send a message."></textarea>
+<textarea id="composer" rows="2" disabled aria-keyshortcuts="Control+Enter Meta+Enter" placeholder="Select or create a conversation to send a message."></textarea>
 <div class="composer-row">
 <label class="reply-choice" for="reply-length">Reply length
 <select id="reply-length" disabled></select>
@@ -4979,7 +5216,10 @@ WORKSPACE_HTML = """<!doctype html>
 <button id="send" class="primary" type="submit" disabled>Send</button>
 </div>
 <p id="context-notice" class="context-notice" role="status" aria-live="polite">Full saved history is kept. Older messages may be left out of a model request to fit the configured context.</p>
+<details id="policy-disclosure" class="policy-disclosure">
+<summary>Safety and data handling details</summary>
 <p id="policy-summary" class="policy-summary" role="status" aria-live="polite">Workspace policy summary loading…</p>
+</details>
 </form>
 <details class="privacy-disclosure">
 <summary>Privacy and storage</summary>

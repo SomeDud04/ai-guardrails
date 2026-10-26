@@ -16,7 +16,7 @@ from typing import Any
 
 from .audit import AuditStore, SqliteAuditStore
 from .controls import GatewayControl, block_detail
-from .generation import conservative_byte_budget
+from .generation import GenerationError, conservative_byte_budget
 from .guards import GuardInputLimit
 from .limits import ChatLimits
 from .pii import mask_text
@@ -371,6 +371,15 @@ class Gateway:
             output = self.adapters.generate(safe_messages, self.policy.model, max_tokens)
             if not isinstance(output, str):
                 raise ValueError("invalid generation result")
+        except GenerationError as exc:
+            # Preserve the failed-versus-blocked distinction: this is a failed
+            # generation, not a policy block, and no alert is written.  Only a
+            # fixed internal code crosses the boundary.
+            if exc.diagnostic_code:
+                if scan_context is not None:
+                    scan_context.note(exc.diagnostic_code)
+            self._terminal_best_effort(request_id, "failed", "UNAVAILABLE")
+            return self._error(503, "UNAVAILABLE", request_id)
         except GuardInputLimit:
             try:
                 self._audit(request_id, "request_blocked", "blocked", "INPUT_LIMIT")

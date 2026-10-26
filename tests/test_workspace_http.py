@@ -25,7 +25,14 @@ from cryptography.fernet import Fernet
 from fastapi.testclient import TestClient
 
 from nasi_lemak.audit import SqliteAuditStore
+from nasi_lemak.diagnostics import (
+    BLOCK_PAYLOAD_REJECTED,
+    GENERATION_NO_FINAL_CONTENT,
+    GENERATION_TRUNCATED,
+    SIGNAL_CODES,
+)
 from nasi_lemak.gateway import Gateway
+from nasi_lemak.generation import GenerationError
 from nasi_lemak.server import make_app
 from nasi_lemak.workspace_http import ENV_ALLOW_HTTP, ENV_ENABLED, _LoginLimiter
 from nasi_lemak.workspace_http import load_workspace_runtime
@@ -684,6 +691,93 @@ class TurnFlowTests(WorkspaceHTTPBase):
             headers=self.auth(token),
         )
         self.assert_error(response, 503, "UNAVAILABLE")
+
+    def test_truncated_generation_records_fixed_counter(self) -> None:
+        self.adapters.generate_error = GenerationError(
+            "synthetic truncated response",
+            diagnostic_code=GENERATION_TRUNCATED,
+        )
+        token = self.login()
+        conversation_id = self.new_conversation(token)
+        response = self.client.post(
+            f"/workspace/api/conversations/{conversation_id}/messages",
+            json={"text": "truncated generation prompt"},
+            headers=self.auth(token),
+        )
+        self.assert_error(response, 503, "UNAVAILABLE")
+
+        health = self.client.get("/health/ready")
+        self.assertEqual(health.status_code, 200, health.text)
+        counters = health.json()["diagnostics"]
+        self.assertEqual(counters[GENERATION_TRUNCATED], 1)
+        self.assertEqual(counters[GENERATION_NO_FINAL_CONTENT], 0)
+        self.assertEqual(counters[BLOCK_PAYLOAD_REJECTED], 0)
+        self.assertNotIn("truncated generation prompt", health.text)
+
+    def test_malformed_policy_block_records_counter_without_alert(self) -> None:
+        class MalformedBlockGateway:
+            def __init__(self, gateway: Gateway) -> None:
+                self.policy = gateway.policy
+                self.adapters = gateway.adapters
+
+            def handle(
+                self,
+                method: str,
+                path: str,
+                headers: dict[str, str],
+                body: dict[str, Any],
+                *,
+                scan_context: Any = None,
+                control: Any = None,
+            ):
+                return 403, {
+                    "error": {
+                        "code": "POLICY_BLOCK",
+                        "request_id": "req_malformed_block",
+                        "block": {"reason_code": "UNKNOWN_REASON"},
+                    }
+                }
+
+        self.app.state.workspace.internal_gateway = MalformedBlockGateway(
+            self.gateway
+        )
+        token = self.login()
+        conversation_id = self.new_conversation(token)
+        response = self.client.post(
+            f"/workspace/api/conversations/{conversation_id}/messages",
+            json={"text": "malformed block prompt"},
+            headers=self.auth(token),
+        )
+        self.assert_error(response, 503, "UNAVAILABLE")
+        self.assertNotIn("UNKNOWN_REASON", response.text)
+
+        health = self.client.get("/health/ready")
+        self.assertEqual(health.status_code, 200, health.text)
+        self.assertEqual(health.json()["diagnostics"][BLOCK_PAYLOAD_REJECTED], 1)
+
+        read = self.store.read_conversation(self.alice["id"], conversation_id)
+        last = read["messages"][-1]
+        self.assertEqual(last["outcome"], "failed")
+        self.assertEqual(last["error_code"], "UNAVAILABLE")
+        self.assertNotIn("block", last)
+
+    def test_health_exposes_only_fixed_diagnostic_counters(self) -> None:
+        token = self.login()
+        conversation_id = self.new_conversation(token)
+        response = self.client.post(
+            f"/workspace/api/conversations/{conversation_id}/messages",
+            json={"text": "ordinary question"},
+            headers=self.auth(token),
+        )
+        self.assertEqual(response.status_code, 200, response.text)
+
+        health = self.client.get("/health/ready")
+        self.assertEqual(health.status_code, 200, health.text)
+        counters = health.json()["diagnostics"]
+        self.assertEqual(set(counters), set(SIGNAL_CODES))
+        self.assertEqual(counters, {code: 0 for code in sorted(SIGNAL_CODES)})
+        self.assertNotIn(GATEWAY_REPLY, health.text)
+        self.assertNotIn(token, health.text)
 
     def test_malformed_history_fails_closed_without_generation(self) -> None:
         class MalformedContextStore(_ProxyStore):
