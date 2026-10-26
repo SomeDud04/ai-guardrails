@@ -11,6 +11,7 @@ from pathlib import Path
 from nasi_lemak import generation_cli
 from nasi_lemak.gateway import MemoryAdapters
 from nasi_lemak.generation import (
+    APPLICATION_USER_AGENT,
     AUTH_NONE,
     ENV_ALLOW_INSECURE_HTTP,
     ENV_API_KEY,
@@ -68,7 +69,16 @@ class _Handler(BaseHTTPRequestHandler):
         )
         if self.server.delay:
             time.sleep(self.server.delay)
-        status, headers, response_body = self.server.reply
+        required_user_agent = getattr(self.server, "required_user_agent", None)
+        if required_user_agent is not None and self.headers.get("User-Agent") != required_user_agent:
+            # Simulate a provider front end that blocks urllib's default agent.
+            status, headers, response_body = (
+                403,
+                {"Content-Type": "text/plain"},
+                b"error code: 1010\n",
+            )
+        else:
+            status, headers, response_body = self.server.reply
         self.close_connection = True
         try:
             self.send_response(status)
@@ -101,6 +111,7 @@ class FixtureMixin(unittest.TestCase):
         httpd = _FixtureServer(("127.0.0.1", 0), _Handler)
         httpd.requests = []
         httpd.delay = delay
+        httpd.required_user_agent = None
         httpd.reply = (
             status,
             headers if headers is not None else {"Content-Type": "application/json"},
@@ -298,6 +309,7 @@ class TransportTests(FixtureMixin):
         self.assertEqual(header(request, "Authorization"), "Bearer " + KEY)
         self.assertEqual(header(request, "Content-Type"), "application/json")
         self.assertEqual(header(request, "Accept"), "application/json")
+        self.assertEqual(header(request, "User-Agent"), APPLICATION_USER_AGENT)
         self.assertEqual(
             json.loads(request["body"]),
             {
@@ -320,6 +332,32 @@ class TransportTests(FixtureMixin):
         self.assertIsNone(header(httpd.requests[0], "Authorization"))
         self.assertNotIn("stale-key-must-not-be-sent", httpd.requests[0]["body"].decode("utf-8"))
         self.assertNotIn("stale-key-must-not-be-sent", json.dumps(client.config.safe_summary()))
+
+    def test_application_user_agent_is_sent_on_generation_and_unauthenticated_get(self):
+        # The fixture rejects a missing or Python-default agent with 403/1010,
+        # matching the reported provider front-end behaviour.  This test fails
+        # before the shared transport sets its own stable application agent.
+        httpd = self.start_server()
+        httpd.required_user_agent = APPLICATION_USER_AGENT
+
+        client = GenerationClient(self.config(httpd))
+        self.assertEqual(
+            client.generate([{"role": "user", "content": "hello"}], 8),
+            "safe answer",
+        )
+        self.assertEqual(
+            header(httpd.requests[0], "User-Agent"), APPLICATION_USER_AGENT
+        )
+
+        self.set_json(httpd, {"data": [{"id": "alpha"}]})
+        anonymous = GenerationClient(
+            self.config(httpd, model="", api_key=None, auth_mode=AUTH_NONE)
+        )
+        self.assertEqual(anonymous.list_models(), ["alpha"])
+        self.assertEqual(
+            header(httpd.requests[-1], "User-Agent"), APPLICATION_USER_AGENT
+        )
+        self.assertIsNone(header(httpd.requests[-1], "Authorization"))
 
     def test_model_listing_does_not_require_a_generation_model(self):
         httpd = self.start_server()

@@ -24,7 +24,7 @@ from fastapi.testclient import TestClient
 from nasi_lemak import server as server_module
 from nasi_lemak.audit import SqliteAuditStore
 from nasi_lemak.gateway import Policy
-from nasi_lemak.generation import GenerationClient, GenerationConfig
+from nasi_lemak.generation import APPLICATION_USER_AGENT, GenerationClient, GenerationConfig
 from nasi_lemak.guard_api import (
     INPUT_GUARD_CONTRACT_V1,
     InputGuardApiAdapter,
@@ -272,6 +272,34 @@ class FixtureMixin(unittest.TestCase):
         )
 
 
+class UserAgentTransportTests(FixtureMixin):
+    def test_application_user_agent_is_sent_on_both_hosted_posts(self) -> None:
+        # A missing or Python-default agent is rejected like the reported provider
+        # front end; both hosted adapters share the fixed application agent.
+        def responder(request):
+            if header(request, "User-Agent") != APPLICATION_USER_AGENT:
+                return 403, b"error code: 1010\n"
+            if request["json"]["model"] == GROQ_PROMPT_GUARD_MODEL:
+                return groq_payload()
+            return chat_payload("safe", model=CLOUDFLARE_LLAMA_GUARD_MODEL)
+
+        httpd = self.start_server(responder)
+        self.assertEqual(
+            self.input_adapter(httpd).scan_attack("user: hello"),
+            {"decision": "allow"},
+        )
+        self.assertEqual(
+            self.output_adapter(httpd).scan_response(
+                [{"role": "user", "content": "hello"}], "hello"
+            ),
+            {"safe": True},
+        )
+        self.assertEqual(
+            [header(request, "User-Agent") for request in httpd.requests],
+            [APPLICATION_USER_AGENT, APPLICATION_USER_AGENT],
+        )
+
+
 class GroqInputAdapterTests(FixtureMixin):
     def test_request_shape_and_threshold_boundary(self) -> None:
         httpd = self.start_server(lambda request: groq_payload("0.05"))
@@ -282,6 +310,7 @@ class GroqInputAdapterTests(FixtureMixin):
         self.assertEqual(request["method"], "POST")
         self.assertEqual(request["path"], "/v1/chat/completions")
         self.assertEqual(header(request, "Authorization"), "Bearer " + INPUT_KEY)
+        self.assertEqual(header(request, "User-Agent"), APPLICATION_USER_AGENT)
         self.assertEqual(
             request["json"],
             {
@@ -484,6 +513,7 @@ class CloudflareOutputAdapterTests(FixtureMixin):
         request = httpd.requests[0]
         self.assertEqual(request["path"], "/v1/chat/completions")
         self.assertEqual(header(request, "Authorization"), "Bearer " + OUTPUT_KEY)
+        self.assertEqual(header(request, "User-Agent"), APPLICATION_USER_AGENT)
         self.assertEqual(
             request["json"],
             {

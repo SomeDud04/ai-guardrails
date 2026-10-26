@@ -18,38 +18,35 @@ conversations created after activation are available in `/workspace`.
 - The already-configured mode env files and secret files are in place, for
   example `.secrets/compose.env`, `.secrets/compose.test.env` (or
   `compose.pilot.env`) and, for the trusted-LAN demo, `.secrets/compose.demo.env`.
+  The commands below use the test-mode example. An existing API-mode deployment
+  with hosted guards must keep its own hosted API env file, guard env file and
+  overlays exactly as documented in
+  [docs/hosted-guard-setup.md](hosted-guard-setup.md); do not replace them with
+  the test-mode files or switch the deployment to test mode.
 - A PostgreSQL administrator credential for the one-off migration step.
 - No production traffic. The model guards remain inactive in the current demo;
   do not describe this as guarded-mode or production efficacy evidence.
 
-Set these shell abbreviations for the existing mode. Replace `compose.test.yaml`
-with `compose.pilot.yaml` only if that mode is already configured.
-
-```bash
-cd ~/ai-guardrails
-BASE=(sudo docker compose
-  --env-file .secrets/compose.env
-  --env-file .secrets/compose.test.env
-  -f compose.yaml -f compose.test.yaml)
-```
-
-For the trusted-LAN demo, use the existing demo files as well:
-
-```bash
-BASE=(sudo docker compose
-  --env-file .secrets/compose.env
-  --env-file .secrets/compose.test.env
-  --env-file .secrets/compose.demo.env
-  -f compose.yaml -f compose.test.yaml -f compose.demo.yaml)
-```
+Run the commands from the existing checkout, for example `cd ~/ai-guardrails`.
+They repeat every `--env-file` and `-f` argument, so they remain valid in a fresh
+shell, tmux pane or login. Do not replace them with a shell array: an array does
+not survive a new shell, and an unset or empty expansion silently changes the
+command. Replace `compose.test.yaml` with `compose.pilot.yaml` only if that mode
+is already configured, and add the demo env/overlay only when that ingress is
+part of the deployment.
 
 ## 1. Rebuild the existing gateway image first
 
 Use the existing base and mode configuration; do not change targets or add ML
-dependencies.
+dependencies. Add `--env-file .secrets/compose.demo.env` and
+`-f compose.demo.yaml` when the demo ingress is deployed.
 
 ```bash
-"${BASE[@]}" build gateway
+sudo docker compose \
+  --env-file .secrets/compose.env \
+  --env-file .secrets/compose.test.env \
+  -f compose.yaml -f compose.test.yaml \
+  build gateway
 ```
 
 ## 2. Generate the stable encryption key
@@ -136,7 +133,11 @@ elevated attributes or foreign membership, and grants only explicit privileges
 on the fixed `ws_*` tables. It creates no LOGIN account and contains no password.
 
 ```bash
-"${BASE[@]}" exec -T db \
+sudo docker compose \
+  --env-file .secrets/compose.env \
+  --env-file .secrets/compose.test.env \
+  -f compose.yaml -f compose.test.yaml \
+  exec -T db \
   sh -c 'psql -U "$POSTGRES_USER" -d "$POSTGRES_DB" -v ON_ERROR_STOP=1' \
   < nasi_lemak/workspace_roles.sql
 ```
@@ -148,7 +149,11 @@ its password interactively with `\password`, which does not enter shell history.
 Never pass the password as a command argument.
 
 ```bash
-"${BASE[@]}" exec db \
+sudo docker compose \
+  --env-file .secrets/compose.env \
+  --env-file .secrets/compose.test.env \
+  -f compose.yaml -f compose.test.yaml \
+  exec db \
   sh -c 'psql -U "$POSTGRES_USER" -d "$POSTGRES_DB"'
 ```
 
@@ -240,11 +245,17 @@ sudo docker compose \
   --department "IT"
 ```
 
-Then remove the privileged DSN; it is not needed by the gateway:
+Two safe failure modes matter here:
 
-```bash
-shred -u .secrets/workspace/migration_dsn
-```
+- **Passwords do not match:** the command exits before creating or resetting
+  anything. Retry with the same DSN; do not shred it first.
+- **An administrator already exists:** the command reports that and does not
+  reset, delete or replace that account. Sign in with the existing administrator;
+  the refusal itself is not a reason to delete data or recreate the DSN.
+
+Do **not** remove the privileged DSN yet. Keep it until the verification below
+confirms the schema and an administrator login. Cleanup is a separate,
+after-success action.
 
 `bootstrap-admin` does not grant review access. Grant reviewer scope explicitly
 from the admin panel only when approved; admins have no implicit content access.
@@ -257,6 +268,39 @@ from the admin panel only when approved; admins have no implicit content access.
 Check `/health/ready` and the page through the same URL. A `503` means the
 workspace configuration, schema, key or runtime credential is unavailable; the
 error is deliberately generic and does not print the DSN or key.
+
+Then verify the workspace objects and an administrator login before removing the
+migration DSN:
+
+```bash
+sudo docker compose \
+  --env-file .secrets/compose.env \
+  --env-file .secrets/compose.test.env \
+  -f compose.yaml -f compose.test.yaml \
+  exec -T db \
+  sh -c 'psql -U "$POSTGRES_USER" -d "$POSTGRES_DB" -c "\dt ws_*"'
+```
+
+This lists `ws_*` tables through the actual connection/search path instead of
+assuming a hardcoded schema name. Open `/workspace` and sign in as the
+administrator created above, or as the pre-existing administrator if bootstrap
+reported one already exists. Confirm the expected account and role are shown.
+
+Only after all of the following are true, remove the privileged migration DSN:
+
+1. bootstrap reported success, or bootstrap reported an existing administrator
+   and that account signs in;
+2. the `ws_*` objects are visible;
+3. the workspace page loads and the administrator login is confirmed.
+
+```bash
+shred -u .secrets/workspace/migration_dsn
+```
+
+If any check fails, keep the DSN for a safe retry. A password mismatch or an
+existing-administrator refusal changes no account, and shredding is never part
+of a bootstrap attempt. If you already shredded the DSN before verification and
+need to retry, recreate it with the migration credential as in section 2.
 
 Browser sessions use a host-only `HttpOnly`, `SameSite=Strict`,
 `Path=/workspace` cookie issued only by a page login. It expires with the same

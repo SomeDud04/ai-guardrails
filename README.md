@@ -299,6 +299,15 @@ display name `Qwen3.8 27B FP8` as an API model ID. No successful serving, model
 listing or inference has been demonstrated in this workspace; operator-reported
 VM generation was not independently verified here.
 
+If a reasoning-style model returns empty or whitespace `content` because its
+budget was spent on hidden reasoning, the client rejects it with the generic
+`generation endpoint returned no text content`. It never reads or returns
+`reasoning_content`, does not retry and does not increase the request budget.
+Use an adequate `max_tokens` (the gateway accepts at most 256 per request) and a
+provider model that returns ordinary assistant content. See
+[docs/hosted-guard-setup.md](docs/hosted-guard-setup.md) for the deployment
+troubleshooting note.
+
 An earlier `GET .../v1/models` attempt timed out on port 80. No further live
 network checks are made in this workspace.
 

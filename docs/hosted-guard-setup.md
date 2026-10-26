@@ -88,13 +88,26 @@ fallback to another key.
 
 ## 3. Configure the nonsecret hosted env file
 
-Copy the example and replace every absolute path and the Cloudflare
-`ACCOUNT_ID` placeholder:
+Copy the example, open it in a plain editor, and replace every absolute path and
+the Cloudflare account placeholder yourself:
 
 ```bash
 cp docs/compose.hosted-guards.env.example .secrets/compose.hosted-guards.env
 nano .secrets/compose.hosted-guards.env
 ```
+
+Replace every `/ABSOLUTE/...` value with its real absolute path. In
+`NASI_LEMAK_OUTPUT_GUARD_URL`, replace the literal token `ACCOUNT_ID` inside
+`accounts/ACCOUNT_ID/ai/v1` with the real Cloudflare account identifier. Do not
+try to substitute the real identifier with a pattern that matches the real value
+instead of the placeholder, and do not save the real identifier in this repository,
+the example file or chat. Keep the key files separate from this env file.
+
+After saving, do not grep the env file to check the placeholders: a matching
+line would print the whole configuration line. Use the field-only read-only
+preflight in section 6 instead. It inspects the resolved configuration, reports
+an unresolved placeholder by field path and never prints a configured value.
+Re-run it after editing this file and continue only after `Preflight OK`.
 
 The example contains the required pair:
 
@@ -139,14 +152,49 @@ Use synthetic content only until external data flow to both providers is
 explicitly approved. The guard models must not receive real employee or
 customer content merely because the deployment starts successfully.
 
-## 6. Recreate the gateway with the correct overlays
+## 6. Preflight, rebuild and recreate the gateway with the correct overlays
 
-`--force-recreate` alone does **not** build newly pulled code. Both examples
-include `--build` so the gateway image is rebuilt from the current checkout
-before the container starts. `compose.api.yaml` replaces the old test/pilot
-mode overlay; it is never combined with `compose.test.yaml` or
-`compose.pilot.yaml`. Follow the existing layout: base + API mode + workspace
-(if enabled) + demo/nginx ingress (if enabled).
+Run the read-only preflight **before** any rebuild or recreate. It invokes only
+`docker compose ... config --format json` with exactly the env files and overlays
+you are about to deploy, in the same order, then checks the resolved local bind
+sources and file-based secrets. It never builds, starts, stops or removes a
+container, never reads secret file contents, never contacts a provider and never
+prints the rendered configuration or child stderr. If your Docker socket requires
+`sudo`, prefix the preflight command with `sudo` as well.
+
+Without the workspace or demo ingress:
+
+```bash
+python3 scripts/check_hosted_setup.py \
+  --env-file .secrets/compose.env \
+  --env-file .secrets/compose.hosted-guards.env \
+  -f compose.yaml -f compose.api.yaml
+```
+
+With the existing workspace overlay and nginx demo ingress:
+
+```bash
+python3 scripts/check_hosted_setup.py \
+  --env-file .secrets/compose.env \
+  --env-file .secrets/compose.hosted-guards.env \
+  --env-file .secrets/compose.workspace.env \
+  --env-file .secrets/compose.demo.env \
+  -f compose.yaml -f compose.api.yaml -f compose.workspace.yaml -f compose.demo.yaml
+```
+
+Continue only after it prints `Preflight OK`. `--force-recreate` alone does **not**
+build newly pulled code, so build and recreate explicitly. The full commands are
+deliberately repeated rather than kept in a hidden `BASE` array: a shell array
+does not survive a new shell or tmux pane, and an empty array silently turns the
+intended command into a different one. If you do use an array, define it in the
+same shell and fail when it is unset or empty.
+
+Before running the build/up pair that deploys the new code, record the
+deployment time and keep it with the image ID for section 7:
+
+```bash
+deployed_at="$(date -u +%Y-%m-%dT%H:%M:%SZ)"
+```
 
 Without the workspace or demo ingress:
 
@@ -155,7 +203,13 @@ sudo docker compose \
   --env-file .secrets/compose.env \
   --env-file .secrets/compose.hosted-guards.env \
   -f compose.yaml -f compose.api.yaml \
-  up -d --build --no-deps --force-recreate gateway
+  build gateway
+
+sudo docker compose \
+  --env-file .secrets/compose.env \
+  --env-file .secrets/compose.hosted-guards.env \
+  -f compose.yaml -f compose.api.yaml \
+  up -d --no-deps --force-recreate gateway
 ```
 
 With the existing workspace overlay and nginx demo ingress:
@@ -167,27 +221,133 @@ sudo docker compose \
   --env-file .secrets/compose.workspace.env \
   --env-file .secrets/compose.demo.env \
   -f compose.yaml -f compose.api.yaml -f compose.workspace.yaml -f compose.demo.yaml \
-  up -d --build --no-deps --force-recreate gateway nginx
+  build gateway nginx
+
+sudo docker compose \
+  --env-file .secrets/compose.env \
+  --env-file .secrets/compose.hosted-guards.env \
+  --env-file .secrets/compose.workspace.env \
+  --env-file .secrets/compose.demo.env \
+  -f compose.yaml -f compose.api.yaml -f compose.workspace.yaml -f compose.demo.yaml \
+  up -d --no-deps --force-recreate gateway nginx
 ```
 
-The existing nginx service already forwards the gateway routes; no new nginx
+`compose.api.yaml` replaces the old test/pilot mode overlay; it is never combined
+with `compose.test.yaml` or `compose.pilot.yaml`. Follow the existing layout: base
++ API mode + workspace (if enabled) + demo/nginx ingress (if enabled). The
+existing nginx service already forwards the gateway routes; no new nginx
 configuration is introduced here. Add `-f compose.api-ca.yaml` only when both
-approved endpoints use a private CA, and preserve the existing workspace
-secrets, the database volume and the operator policy. Use `stop`/`start` for
-maintenance. For later reviewed code updates, rerun the same command with
-`--build`; `up -d` alone reuses the existing image and does not apply newly
-pulled source.
+approved endpoints use a private CA, and preserve the existing workspace secrets,
+the database volume and the operator policy.
+
+A failed `up --force-recreate` can stop the existing container before the new one
+starts. Do not debug on the stopped stack. Restore the last known-good env/overlay
+set, rerun the read-only preflight, then build and recreate with that same set.
+Never use `docker compose down -v`: it removes the database volume and the saved
+workspace content. Use `stop`/`start` for maintenance. For later reviewed code
+updates, repeat the same preflight/build/up sequence; `up -d` alone reuses the
+existing image.
+
+### Temporary local User-Agent patch when pulling upstream
+
+Earlier deployments carried a one-line local patch adding
+`User-Agent: nasi-lemak-gateway/0.1` to `nasi_lemak/generation.py`. Reviewed code
+now sends the same value from the shared transport. Before pulling, inspect both
+the working-tree and index state for that file:
+
+```bash
+git status --short
+git diff -- nasi_lemak/generation.py
+git diff --cached -- nasi_lemak/generation.py
+```
+
+A conflicting local modification makes `git pull --ff-only` refuse. That aborted
+pull does not create a merge-conflict state, so there are no conflict markers to
+edit. Instead, make a unique backup directory outside the repository, keeping
+the full file and its diff against HEAD:
+
+```bash
+backup_root="$HOME/ai-guardrails-local-patches"
+backup_dir="$backup_root/$(date -u +%Y%m%dT%H%M%SZ)"
+mkdir -p "$backup_root"
+mkdir "$backup_dir"
+cp -p nasi_lemak/generation.py "$backup_dir/generation.py.bak"
+git diff HEAD -- nasi_lemak/generation.py > "$backup_dir/generation-vs-HEAD.patch"
+```
+
+Restore and pull **only when all of the following are true**:
+
+- `git diff --cached --quiet -- nasi_lemak/generation.py` succeeds, so the index
+  holds no staged change to that file;
+- `git status --short --untracked-files=no` lists exactly
+  ` M nasi_lemak/generation.py` and no other tracked modification;
+- the unstaged diff is exactly the sole one-line User-Agent addition and changes
+  nothing else in the file.
+
+If another modification or any staged change exists, stop. Keep those changes,
+do not restore, stash, reset or discard them, and reconcile them with the
+operator first. Never restore, reset or revert any other path or history.
+
+When the conditions above hold, restore only that file's working-tree content
+from HEAD, verify it is clean, then fast-forward:
+
+```bash
+git restore --worktree --source=HEAD -- nasi_lemak/generation.py
+git status --short -- nasi_lemak/generation.py
+git diff --quiet HEAD -- nasi_lemak/generation.py
+git pull --ff-only
+```
+
+`git restore --worktree` rewrites only the named working-tree file; it does not
+change the index, other files or history. Even with a clean local file, the pull
+is not guaranteed to succeed: `--ff-only` either advances to the upstream commit
+or exits without changing local commits or the working tree. If it fails, stop
+and inspect the message; do not delete untracked files, stash, reset or resolve
+nonexistent merge conflicts.
+
+After the pull, inspect `nasi_lemak/generation.py`. If upstream now sends the
+identical User-Agent from the shared transport, keep the backup until you have
+confirmed there are no other local edits, then discard it as your own cleanup.
+If upstream did not land the fix, reapply the documented one-line change from
+the backup. Check the patch first with
+`git apply --check "$backup_dir/generation-vs-HEAD.patch"`; use `git apply` only
+if that check succeeds, otherwise add the line manually. Keep the backup until
+the next reviewed release.
 
 ## 7. Verify configuration, then verify live behaviour separately
 
-Readiness and configuration checks are not quality evidence:
+Readiness and configuration checks are not quality evidence. First confirm that
+the running container is the image you just built; a `200` from an old container
+left running is not deployment evidence:
 
 ```bash
 sudo docker compose \
   --env-file .secrets/compose.env \
   --env-file .secrets/compose.hosted-guards.env \
-  -f compose.yaml -f compose.api.yaml ps
+  -f compose.yaml -f compose.api.yaml ps gateway
 
+# Record the actual built image ID, not just the tag.
+sudo docker image inspect nasi-lemak-gateway:0.1.0 --format '{{.Id}}'
+
+# Repeat with the exact workspace/demo env/overlay set from section 6 when used.
+container_id="$(sudo docker compose \
+  --env-file .secrets/compose.env \
+  --env-file .secrets/compose.hosted-guards.env \
+  -f compose.yaml -f compose.api.yaml ps -q gateway)"
+sudo docker inspect \
+  --format '{{.Image}} {{.Created}} {{.State.StartedAt}}' \
+  "$container_id"
+```
+
+A build may reuse the cache, so do not rely on a newly appearing tag or on the
+image's own `.Created` timestamp. Compare the running container's `.Image` value
+with the actual image ID recorded after `build`; they must match exactly. Compare
+the container's `.Created` and `.State.StartedAt` with the `${deployed_at}` value
+recorded in section 6; both must be at or after that deployment time. A `200`
+response alone, or an old image-created timestamp, is not deployment evidence.
+Then check readiness through the configured `GATEWAY_PORT`:
+
+```bash
 # Use the configured GATEWAY_PORT, not a hardcoded 8000.
 readiness_port="$(sed -n 's/^GATEWAY_PORT=//p' .secrets/compose.env | tail -n 1)"
 curl -fsS "http://127.0.0.1:${readiness_port:-8000}/health/ready"
@@ -200,6 +360,17 @@ custom port is never satisfied by the default `8000` URL.
 composition started. It does **not** contact either provider at startup and
 does not prove endpoint reachability, the numeric Prompt Guard response shape,
 the Cloudflare model echo, threshold calibration, quota or data handling.
+
+### Reasoning-only blank content
+
+If the generation provider returns empty or whitespace `content` while also
+returning a hidden `reasoning_content` field, the transport rejects it with the
+generic `generation endpoint returned no text content`. It never reads, returns
+or logs `reasoning_content`, and it does not retry or silently increase the token
+budget. Use an adequate generation budget (this gateway accepts a request
+`max_tokens` of at most 256) and a provider model that returns ordinary assistant
+content. A budget consumed entirely by hidden reasoning can leave no visible
+answer even though the provider call succeeded.
 
 Before sending any real content, confirm the provider data-flow approval and
 use synthetic inputs only. The following remain explicit **pending live

@@ -57,6 +57,10 @@ TRUE_VALUES = ("1", "true")
 FALSE_VALUES = ("0", "false")
 
 PUBLIC_MODEL_ALIAS = "pilot-local"
+# Stable, honest application identity sent on every upstream request.  Some
+# provider front ends block urllib's default Python User-Agent, so this must not
+# be omitted or made configurable (it carries no credentials).
+APPLICATION_USER_AGENT = "nasi-lemak-gateway/0.1"
 DEFAULT_TIMEOUT_SECONDS = 60.0
 MAX_TIMEOUT_SECONDS = 600.0
 DEFAULT_MAX_RESPONSE_BYTES = 256 * 1024
@@ -407,7 +411,10 @@ class GenerationClient:
         payload: dict[str, Any] | None = None,
         strict_json: bool = False,
     ) -> Any:
-        headers = {"Accept": "application/json"}
+        headers = {
+            "Accept": "application/json",
+            "User-Agent": APPLICATION_USER_AGENT,
+        }
         if self.config.auth_mode == AUTH_BEARER:
             headers["Authorization"] = "Bearer " + self.config.api_key
         # auth_mode == AUTH_NONE deliberately sends no Authorization header.
