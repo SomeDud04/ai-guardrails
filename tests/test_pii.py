@@ -171,6 +171,169 @@ class SharedPiiSpanTests(unittest.TestCase):
         self.assertEqual([item.entity_type for item in find_redactions(text)],
                          ["EMAIL", "MY_PHONE", "MYKAD"])
 
+    def test_postal_address_positive_forms_keep_surrounding_text(self):
+        cases = {
+            "No. 12, Jalan Melati 3, Taman Sri Indah, 43000 Kajang, Selangor":
+                "[POSTAL_ADDRESS]",
+            "Unit 12-3, Jalan Ampang, 50450 Kuala Lumpur":
+                "[POSTAL_ADDRESS]",
+            "12 Lorong Mawar 2, 11600 George Town, Pulau Pinang":
+                "[POSTAL_ADDRESS]",
+            "No. 7, Lrg Mawar 2, 11600 George Town, Pulau Pinang":
+                "[POSTAL_ADDRESS]",
+            "No. 5, Jln Ampang 5, 50450 Kuala Lumpur":
+                "[POSTAL_ADDRESS]",
+            "No. 9, Persiaran KLCC, 50088 Kuala Lumpur":
+                "[POSTAL_ADDRESS]",
+            "No. 12, Jalan Melati 3, 43000":
+                "[POSTAL_ADDRESS]",
+            "Address: No. 12, Jalan Melati 3, 43000 Kajang.":
+                "Address: [POSTAL_ADDRESS].",
+            "Alamat: No. 12, Jalan Melati 3, 43000 Kajang.":
+                "Alamat: [POSTAL_ADDRESS].",
+            "地址: No. 12, Jalan Melati 3, 43000 Kajang.":
+                "地址: [POSTAL_ADDRESS].",
+            "Rumah saya di No. 12, Jalan Melati 3, 43000 Kajang, Selangor. Jumpa esok!":
+                "Rumah saya di [POSTAL_ADDRESS]. Jumpa esok!",
+            "(No. 12, Jalan Melati 3, 43000 Kajang)":
+                "([POSTAL_ADDRESS])",
+        }
+        for text, expected in cases.items():
+            with self.subTest(text=text):
+                self.assertEqual(mask_text(text), expected)
+                self.assertEqual(mask_pii(text), expected)
+
+    def test_postal_address_span_is_the_full_address(self):
+        text = "Rumah saya di No. 12, Jalan Melati 3, Taman Sri Indah, 43000 Kajang, Selangor. Jumpa esok!"
+        address = "No. 12, Jalan Melati 3, Taman Sri Indah, 43000 Kajang, Selangor"
+        self.assertEqual(
+            [(item.entity_type, text[item.start:item.end])
+             for item in find_redactions(text)],
+            [("POSTAL_ADDRESS", address)],
+        )
+
+    def test_postal_address_false_positives_stay_unmasked(self):
+        # A street-shaped fragment, a bare postcode or a place-name mention is
+        # not an address. The recognizer also requires either a postcode or an
+        # explicit label, so broad location prose remains untouched.
+        cases = (
+            "43000 Kajang",
+            "Kajang, Selangor",
+            "Jalan Ampang, 50450 Kuala Lumpur",
+            "Jalan Melati 3, 43000 Kajang",
+            "Taman Sri Indah, 43000 Kajang",
+            "No. 12, Jalan Melati 3",
+            "No. 12, Jalan Melati 3 is nearby",
+            "Meet at Taman Sri Indah, 43000 Kajang.",
+        )
+        for text in cases:
+            with self.subTest(text=text):
+                self.assertEqual(mask_text(text), text)
+                self.assertEqual(find_redactions(text), [])
+
+    def test_postal_address_selection_off_and_on(self):
+        text = "Alamat: No. 12, Jalan Melati 3, 43000 Kajang, Selangor"
+        self.assertEqual(
+            mask_text(text, ("EMAIL", "MY_PHONE", "MYKAD")), text
+        )
+        self.assertEqual(mask_text(text, ()), text)
+        self.assertEqual(
+            mask_text(text, ("POSTAL_ADDRESS",)), "Alamat: [POSTAL_ADDRESS]"
+        )
+        self.assertEqual(mask_text(text), "Alamat: [POSTAL_ADDRESS]")
+        self.assertEqual(mask_pii(text, ("EMAIL", "MY_PHONE", "MYKAD")), text)
+        self.assertEqual(
+            [item.entity_type for item in find_redactions(text)], ["POSTAL_ADDRESS"]
+        )
+
+    def test_labelled_postal_address_without_postcode_is_masked(self):
+        # Caller review reproduced this privacy gap: a clearly labelled home
+        # address with no postcode reached the model raw. An explicit
+        # Address:/Alamat: label now makes the same numbered street shape
+        # sufficient; unlabelled postcode-less forms remain conservative.
+        cases = {
+            "Address: No. 12, Jalan Melati 3": "Address: [POSTAL_ADDRESS]",
+            "Alamat: Unit 12-3, Jalan Ampang": "Alamat: [POSTAL_ADDRESS]",
+            "address: No. 12, Jalan Melati 3": "address: [POSTAL_ADDRESS]",
+            "Alamat: No. 12, Jalan Melati 3, Taman Sri Indah.":
+                "Alamat: [POSTAL_ADDRESS].",
+            "Address: No. 12, Jalan Melati 3 is nearby":
+                "Address: [POSTAL_ADDRESS] is nearby",
+            "Alamat: Unit 12-3, Jalan Ampang. Jumpa esok!":
+                "Alamat: [POSTAL_ADDRESS]. Jumpa esok!",
+            "Rumah: Alamat: No. 12, Jalan Melati 3. Jumpa esok!":
+                "Rumah: Alamat: [POSTAL_ADDRESS]. Jumpa esok!",
+            "(Address: No. 12, Jalan Melati 3)": "(Address: [POSTAL_ADDRESS])",
+        }
+        for text, expected in cases.items():
+            with self.subTest(text=text):
+                self.assertEqual(mask_text(text), expected)
+                self.assertEqual(mask_pii(text), expected)
+                self.assertEqual(
+                    [item.entity_type for item in find_redactions(text)],
+                    ["POSTAL_ADDRESS"],
+                )
+
+    def test_labelled_postal_address_without_postcode_span_excludes_label(self):
+        text = "Rumah: Alamat: Unit 12-3, Jalan Ampang. Jumpa esok!"
+        self.assertEqual(
+            [(item.entity_type, text[item.start:item.end])
+             for item in find_redactions(text)],
+            [("POSTAL_ADDRESS", "Unit 12-3, Jalan Ampang")],
+        )
+
+    def test_labelled_postal_address_selection_off_and_on(self):
+        text = "Address: No. 12, Jalan Melati 3"
+        self.assertEqual(
+            mask_text(text, ("EMAIL", "MY_PHONE", "MYKAD")), text
+        )
+        self.assertEqual(mask_text(text, ()), text)
+        self.assertEqual(
+            mask_text(text, ("POSTAL_ADDRESS",)), "Address: [POSTAL_ADDRESS]"
+        )
+        self.assertEqual(mask_text(text), "Address: [POSTAL_ADDRESS]")
+        self.assertEqual(
+            mask_pii(text, ("EMAIL", "MY_PHONE", "MYKAD")), text
+        )
+        self.assertEqual(
+            mask_pii(text, ("POSTAL_ADDRESS",)), "Address: [POSTAL_ADDRESS]"
+        )
+
+    def test_labelled_postal_address_false_positives_stay_unmasked(self):
+        # The label repair stays narrow: address-shaped fragments without a
+        # label, a house number or a street keyword remain untouched, and a
+        # bare postcode is still not an address.
+        cases = (
+            "No. 12, Jalan Melati 3",
+            "Unit 12-3, Jalan Ampang",
+            "No. 12, Jalan Melati 3 is nearby",
+            "Alamat: Jalan Melati 3",
+            "Address: No. 12",
+            "Address: 12, Ampang",
+            "Address: Melati 3",
+            "EmailAddress: No. 12, Jalan Melati 3",
+            "Address: 12, Jalan Ampang 50450 Kuala Lumpur",
+            "43000 Kajang",
+        )
+        for text in cases:
+            with self.subTest(text=text):
+                self.assertEqual(mask_text(text), text)
+                self.assertEqual(find_redactions(text), [])
+
+    def test_postal_address_does_not_change_existing_entity_regression(self):
+        text = (
+            "No. 12, Jalan Melati 3, 43000 Kajang "
+            "a@example.invalid 0123456789 900101-12-3456"
+        )
+        self.assertEqual(
+            mask_text(text),
+            "[POSTAL_ADDRESS] [EMAIL] [MY_PHONE] [MYKAD]",
+        )
+        self.assertEqual(
+            [item.entity_type for item in find_redactions(text)],
+            ["POSTAL_ADDRESS", "EMAIL", "MY_PHONE", "MYKAD"],
+        )
+
 
 if __name__ == "__main__":
     unittest.main()

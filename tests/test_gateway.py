@@ -35,6 +35,34 @@ class GatewayTests(unittest.TestCase):
         self.assertNotIn("test@example.com", response[1]["choices"][0]["message"]["content"])
         self.assertNotIn("0123456789", response[1]["choices"][0]["message"]["content"])
 
+    def test_postal_address_masks_both_generation_input_and_output(self):
+        address = "No. 12, Jalan Melati 3, Taman Sri Indah, 43000 Kajang, Selangor"
+        self.adapters.generated = f"Alamat: {address}"
+        response = self.call(
+            request([{"role": "user", "content": f"Rumah saya di {address}"}])
+        )
+        self.assertEqual(response[0], 200)
+        generated_input = self.adapters.generation_inputs[0][0]["content"]
+        self.assertNotIn(address, generated_input)
+        self.assertIn("[POSTAL_ADDRESS]", generated_input)
+        content = response[1]["choices"][0]["message"]["content"]
+        self.assertNotIn(address, content)
+        self.assertIn("Alamat: [POSTAL_ADDRESS]", content)
+
+    def test_labelled_address_without_postcode_masks_input_and_output(self):
+        address = "Alamat: Unit 12-3, Jalan Ampang"
+        self.adapters.generated = f"Rumah: {address}"
+        response = self.call(
+            request([{"role": "user", "content": f"Rumah saya {address}"}])
+        )
+        self.assertEqual(response[0], 200)
+        generated_input = self.adapters.generation_inputs[0][0]["content"]
+        self.assertNotIn(address, generated_input)
+        self.assertIn("Alamat: [POSTAL_ADDRESS]", generated_input)
+        content = response[1]["choices"][0]["message"]["content"]
+        self.assertNotIn(address, content)
+        self.assertIn("Rumah: Alamat: [POSTAL_ADDRESS]", content)
+
     def test_rejects_unknown_fields_and_client_policy_override_before_upstream(self):
         for body in (request(tools=[]), request(policy="unsafe"), request(extra_field=1)):
             with self.subTest(body=body):

@@ -657,9 +657,11 @@ _WORKSPACE_JS = """
   var policyInputEmail = byId("policy-input-email");
   var policyInputPhone = byId("policy-input-phone");
   var policyInputMykad = byId("policy-input-mykad");
+  var policyInputPostal = byId("policy-input-postal");
   var policyOutputEmail = byId("policy-output-email");
   var policyOutputPhone = byId("policy-output-phone");
   var policyOutputMykad = byId("policy-output-mykad");
+  var policyOutputPostal = byId("policy-output-postal");
   var policyDisabledNote = byId("policy-disabled-note");
   var policySubmit = byId("policy-submit");
   var policyCancel = byId("policy-cancel");
@@ -1154,7 +1156,7 @@ _WORKSPACE_JS = """
         !Array.isArray(raw.input_masks) || !Array.isArray(raw.output_masks)) {
       return null;
     }
-    var allowed = { EMAIL: true, MY_PHONE: true, MYKAD: true };
+    var allowed = { EMAIL: true, MY_PHONE: true, MYKAD: true, POSTAL_ADDRESS: true };
     var input = [];
     var output = [];
     var i;
@@ -1435,8 +1437,17 @@ _WORKSPACE_JS = """
   function syncPolicyFormNote() {
     var relaxed = !policyInputEnabled.checked || !policyOutputEnabled.checked ||
       !policyInputEmail.checked || !policyInputPhone.checked || !policyInputMykad.checked ||
-      !policyOutputEmail.checked || !policyOutputPhone.checked || !policyOutputMykad.checked;
+      !policyInputPostal.checked ||
+      !policyOutputEmail.checked || !policyOutputPhone.checked || !policyOutputMykad.checked ||
+      !policyOutputPostal.checked;
     policyDisabledNote.hidden = !relaxed;
+  }
+
+  // A stored profile is applied exactly as saved.  Only a brand-new profile
+  // selects every mask by default, so editing an existing profile never adds
+  // postal-address masking that the administrator did not choose.
+  function storedMaskChecked(settings, field, mask) {
+    return settings[field].indexOf(mask) >= 0;
   }
 
   function openPolicyForm(profile) {
@@ -1445,18 +1456,29 @@ _WORKSPACE_JS = """
     policyName.value = profile ? profile.name : "";
     policyInputEnabled.checked = profile ? profile.settings.input_check_enabled : true;
     policyOutputEnabled.checked = profile ? profile.settings.output_check_enabled : true;
-    policyInputEmail.checked = profile ? profile.settings.input_masks.indexOf("EMAIL") >= 0 : true;
-    policyInputPhone.checked = profile ? profile.settings.input_masks.indexOf("MY_PHONE") >= 0 : true;
-    policyInputMykad.checked = profile ? profile.settings.input_masks.indexOf("MYKAD") >= 0 : true;
-    policyOutputEmail.checked = profile ? profile.settings.output_masks.indexOf("EMAIL") >= 0 : true;
-    policyOutputPhone.checked = profile ? profile.settings.output_masks.indexOf("MY_PHONE") >= 0 : true;
-    policyOutputMykad.checked = profile ? profile.settings.output_masks.indexOf("MYKAD") >= 0 : true;
+    policyInputEmail.checked = profile
+      ? storedMaskChecked(profile.settings, "input_masks", "EMAIL") : true;
+    policyInputPhone.checked = profile
+      ? storedMaskChecked(profile.settings, "input_masks", "MY_PHONE") : true;
+    policyInputMykad.checked = profile
+      ? storedMaskChecked(profile.settings, "input_masks", "MYKAD") : true;
+    policyInputPostal.checked = profile
+      ? storedMaskChecked(profile.settings, "input_masks", "POSTAL_ADDRESS") : true;
+    policyOutputEmail.checked = profile
+      ? storedMaskChecked(profile.settings, "output_masks", "EMAIL") : true;
+    policyOutputPhone.checked = profile
+      ? storedMaskChecked(profile.settings, "output_masks", "MY_PHONE") : true;
+    policyOutputMykad.checked = profile
+      ? storedMaskChecked(profile.settings, "output_masks", "MYKAD") : true;
+    policyOutputPostal.checked = profile
+      ? storedMaskChecked(profile.settings, "output_masks", "POSTAL_ADDRESS") : true;
     policyForm.hidden = false;
     policySubmit.disabled = false;
     policyCancel.disabled = false;
     setStatus(policyState, profile
-      ? "Editing " + profile.name + " at revision " + profile.revision + "."
-      : "New profile. Input and output checks and all masks are selected by default.");
+      ? "Editing " + profile.name + " at revision " + profile.revision +
+        ". Unselected masks, including postal address, stay off unless you select them."
+      : "New profile. Input and output checks and all masks, including postal address, are selected by default.");
     syncPolicyFormNote();
     try { policyName.focus(); } catch (error) { /* non-fatal */ }
   }
@@ -1502,11 +1524,12 @@ _WORKSPACE_JS = """
     return true;
   }
 
-  function selectedPolicyMasks(emailNode, phoneNode, mykadNode) {
+  function selectedPolicyMasks(emailNode, phoneNode, mykadNode, postalNode) {
     var masks = [];
     if (emailNode.checked) { masks.push("EMAIL"); }
     if (phoneNode.checked) { masks.push("MY_PHONE"); }
     if (mykadNode.checked) { masks.push("MYKAD"); }
+    if (postalNode.checked) { masks.push("POSTAL_ADDRESS"); }
     return masks;
   }
 
@@ -1524,8 +1547,10 @@ _WORKSPACE_JS = """
     var payload = {
       input_check_enabled: policyInputEnabled.checked,
       output_check_enabled: policyOutputEnabled.checked,
-      input_masks: selectedPolicyMasks(policyInputEmail, policyInputPhone, policyInputMykad),
-      output_masks: selectedPolicyMasks(policyOutputEmail, policyOutputPhone, policyOutputMykad)
+      input_masks: selectedPolicyMasks(
+        policyInputEmail, policyInputPhone, policyInputMykad, policyInputPostal),
+      output_masks: selectedPolicyMasks(
+        policyOutputEmail, policyOutputPhone, policyOutputMykad, policyOutputPostal)
     };
     var path = "/workspace/api/admin/policy/profiles";
     if (editingId) {
@@ -5759,9 +5784,11 @@ _WORKSPACE_JS = """
   policyInputEmail.addEventListener("change", syncPolicyFormNote);
   policyInputPhone.addEventListener("change", syncPolicyFormNote);
   policyInputMykad.addEventListener("change", syncPolicyFormNote);
+  policyInputPostal.addEventListener("change", syncPolicyFormNote);
   policyOutputEmail.addEventListener("change", syncPolicyFormNote);
   policyOutputPhone.addEventListener("change", syncPolicyFormNote);
   policyOutputMykad.addEventListener("change", syncPolicyFormNote);
+  policyOutputPostal.addEventListener("change", syncPolicyFormNote);
 
   assignmentScope.addEventListener("change", function () {
     syncAssignmentScope();
@@ -6217,6 +6244,7 @@ WORKSPACE_HTML = """<!doctype html>
 <label for="policy-input-email"><input id="policy-input-email" type="checkbox" checked> Mask EMAIL</label>
 <label for="policy-input-phone"><input id="policy-input-phone" type="checkbox" checked> Mask MY_PHONE</label>
 <label for="policy-input-mykad"><input id="policy-input-mykad" type="checkbox" checked> Mask MYKAD</label>
+<label for="policy-input-postal"><input id="policy-input-postal" type="checkbox" checked> Mask Postal address</label>
 </div>
 </fieldset>
 <fieldset>
@@ -6226,9 +6254,11 @@ WORKSPACE_HTML = """<!doctype html>
 <label for="policy-output-email"><input id="policy-output-email" type="checkbox" checked> Mask EMAIL</label>
 <label for="policy-output-phone"><input id="policy-output-phone" type="checkbox" checked> Mask MY_PHONE</label>
 <label for="policy-output-mykad"><input id="policy-output-mykad" type="checkbox" checked> Mask MYKAD</label>
+<label for="policy-output-postal"><input id="policy-output-postal" type="checkbox" checked> Mask Postal address</label>
 </div>
 </fieldset>
 </div>
+<p class="policy-note">Postal address masking recognises a bounded ASCII Malaysian single-line address shape with a house or unit number, a street keyword and a five-digit postcode. A numbered street address that follows an explicit Address: or Alamat: label is also masked without a postcode. It is not broad semantic address detection, and each direction is selected independently.</p>
 <p id="policy-disabled-note" class="admin-warning" hidden>If an input or output check is turned off, this profile does not ask the model guard to check that channel. No masking selected for a channel is an explicit relaxation and does not protect that content. Server limits and the denylist still apply, and the separate guard status shows whether the model guard runtime is active.</p>
 <div class="policy-actions">
 <button id="policy-submit" class="primary" type="submit">Save profile</button>

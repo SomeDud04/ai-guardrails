@@ -109,6 +109,22 @@ class WorkspacePageHTTPTests(WorkspaceHTTPBase):
         self.assertIn("#workspace-view {", html)
         self.assertIn("flex-direction: column;", html)
 
+    def test_policy_form_exposes_independent_postal_mask_checkboxes(self) -> None:
+        html = self._page().text
+        for control in ("policy-input-postal", "policy-output-postal"):
+            self.assertRegex(
+                html, rf'<input id="{control}" type="checkbox" checked>'
+            )
+        self.assertEqual(html.count("Mask Postal address"), 2)
+        self.assertIn("Postal address masking recognises", html)
+        self.assertIn(
+            "A numbered street address that follows an explicit Address: or "
+            "Alamat: label is also masked without a postcode.",
+            html,
+        )
+        self.assertIn("bounded ASCII Malaysian single-line address shape", html)
+        self.assertIn("each direction is selected independently", html)
+
     def test_admin_table_density_and_identifier_styles_are_present(self) -> None:
         html = self._page().text
         styles = re.findall(r"<style>(.*?)</style>", html, re.S)

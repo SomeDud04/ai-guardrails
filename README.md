@@ -41,6 +41,7 @@ started in this workspace because Docker is not installed.** See
 | API guard backend (input + output) | `NASI_LEMAK_GUARD_BACKEND=api` selects the API adapters in `nasi_lemak/guard_api.py`; the installer's `--guard-backend api` and the `compose.api.yaml` overlay expose the same explicit choice. Implemented and loopback-fixture-tested locally; **no live guard endpoint was contacted**, and real endpoint acceptance, model quality, latency and held-out capacity remain external work. See [docs/guard-api-integration.md](docs/guard-api-integration.md) |
 | Guard evaluation harness | `nasi_lemak/guard_eval.py` validates a synthetic dataset by default and calls the configured adapters only with `--execute`; implemented and fixture-tested locally. This is plumbing evidence, **not** held-out model quality or OWASP coverage. See [docs/guard-evaluation.md](docs/guard-evaluation.md) |
 | PII quality gate (synthetic) | Frozen agent-authored evaluation + deterministic evaluator; reviewed EMAIL terminal-period repair passes six known regression cases; v1 EMAIL fails on 1 frozen false positive and MyKad on 4; **not customer accepted**. See [docs/pii-quality.md](docs/pii-quality.md) |
+| Postal address mask (synthetic) | Narrow ASCII single-line Malaysian shapes: numbered street + five-digit postcode, plus the same body without a postcode only when it directly follows `Address:`/`Alamat:`; unlabelled no-postcode forms stay raw. Admin input/output switches, new profiles default on; frozen corpora contain no address gold, so no address quality metric is claimed. See [docs/postal-address-mask.md](docs/postal-address-mask.md) |
 | Generation transport | Implemented; not live-verified |
 | Docker image / Compose runtime | Authored, **not built or run here**; default image/stack stays lightweight and safe-unavailable; optional `compose.pilot.yaml` adds the guard image target, policy and local model mounts as configuration scaffolding only |
 | Employee workspace (`/workspace`) | Opt-in local subset for one organisation: username/password accounts, departments, encrypted saved conversations and explicit review grants. Store/HTTP/page tests pass locally; **real PostgreSQL, Docker, VM and guard acceptance remain pending**, and multi-customer/RAG/SSO/advanced department policy are deferred. Setup: [docs/workspace-setup.md](docs/workspace-setup.md) |
@@ -56,7 +57,7 @@ latest test baseline, is in
 Workspace administrator policies and in-app alerts are documented in
 [docs/admin-policies.md](docs/admin-policies.md). The release changes only the
 opt-in `/workspace` path: administrators may relax the two model-safety checks
-or the `EMAIL`/`MY_PHONE`/`MYKAD` masks for a scope, while authentication,
+or the `EMAIL`/`MY_PHONE`/`MYKAD`/`POSTAL_ADDRESS` masks for a scope, while authentication,
 limits, literal deny phrases and audit ordering remain unconditional. The
 legacy direct `/v1/chat/completions` path keeps its existing defaults. An
 existing schema-2 workspace must complete the documented explicit schema-3
@@ -439,8 +440,16 @@ The separate six-case caller-review corpus exits `0`, but both reviewed
 corpora are known-regression evidence, not unseen or independent hold-out sets.
 Preserved `before-email-fix` reports retain the original failing evidence. This
 is synthetic format-recognizer evidence only, not an independent human hold-out
-set, population metric, privacy audit or customer acceptance. Full method,
-labels, hashes, adjudication and limits:
+set, population metric, privacy audit or customer acceptance.
+
+The frozen corpora contain no `POSTAL_ADDRESS` gold, so that entity reports
+`not_applicable` and contributes no address quality metric. The overall gate
+excludes `not_applicable` entities but still requires at least one applicable
+entity and still fails on any applicable failure; fixture bytes, thresholds and
+known MyKad false positives are unchanged. Postal scope, admin switch behavior
+and limitations: [docs/postal-address-mask.md](docs/postal-address-mask.md).
+
+Full method, labels, hashes, adjudication and limits:
 [docs/pii-quality.md](docs/pii-quality.md). Language boundary:
 [docs/language-support.md](docs/language-support.md).
 

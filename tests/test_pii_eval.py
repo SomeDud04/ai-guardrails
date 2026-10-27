@@ -153,6 +153,102 @@ class PiiMetricMathTests(unittest.TestCase):
         self.assertFalse(report["gates"]["overall_pass"])
 
 
+class PiiGateAggregationTests(unittest.TestCase):
+    """Frozen splits have no POSTAL_ADDRESS gold; absence must not fail them."""
+
+    def test_not_applicable_postal_gate_does_not_fail_overall(self):
+        positive = "Email a@example.invalid for details"
+        negative = "Email a@example is incomplete"
+        corpus = parse_corpus(payload([
+            make_case("G-EMAIL-P", positive,
+                      gold=[annotate(positive, "EMAIL", "a@example.invalid")]),
+            make_case("G-EMAIL-N", negative, focus="EMAIL"),
+        ]))
+        report = evaluate_corpus(corpus)
+
+        email = report["per_entity"]["EMAIL"]
+        self.assertEqual(email["gate_status"], "pass")
+        postal = report["per_entity"]["POSTAL_ADDRESS"]
+        self.assertEqual((postal["gold_count"], postal["predicted_count"]), (0, 0))
+        self.assertEqual(postal["gate_status"], "not_applicable")
+        self.assertEqual(report["gates"]["applicable_entities"], ["EMAIL"])
+        self.assertEqual(
+            report["gates"]["not_applicable_entities"],
+            ["MY_PHONE", "MYKAD", "POSTAL_ADDRESS"],
+        )
+        self.assertTrue(report["gates"]["overall_pass"])
+        self.assertEqual(report["gates"]["overall_status"], "pass")
+
+    def test_all_gates_not_applicable_never_passes(self):
+        report = evaluate_corpus(parse_corpus(payload([
+            make_case("G-NONE", "Nothing to see here", focus="EMAIL"),
+        ])))
+        self.assertEqual(report["gates"]["applicable_entities"], [])
+        self.assertFalse(any(
+            gate["applicable"] for gate in report["gates"]["entities"].values()
+        ))
+        self.assertEqual(report["gates"]["overall_status"], "fail")
+        self.assertFalse(report["gates"]["overall_pass"])
+
+    def test_applicable_failing_gate_still_fails_overall(self):
+        email_positive = "Email a@example.invalid"
+        email_negative = "Email a@example"
+        mykad_positive = "IC 900101-12-3456"
+        mykad_negative = "Ref 900101-12-3457"
+        corpus = parse_corpus(payload([
+            make_case("G-FAIL-EMAIL-P", email_positive,
+                      gold=[annotate(email_positive, "EMAIL", "a@example.invalid")]),
+            make_case("G-FAIL-EMAIL-N", email_negative, focus="EMAIL"),
+            make_case("G-FAIL-MYKAD-P", mykad_positive,
+                      gold=[annotate(mykad_positive, "MYKAD", "900101-12-3456")],
+                      focus="MYKAD"),
+            make_case("G-FAIL-MYKAD-N", mykad_negative, focus="MYKAD"),
+        ]))
+
+        def recognizer(text):
+            if text == email_positive:
+                return [Redaction("EMAIL", 6, 23)]
+            if text == mykad_positive:
+                return [Redaction("MYKAD", 3, 17)]
+            if text == mykad_negative:
+                return [Redaction("MYKAD", 4, 18)]
+            return []
+
+        report = evaluate_corpus(corpus, recognizer=recognizer)
+        self.assertEqual(report["per_entity"]["EMAIL"]["gate_status"], "pass")
+        self.assertEqual(report["per_entity"]["MYKAD"]["gate_status"], "fail")
+        self.assertEqual(report["per_entity"]["POSTAL_ADDRESS"]["gate_status"], "not_applicable")
+        self.assertEqual(
+            report["gates"]["applicable_entities"], ["EMAIL", "MYKAD"]
+        )
+        self.assertEqual(
+            report["gates"]["not_applicable_entities"], ["MY_PHONE", "POSTAL_ADDRESS"]
+        )
+        self.assertEqual(report["gates"]["overall_status"], "fail")
+        self.assertFalse(report["gates"]["overall_pass"])
+
+    def test_frozen_corpora_report_postal_as_not_applicable_without_address_metrics(self):
+        expected_overall = {
+            REAL_ROOT: False,
+            REVIEWED_V2_ROOT: False,
+            CALLER_REVIEW_ROOT: True,
+        }
+        for root, expected in expected_overall.items():
+            with self.subTest(root=root.name):
+                corpus, _ = load_corpus(root / "evaluation.json", root / "manifest.json")
+                report = evaluate_corpus(corpus)
+                postal = report["per_entity"]["POSTAL_ADDRESS"]
+                self.assertEqual(postal["gold_count"], 0)
+                self.assertEqual(postal["positive_cases"], 0)
+                self.assertEqual(postal["gate_status"], "not_applicable")
+                self.assertIn("POSTAL_ADDRESS", report["gates"]["not_applicable_entities"])
+                self.assertEqual(report["gates"]["overall_pass"], expected)
+                # No address quality metric is asserted or claimed from these splits.
+                self.assertIsNone(postal["precision"])
+                self.assertIsNone(postal["recall"])
+                self.assertIsNone(postal["f1"])
+
+
 class PiiFixtureValidationTests(unittest.TestCase):
     def base_case(self):
         text = "Email a@example.invalid"
@@ -639,8 +735,10 @@ class PiiCliTests(unittest.TestCase):
             self.assertIn("provisional quality gates: PASS", stdout.getvalue())
             report = json.loads((root / "results" / "evaluation-report.json").read_text(encoding="utf-8"))
             self.assertTrue(report["gates"]["overall_pass"])
-            for result in report["per_entity"].values():
-                self.assertEqual((result["precision"], result["recall"]), (1.0, 1.0))
+            for entity_type, result in report["per_entity"].items():
+                if result["gate_applicable"]:
+                    self.assertEqual((result["precision"], result["recall"]), (1.0, 1.0), entity_type)
+            self.assertEqual(report["gates"]["not_applicable_entities"], ["POSTAL_ADDRESS"])
 
     def test_malformed_fixture_exits_two_without_raw_text(self):
         with tempfile.TemporaryDirectory(dir=Path(__file__).parent) as tmp:

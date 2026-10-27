@@ -24,14 +24,26 @@ class PolicyPipelineTests(WorkspaceHTTPBase):
         self.assertEqual(response.status_code, 201, response.text)
         return response.json()
 
-    def _assign(self, admin_token: str, profile_id: str) -> dict:
+    def _assign(
+        self,
+        admin_token: str,
+        profile_id: str,
+        *,
+        expected_version: int | None = None,
+        profile_revision: int | None = None,
+    ) -> dict:
+        body: dict[str, Any] = {
+            "scope_type": "user",
+            "scope_id": self.alice["id"],
+            "profile_id": profile_id,
+        }
+        if expected_version is not None:
+            body["expected_version"] = expected_version
+        if profile_revision is not None:
+            body["profile_revision"] = profile_revision
         response = self.client.post(
             "/workspace/api/admin/policy/assignments",
-            json={
-                "scope_type": "user",
-                "scope_id": self.alice["id"],
-                "profile_id": profile_id,
-            },
+            json=body,
             headers=self.auth(admin_token),
         )
         self.assertEqual(response.status_code, 200, response.text)
@@ -372,4 +384,141 @@ class PolicyPipelineTests(WorkspaceHTTPBase):
         )
         self.assertEqual(empty["settings"]["input_masks"], [])
         self.assertEqual(empty["settings"]["output_masks"], [])
+
+    def test_postal_mask_policy_controls_trusted_gateway_input_and_output(self) -> None:
+        address = "No. 12, Jalan Melati 3, 43000 Kajang"
+        alice_token = self.login()
+        admin_token = self.login("root.admin")
+
+        # Input postal mask on, output off.
+        profile = self._profile(
+            admin_token,
+            "Postal input only",
+            input_masks=["EMAIL", "MY_PHONE", "MYKAD", "POSTAL_ADDRESS"],
+            output_masks=[],
+        )
+        self._assign(admin_token, profile["id"])
+        conversation = self.new_conversation(alice_token)
+        response = self.client.post(
+            f"/workspace/api/conversations/{conversation}/messages",
+            json={"text": f"Alamat: {address}"},
+            headers=self.auth(alice_token),
+        )
+        self.assertEqual(response.status_code, 200, response.text)
+        sent = self.adapters.generate_inputs[-1][-1]["content"]
+        self.assertIn("[POSTAL_ADDRESS]", sent)
+        self.assertNotIn(address, sent)
+        self.assertNotIn("[POSTAL_ADDRESS]", response.json()["content"])
+
+        # Flip the independent channels: input postal off, output postal on.
+        revised = self.client.post(
+            f"/workspace/api/admin/policy/profiles/{profile['id']}/revise",
+            json={
+                "expected_revision": profile["revision"],
+                "input_masks": ["EMAIL", "MY_PHONE", "MYKAD"],
+                "output_masks": ["EMAIL", "MY_PHONE", "MYKAD", "POSTAL_ADDRESS"],
+            },
+            headers=self.auth(admin_token),
+        )
+        self.assertEqual(revised.status_code, 200, revised.text)
+        self.assertEqual(
+            revised.json()["settings"]["output_masks"],
+            ["EMAIL", "MY_PHONE", "MYKAD", "POSTAL_ADDRESS"],
+        )
+        self.assertNotIn(
+            "POSTAL_ADDRESS", revised.json()["settings"]["input_masks"]
+        )
+        # Assignments pin an immutable revision, so an administrator applying
+        # the revised settings re-points the assignment explicitly.
+        assignment = self._assign(
+            admin_token,
+            profile["id"],
+            expected_version=1,
+            profile_revision=revised.json()["revision"],
+        )
+        self.assertEqual(
+            assignment["settings"]["output_masks"],
+            ["EMAIL", "MY_PHONE", "MYKAD", "POSTAL_ADDRESS"],
+        )
+        policy = self.client.get(
+            "/workspace/api/policy", headers=self.auth(alice_token)
+        )
+        self.assertEqual(policy.status_code, 200, policy.text)
+        self.assertEqual(
+            policy.json()["output_masks"],
+            ["EMAIL", "MY_PHONE", "MYKAD", "POSTAL_ADDRESS"],
+        )
+
+        self.adapters.generated = f"Alamat: {address}"
+        conversation = self.new_conversation(alice_token)
+        response = self.client.post(
+            f"/workspace/api/conversations/{conversation}/messages",
+            json={"text": f"Alamat: {address}"},
+            headers=self.auth(alice_token),
+        )
+        self.assertEqual(response.status_code, 200, response.text)
+        sent = self.adapters.generate_inputs[-1][-1]["content"]
+        self.assertIn(address, sent)
+        self.assertNotIn("[POSTAL_ADDRESS]", sent)
+        released = response.json()["content"]
+        self.assertIn("[POSTAL_ADDRESS]", released)
+        self.assertNotIn(address, released)
+
+        # Input and output postal masks both off leaves the address raw.
+        third = self.client.post(
+            f"/workspace/api/admin/policy/profiles/{profile['id']}/revise",
+            json={
+                "expected_revision": revised.json()["revision"],
+                "input_masks": ["EMAIL", "MY_PHONE", "MYKAD"],
+                "output_masks": ["EMAIL", "MY_PHONE", "MYKAD"],
+            },
+            headers=self.auth(admin_token),
+        )
+        self.assertEqual(third.status_code, 200, third.text)
+        self.assertNotIn(
+            "POSTAL_ADDRESS", third.json()["settings"]["output_masks"]
+        )
+        self._assign(
+            admin_token,
+            profile["id"],
+            expected_version=2,
+            profile_revision=third.json()["revision"],
+        )
+        self.adapters.generated = f"Alamat: {address}"
+        conversation = self.new_conversation(alice_token)
+        response = self.client.post(
+            f"/workspace/api/conversations/{conversation}/messages",
+            json={"text": f"Alamat: {address}"},
+            headers=self.auth(alice_token),
+        )
+        self.assertEqual(response.status_code, 200, response.text)
+        sent = self.adapters.generate_inputs[-1][-1]["content"]
+        self.assertIn(address, sent)
+        self.assertNotIn("[POSTAL_ADDRESS]", sent)
+        released = response.json()["content"]
+        self.assertEqual(released, f"Alamat: {address}")
+        self.assertNotIn("[POSTAL_ADDRESS]", released)
+
+    def test_employee_cannot_create_or_revise_a_postal_mask_profile(self) -> None:
+        alice_token = self.login()
+        denied = self.client.post(
+            "/workspace/api/admin/policy/profiles",
+            json={"name": "Employee postal", "input_masks": ["POSTAL_ADDRESS"]},
+            headers=self.auth(alice_token),
+        )
+        self.assert_error(denied, 403, "FORBIDDEN")
+
+        admin_token = self.login("root.admin")
+        profile = self._profile(
+            admin_token, "Admin postal", input_masks=["POSTAL_ADDRESS"]
+        )
+        denied = self.client.post(
+            f"/workspace/api/admin/policy/profiles/{profile['id']}/revise",
+            json={"expected_revision": profile["revision"], "input_masks": []},
+            headers=self.auth(alice_token),
+        )
+        self.assert_error(denied, 403, "FORBIDDEN")
+        stored = self.store.get_policy_profile(self.admin["id"], profile["id"])
+        self.assertEqual(stored["revision"], profile["revision"])
+        self.assertEqual(stored["settings"]["input_masks"], ["POSTAL_ADDRESS"])
 

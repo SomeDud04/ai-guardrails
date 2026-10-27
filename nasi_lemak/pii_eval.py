@@ -348,7 +348,16 @@ def evaluate_corpus(
             "passed": gate_pass,
         }
 
-    overall_pass = all(gate["status"] == "pass" for gate in gates.values())
+    # A not_applicable gate means the frozen split has no labelled evidence for
+    # that entity (for example POSTAL_ADDRESS before address gold exists).  Such
+    # a gate must not fail the split by itself, but it also cannot make a split
+    # pass: at least one applicable gate is still required, and every applicable
+    # gate must pass.
+    applicable_entities = [entity_type for entity_type in ENTITY_TYPES if gates[entity_type]["applicable"]]
+    not_applicable_entities = [entity_type for entity_type in ENTITY_TYPES if not gates[entity_type]["applicable"]]
+    overall_pass = bool(applicable_entities) and all(
+        gates[entity_type]["status"] == "pass" for entity_type in applicable_entities
+    )
     return {
         "schema_version": SCHEMA_VERSION,
         "report_kind": "pii_quality_evaluation",
@@ -372,6 +381,9 @@ def evaluate_corpus(
             "customer_approved": False,
             "statistically_validated": False,
             "entities": gates,
+            "applicable_entities": applicable_entities,
+            "not_applicable_entities": not_applicable_entities,
+            "requires_at_least_one_applicable_entity": True,
             "overall_status": "pass" if overall_pass else "fail",
             "overall_pass": overall_pass,
         },
@@ -421,6 +433,8 @@ def render_markdown(report: dict, *, manifest_sha256: str) -> str:
         "",
         f"Provisional engineering gate: precision >= {PRECISION_GATE:.2f} and recall >= {RECALL_GATE:.2f} "
         "per entity, applicable only when the split has nonzero positive and negative cases for that entity. "
+        "`not_applicable` entities are excluded from the overall verdict, but at least one applicable entity "
+        "is required and every applicable entity must pass. "
         f"Overall: **{report['gates']['overall_status']}**.",
         "",
         "## Labelled errors",

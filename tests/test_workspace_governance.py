@@ -305,6 +305,98 @@ class PolicyAdminTests(GovernanceTestBase):
         with self.assertRaises(NotFound):
             self.store.get_policy_profile(self.admin["id"], "missing-profile")
 
+    def test_postal_address_mask_is_independent_per_channel_and_persisted(self):
+        profile = self._profile(
+            "Postal input only",
+            input_masks=("EMAIL", "POSTAL_ADDRESS"),
+            output_masks=("MYKAD",),
+        )
+        self.assertEqual(
+            profile["settings"]["input_masks"], ["EMAIL", "POSTAL_ADDRESS"]
+        )
+        self.assertEqual(profile["settings"]["output_masks"], ["MYKAD"])
+
+        revised = self.store.revise_policy_profile(
+            self.admin["id"],
+            profile["id"],
+            profile["revision"],
+            input_masks=("EMAIL",),
+            output_masks=("MYKAD", "POSTAL_ADDRESS"),
+        )
+        self.assertEqual(revised["settings"]["input_masks"], ["EMAIL"])
+        self.assertEqual(
+            revised["settings"]["output_masks"], ["MYKAD", "POSTAL_ADDRESS"]
+        )
+        history = self.store.list_policy_profile_revisions(
+            self.admin["id"], profile["id"]
+        )["items"]
+        self.assertEqual(
+            history[1]["settings"]["input_masks"], ["EMAIL", "POSTAL_ADDRESS"]
+        )
+        self.assertEqual(history[1]["settings"]["output_masks"], ["MYKAD"])
+
+        self.store.assign_policy_profile(
+            self.admin["id"], "user", self.alice["id"], profile["id"]
+        )
+        effective = self.store.resolve_effective_policy(
+            self.admin["id"], self.alice["id"]
+        )
+        self.assertEqual(effective["input_masks"], ["EMAIL"])
+        self.assertEqual(effective["output_masks"], ["MYKAD", "POSTAL_ADDRESS"])
+        control = self.store.resolve_gateway_control(self.alice["id"])
+        self.assertEqual(control.input_masks, ("EMAIL",))
+        self.assertEqual(control.output_masks, ("MYKAD", "POSTAL_ADDRESS"))
+
+    def test_legacy_explicit_masks_never_gain_postal_address_implicitly(self):
+        legacy = ("EMAIL", "MY_PHONE", "MYKAD")
+        profile = self._profile(
+            "Legacy explicit masks", input_masks=legacy, output_masks=legacy
+        )
+        self.assertNotIn("POSTAL_ADDRESS", profile["settings"]["input_masks"])
+        self.assertNotIn("POSTAL_ADDRESS", profile["settings"]["output_masks"])
+
+        revised = self.store.revise_policy_profile(
+            self.admin["id"],
+            profile["id"],
+            profile["revision"],
+            input_masks=legacy,
+            output_masks=legacy,
+        )
+        self.assertEqual(revised["settings"]["input_masks"], list(legacy))
+        self.assertEqual(revised["settings"]["output_masks"], list(legacy))
+
+        self.store.assign_policy_profile(
+            self.admin["id"], "user", self.alice["id"], profile["id"]
+        )
+        control = self.store.resolve_gateway_control(self.alice["id"])
+        self.assertNotIn("POSTAL_ADDRESS", control.input_masks)
+        self.assertNotIn("POSTAL_ADDRESS", control.output_masks)
+
+        # Only an unassigned default profile gets the full recognizer set.
+        default = self.store.resolve_effective_policy(
+            self.admin["id"], self.bob["id"]
+        )
+        self.assertTrue(default["is_default"])
+        self.assertIn("POSTAL_ADDRESS", default["input_masks"])
+        self.assertIn("POSTAL_ADDRESS", default["output_masks"])
+
+    def test_employee_cannot_create_or_revise_a_postal_mask_profile(self):
+        profile = self._profile("Admin postal", input_masks=("POSTAL_ADDRESS",))
+        with self.assertRaises(AccessDenied):
+            self.store.create_policy_profile(
+                self.alice["id"], "Employee postal", input_masks=("POSTAL_ADDRESS",)
+            )
+        with self.assertRaises(AccessDenied):
+            self.store.revise_policy_profile(
+                self.alice["id"],
+                profile["id"],
+                profile["revision"],
+                input_masks=(),
+            )
+        stored = self.store.get_policy_profile(self.admin["id"], profile["id"])
+        self.assertEqual(stored["revision"], profile["revision"])
+        self.assertEqual(stored["settings"]["input_masks"], ["POSTAL_ADDRESS"])
+
 
 class AssignmentInheritanceTests(GovernanceTestBase):
     def test_default_workspace_department_user_relaxing_and_clear(self) -> None:

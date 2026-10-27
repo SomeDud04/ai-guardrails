@@ -2058,6 +2058,190 @@ async function scenarioAdminOwnRoleChange() {
     "an own demotion must explain that admin tools are gone");
 }
 
+async function scenarioPolicyPostalMask() {
+  const app = createApp();
+  await start(app);
+  const adminProfile = {
+    user: { ...ALICE_USER, id: "user-admin", username: "admin", full_name: "Ada Admin", role: "admin" },
+    department: { id: "dept-accounting", name: "Accounting" },
+    review_scope: null,
+    review_department_ids: [],
+    review_grants: [],
+  };
+  const aliceRow = {
+    id: "user-alice", username: "alice", full_name: "Alice Tan",
+    department_id: "dept-accounting", role: "employee", disabled: false, created_at: 1700000001,
+  };
+  // A profile saved before POSTAL_ADDRESS existed. Editing it must not select
+  // postal masking on the administrator's behalf.
+  const legacyProfile = {
+    id: "profile-legacy",
+    name: "Legacy masks",
+    revision: 1,
+    settings: {
+      input_check_enabled: true,
+      output_check_enabled: true,
+      input_masks: ["EMAIL"],
+      output_masks: ["EMAIL", "MY_PHONE"],
+    },
+    settings_digest: "c".repeat(64),
+  };
+  await signIn(app, adminProfile);
+  app.lastMatching("/workspace/api/conversations?limit=25").respond({ items: [], next: null }, 200);
+  await settle();
+  await settleSummarySurfaces(app);
+
+  app.elementFor("tab-admin").dispatch("click");
+  await settle();
+  app.lastMatching("/workspace/api/admin/departments?limit=25").respond(
+    { items: [{ id: "dept-accounting", name: "Accounting", created_at: 1700000000 }], next: null },
+    200
+  );
+  await settle();
+  app.lastMatching("/workspace/api/admin/users?limit=25").respond(
+    { items: [aliceRow], next: null },
+    200
+  );
+  await settle();
+  app.elementFor("admin-tab-policies").dispatch("click");
+  await settle();
+  app.lastMatching("/workspace/api/admin/policy/profiles?limit=25").respond(
+    { items: [legacyProfile], next: null },
+    200
+  );
+  await settle();
+  const assignment = app.lastMatching("/workspace/api/admin/policy/assignments/workspace");
+  assert(assignment, "the policies tab must read the current workspace assignment");
+  assignment.respond({ assignment: null }, 200);
+  await settle();
+
+  app.elementFor("policy-new").dispatch("click");
+  for (const id of [
+    "policy-input-email", "policy-input-phone", "policy-input-mykad", "policy-input-postal",
+    "policy-output-email", "policy-output-phone", "policy-output-mykad", "policy-output-postal",
+  ]) {
+    assert(app.elementFor(id).checked === true,
+      "a new profile must select every mask by default, including " + id);
+  }
+  app.elementFor("policy-name").value = "Postal output only";
+  app.elementFor("policy-input-postal").checked = false;
+  app.elementFor("policy-form").dispatch("submit");
+  const create = app.lastMatching("/workspace/api/admin/policy/profiles");
+  assert(create && create.options.method === "POST", "profile creation must POST");
+  const payload = JSON.parse(create.options.body);
+  assert(payload.input_masks.indexOf("POSTAL_ADDRESS") < 0,
+    "an unchecked postal mask must stay off on input");
+  assert(payload.input_masks.indexOf("EMAIL") >= 0,
+    "the other selected input masks must still be saved");
+  assert(payload.output_masks.indexOf("POSTAL_ADDRESS") >= 0,
+    "postal masking must be independently selectable on output");
+  const savedProfile = {
+    id: "profile-postal-output",
+    name: "Postal output only",
+    revision: 1,
+    settings: {
+      input_check_enabled: true,
+      output_check_enabled: true,
+      input_masks: ["EMAIL", "MY_PHONE", "MYKAD"],
+      output_masks: ["EMAIL", "MY_PHONE", "MYKAD", "POSTAL_ADDRESS"],
+    },
+    settings_digest: "d".repeat(64),
+  };
+  create.respond(savedProfile, 201);
+  await settle();
+  const listRefresh = app.lastMatching("/workspace/api/admin/policy/profiles?limit=25");
+  assert(listRefresh, "a saved profile must refresh the list");
+  listRefresh.respond({ items: [savedProfile, legacyProfile], next: null }, 200);
+  await settle();
+  const listText = app.elementFor("policy-list").textContent;
+  assert(listText.indexOf("Postal output only") >= 0, "the saved profile must be listed");
+  const savedRow = findDataRow(app.elementFor("policy-list"), "data-policy", "profile-postal-output");
+  assert(savedRow && savedRow.textContent.indexOf("POSTAL_ADDRESS") >= 0,
+    "the profile list must show the postal mask honestly on output");
+  const masksCellText = savedRow.children[2].textContent;
+  assert(masksCellText.indexOf("Input: EMAIL, MY_PHONE, MYKAD") >= 0 &&
+    masksCellText.indexOf("Output: EMAIL, MY_PHONE, MYKAD, POSTAL_ADDRESS") >= 0,
+    "the profile list must show postal masking only on the output channel");
+
+  const legacyRow = findDataRow(app.elementFor("policy-list"), "data-policy", "profile-legacy");
+  findButton(legacyRow, "Edit").dispatch("click");
+  const legacyGet = app.lastMatching("/workspace/api/admin/policy/profiles/profile-legacy");
+  assert(legacyGet, "editing must read the latest stored revision");
+  legacyGet.respond(legacyProfile, 200);
+  await settle();
+  assert(app.elementFor("policy-input-postal").checked === false &&
+    app.elementFor("policy-output-postal").checked === false,
+    "an existing profile that omits POSTAL_ADDRESS must not silently gain it in the editor");
+  assert(app.elementFor("policy-input-email").checked === true &&
+    app.elementFor("policy-output-phone").checked === true,
+    "the editor must still reflect the masks the stored profile selected");
+  app.elementFor("policy-form").dispatch("submit");
+  const revise = app.lastMatching("/workspace/api/admin/policy/profiles/profile-legacy/revise");
+  assert(revise, "saving an edited profile must revise it");
+  const revisePayload = JSON.parse(revise.options.body);
+  assert(revisePayload.expected_revision === 1, "the pinned revision must be sent");
+  assert(revisePayload.input_masks.indexOf("POSTAL_ADDRESS") < 0 &&
+    revisePayload.output_masks.indexOf("POSTAL_ADDRESS") < 0,
+    "saving an untouched legacy profile must not add postal masking");
+  revise.respond({ ...legacyProfile, revision: 2 }, 200);
+  await settle();
+  app.lastMatching("/workspace/api/admin/policy/profiles?limit=25").respond(
+    { items: [savedProfile, { ...legacyProfile, revision: 2 }], next: null }, 200
+  );
+  await settle();
+
+  app.elementFor("effective-user").value = "user-alice";
+  app.elementFor("effective-preview").dispatch("click");
+  const effective = app.lastMatching("/workspace/api/admin/policy/effective?user_id=user-alice");
+  assert(effective, "the effective preview request is missing");
+  effective.respond(
+    {
+      user_id: "user-alice",
+      department_id: "dept-accounting",
+      input_check_enabled: true,
+      output_check_enabled: true,
+      input_masks: ["EMAIL"],
+      output_masks: ["POSTAL_ADDRESS"],
+      revision: "profile:profile-postal-output:1",
+      settings_digest: "d".repeat(64),
+      source: {
+        scope_type: "user",
+        scope_id: "user-alice",
+        profile_id: "profile-postal-output",
+        profile_name: "Postal output only",
+        revision: 1,
+      },
+      sources: [
+        {
+          scope_type: "user",
+          scope_id: "user-alice",
+          profile_id: "profile-postal-output",
+          profile_name: "Postal output only",
+          revision: 1,
+        },
+      ],
+      is_default: false,
+    },
+    200
+  );
+  await settle();
+  const preview = app.elementFor("effective-policy");
+  const outputBlock = collect(preview).find(
+    (element) => String(element.className).split(" ").indexOf("effective-block") >= 0 &&
+      element.getAttribute("data-stage") === "output"
+  );
+  const inputBlock = collect(preview).find(
+    (element) => String(element.className).split(" ").indexOf("effective-block") >= 0 &&
+      element.getAttribute("data-stage") === "input"
+  );
+  assert(outputBlock && collect(outputBlock).some(
+    (element) => element.textContent === "POSTAL_ADDRESS" &&
+      String(element.className).split(" ").indexOf("is-mask") >= 0
+  ), "the effective preview must show postal masking on output");
+  assert(inputBlock && inputBlock.textContent.indexOf("POSTAL_ADDRESS") < 0,
+    "the effective preview must not show postal masking on an input channel that omits it");
+}
+
 async function scenarioEffectivePolicyPreview() {
   const app = createApp();
   await start(app);
@@ -4105,6 +4289,7 @@ async function main() {
   await scenarioAdminEnableAndDelete();
   await scenarioAdminOwnRoleChange();
   await scenarioEffectivePolicyPreview();
+  await scenarioPolicyPostalMask();
   await scenarioAlertProfileFallbackAndAcknowledgement();
   await scenarioMarkAllAlertsRead();
   await scenarioOwnNavigationFromAdmin();
