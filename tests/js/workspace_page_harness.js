@@ -196,7 +196,31 @@ function createApp(options) {
     },
   };
   const windowListeners = Object.create(null);
+  const location = {
+    pathname: (options && options.pathname) || "/workspace",
+    search: "",
+    hash: "",
+  };
+  const historyEntries = [location.pathname];
+  let historyIndex = 0;
+  const historyApi = {
+    get state() { return historyEntries[historyIndex]; },
+    pushState(_state, _title, url) {
+      if (typeof url !== "string" || !url) { return; }
+      location.pathname = url;
+      historyEntries.splice(historyIndex + 1);
+      historyEntries.push(url);
+      historyIndex = historyEntries.length - 1;
+    },
+    replaceState(_state, _title, url) {
+      if (typeof url !== "string" || !url) { return; }
+      location.pathname = url;
+      historyEntries[historyIndex] = url;
+    },
+  };
   const window = {
+    location,
+    history: historyApi,
     addEventListener(type, handler) {
       if (!windowListeners[type]) {
         windowListeners[type] = [];
@@ -345,6 +369,24 @@ function createApp(options) {
     created,
     calls,
     window,
+    location,
+    history: historyApi,
+    historyEntries,
+    get historyIndex() { return historyIndex; },
+    goBack() {
+      if (historyIndex === 0) { return false; }
+      historyIndex -= 1;
+      location.pathname = historyEntries[historyIndex];
+      window.dispatch("popstate", { state: null });
+      return true;
+    },
+    goForward() {
+      if (historyIndex >= historyEntries.length - 1) { return false; }
+      historyIndex += 1;
+      location.pathname = historyEntries[historyIndex];
+      window.dispatch("popstate", { state: null });
+      return true;
+    },
     timers,
     callsMatching,
     pendingCallsMatching,
@@ -4263,6 +4305,150 @@ async function scenarioReplyLengthContextNoticeAndIdentityReset() {
   );
 }
 
+async function scenarioViewUrlsAndHistory() {
+  // The legacy entry stays a chat entry and becomes canonical after /me.
+  const legacy = createApp();
+  await start(legacy);
+  await signIn(legacy, PROFILE);
+  assert(legacy.location.pathname === "/workspace/chat",
+    "the legacy /workspace entry must canonicalise to the chat view");
+  assert(legacy.elementFor("chat-panel").hidden === false, "legacy entry must show Chat");
+
+  // A bookmark for Review is applied only after /me confirms a reviewer.
+  const reviewer = {
+    user: { ...ALICE_USER, id: "user-rev-url", username: "reviewer", full_name: "Rita Reviewer", role: "employee" },
+    department: { id: "dept-accounting", name: "Accounting" },
+    review_scope: "department",
+    review_department_ids: ["dept-accounting"],
+    review_grants: [],
+  };
+  const review = createApp({ pathname: "/workspace/review/" });
+  await start(review, { profile: reviewer });
+  assert(review.location.pathname === "/workspace/review",
+    "a direct review URL must canonicalise without the trailing slash");
+  assert(review.elementFor("review-panel").hidden === false &&
+    review.elementFor("chat-panel").hidden === true,
+    "a direct review URL must open Review");
+  assert(review.callsMatching("/workspace/api/review/conversations").length === 1,
+    "a direct review URL must load the authorised review list");
+  assert(review.callsMatching("/workspace/api/admin").length === 0,
+    "a review URL must not trigger admin reads");
+  const reviewList = review.lastMatching("/workspace/api/review/conversations?limit=25");
+  reviewList.respond({ items: [], next: null }, 200);
+  await settle();
+  const ownList = review.lastMatching("/workspace/api/conversations?limit=25");
+  ownList.respond({ items: [], next: null }, 200);
+  await settle();
+
+  // Tab navigation records history; Back/Forward changes the view without
+  // adding entries.
+  const entriesBefore = review.historyEntries.length;
+  review.elementFor("tab-chat").dispatch("click");
+  assert(review.location.pathname === "/workspace/chat", "chat tab must update the URL");
+  assert(review.elementFor("chat-panel").hidden === false, "chat tab must show Chat");
+  review.elementFor("tab-review").dispatch("click");
+  assert(review.location.pathname === "/workspace/review", "review tab must update the URL");
+  assert(review.elementFor("review-panel").hidden === false, "review tab must show Review");
+  const entriesAfter = review.historyEntries.length;
+  assert(entriesAfter === entriesBefore + 2, "tab navigation must push exactly one entry each");
+  const indexBeforeBack = review.historyIndex;
+  assert(review.goBack(), "history back fixture must have an entry");
+  await settle();
+  assert(review.location.pathname === "/workspace/chat", "Back must restore the chat URL");
+  assert(review.elementFor("chat-panel").hidden === false, "Back must show Chat");
+  assert(review.historyEntries.length === entriesAfter, "Back must not add history entries");
+  assert(review.historyIndex === indexBeforeBack - 1, "Back must move one entry");
+  assert(review.goBack(), "history back fixture must have an earlier entry");
+  await settle();
+  assert(review.location.pathname === "/workspace/review", "second Back must restore Review");
+  assert(review.elementFor("review-panel").hidden === false, "second Back must show Review");
+  assert(review.historyEntries.length === entriesAfter, "Back must never append entries");
+  assert(review.goForward(), "history forward fixture must have an entry");
+  await settle();
+  assert(review.location.pathname === "/workspace/chat", "Forward must restore the chat URL");
+  assert(review.elementFor("chat-panel").hidden === false, "Forward must show Chat");
+
+  // Starting a chat and selecting a conversation keep the canonical chat URL.
+  review.elementFor("new-chat").dispatch("click");
+  await settle();
+  const create = review.callsMatching("/workspace/api/conversations").filter(
+    (call) => call.options.method === "POST"
+  ).pop();
+  assert(create, "a new chat must still POST");
+  create.respond({ id: "conv-url-new", created_at: 1700000400 }, 201);
+  await settle();
+  const newList = review.lastMatching("/workspace/api/conversations?limit=25");
+  newList.respond({
+    items: [{ id: "conv-url-new", created_at: 1700000400, updated_at: 1700000400 }],
+    next: null,
+  }, 200);
+  await settle();
+  const newDetail = review.lastMatching("/workspace/api/conversations/conv-url-new");
+  newDetail.respond({ id: "conv-url-new", created_at: 1700000400, messages: [] }, 200);
+  await settle();
+  assert(review.location.pathname === "/workspace/chat",
+    "new chat and conversation selection must stay on the chat URL");
+  assert(review.historyEntries.length >= entriesAfter,
+    "chat navigation must not remove existing history");
+
+  // An unauthorised bookmark falls back to Chat without issuing admin reads.
+  const denied = createApp({ pathname: "/workspace/admin" });
+  await start(denied, { profile: PROFILE });
+  assert(denied.location.pathname === "/workspace/chat",
+    "an unauthorised admin URL must canonicalise to chat");
+  assert(denied.elementFor("chat-panel").hidden === false &&
+    denied.elementFor("admin-panel").hidden === true,
+    "an unauthorised admin URL must show Chat only");
+  assert(denied.callsMatching("/workspace/api/admin").length === 0,
+    "an unauthorised admin URL must not issue protected admin reads");
+
+  // A permitted admin bookmark opens Admin and its own reads.
+  const admin = {
+    user: { ...ALICE_USER, id: "user-admin-url", username: "admin", full_name: "Ada Admin", role: "admin" },
+    department: { id: "dept-accounting", name: "Accounting" },
+    review_scope: null,
+    review_department_ids: [],
+    review_grants: [],
+  };
+  const adminApp = createApp({ pathname: "/workspace/admin" });
+  await start(adminApp, { profile: admin });
+  assert(adminApp.location.pathname === "/workspace/admin",
+    "a permitted admin URL must stay on the admin view");
+  assert(adminApp.elementFor("admin-panel").hidden === false &&
+    adminApp.elementFor("chat-panel").hidden === true,
+    "a permitted admin URL must open Admin");
+  assert(adminApp.callsMatching("/workspace/api/admin/departments").length >= 1,
+    "a permitted admin URL must load the admin lists");
+
+  // A direct route reached before sign-in is applied after login, and losing
+  // review permission replaces the URL with chat.
+  const login = createApp({ pathname: "/workspace/review" });
+  await start(login);
+  assert(login.location.pathname === "/workspace/review",
+    "the requested URL must be preserved until sign-in is confirmed");
+  await signIn(login, reviewer);
+  assert(login.location.pathname === "/workspace/review",
+    "login must open the requested review view");
+  assert(login.elementFor("review-panel").hidden === false, "login must show Review");
+  const loginReviewList = login.lastMatching("/workspace/api/review/conversations?limit=25");
+  loginReviewList.respond({ items: [], next: null }, 200);
+  await settle();
+  const loginOwnList = login.lastMatching("/workspace/api/conversations?limit=25");
+  loginOwnList.respond({ items: [], next: null }, 200);
+  await settle();
+  login.window.dispatch("focus");
+  login.lastMatching("/workspace/api/me").respond(
+    { ...reviewer, review_scope: null, review_department_ids: [], review_grants: [] },
+    200
+  );
+  await settle();
+  assert(login.location.pathname === "/workspace/chat",
+    "losing review permission must canonicalise the URL to chat");
+  assert(login.elementFor("chat-panel").hidden === false &&
+    login.elementFor("review-panel").hidden === true,
+    "losing review permission must show Chat");
+}
+
 async function main() {
   await scenarioInitialRestoreWithholdsSurfaces();
   await scenarioSignInAndChat();
@@ -4293,6 +4479,7 @@ async function main() {
   await scenarioAlertProfileFallbackAndAcknowledgement();
   await scenarioMarkAllAlertsRead();
   await scenarioOwnNavigationFromAdmin();
+  await scenarioViewUrlsAndHistory();
   await scenarioConversationListRetryAndPreservation();
   await scenarioListAttemptCannotOutliveIdentityChange();
   await scenarioPendingListRefreshKeepsNewChat();

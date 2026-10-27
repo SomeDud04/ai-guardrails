@@ -1548,11 +1548,18 @@ def make_app(
                 release_once()
 
     if workspace_runtime.enabled:
+        # The same static shell serves the legacy entry and the three explicit
+        # views.  The browser selects the view from the URL only after the API
+        # confirms the session and permission; the API remains authoritative.
         @app.get("/workspace")
         @app.get("/workspace/")
+        @app.get("/workspace/chat")
+        @app.get("/workspace/chat/")
+        @app.get("/workspace/review")
+        @app.get("/workspace/review/")
+        @app.get("/workspace/admin")
+        @app.get("/workspace/admin/")
         async def workspace_page(request: Request):
-            # The shell is deliberately static.  The API remains the authority
-            # and reports readiness/denial on each request.
             return HTMLResponse(
                 workspace_html(ready=workspace_runtime.ready),
                 headers=WORKSPACE_SECURITY_HEADERS,

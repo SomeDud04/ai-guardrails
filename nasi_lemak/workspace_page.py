@@ -2503,7 +2503,9 @@ _WORKSPACE_JS = """
       (data.user.role === "admin" ? " · Administrator" : "");
     tabReview.hidden = !profile.reviewScope;
     if (scopeChanged) { clearReviewAccessState(); }
-    if (!profile.reviewScope && currentView === "review") { showView("chat"); }
+    if (!profile.reviewScope && currentView === "review") {
+      showView("chat", { urlMode: "replace" });
+    }
     var isAdmin = data.user.role === "admin";
     if (previous && previous.user && previous.user.role === "admin" && !isAdmin) {
       resetAdminState();
@@ -2522,7 +2524,9 @@ _WORKSPACE_JS = """
       alertUnreadCount = null;
       syncAlertMarkAll();
     }
-    if (!isAdmin && currentView === "admin") { showView("chat"); }
+    if (!isAdmin && currentView === "admin") {
+      showView("chat", { urlMode: "replace" });
+    }
     authView.hidden = true;
     workspaceView.hidden = false;
     appEl.removeAttribute("data-private");
@@ -2713,7 +2717,7 @@ _WORKSPACE_JS = """
     }).then(function (loaded) {
       if (epoch !== sessionEpoch || checkSeq !== sessionCheckSeq) { return; }
       if (loaded && signedIn && profile) {
-        topbarTitle.textContent = "Chat";
+        showRequestedView({ loadChat: false });
         setStatus(globalStatus, "");
         // Readiness is public but still consumes a bounded admission slot, so
         // refresh it only after the critical profile check has completed.
@@ -3206,6 +3210,7 @@ _WORKSPACE_JS = """
     setViewTabs("chat");
     topbarTitle.textContent = "Chat";
     setSidebar(false);
+    syncViewUrl("chat", "push");
   }
 
   function openConversation(id, options) {
@@ -3684,27 +3689,105 @@ _WORKSPACE_JS = """
     }
   }
 
-  function showView(view) {
-    if (view === "review" && (!profile || !profile.reviewScope)) {
-      setStatus(globalStatus, "Review access is not available for this account.", "denied");
-      return;
+  var VIEW_URLS = {
+    chat: "/workspace/chat",
+    review: "/workspace/review",
+    admin: "/workspace/admin"
+  };
+
+  function viewFromLocation() {
+    // The shell is served for the legacy /workspace entry and the three
+    // explicit views.  Anything else stays on the safe chat default.
+    var pathname = "";
+    try { pathname = String(window.location.pathname || ""); }
+    catch (error) { return "chat"; }
+    if (!pathname) { return "chat"; }
+    pathname = pathname.replace(/\\/+$/, "");
+    if (pathname === "/workspace/review") { return "review"; }
+    if (pathname === "/workspace/admin") { return "admin"; }
+    return "chat";
+  }
+
+  function canShowView(view) {
+    if (view === "review") { return !!(profile && profile.reviewScope); }
+    if (view === "admin") {
+      return !!(profile && profile.user && profile.user.role === "admin");
     }
-    if (view === "admin" && (!profile || !profile.user || profile.user.role !== "admin")) {
-      setStatus(globalStatus, "Administrator access is not available for this account.", "denied");
-      return;
+    return true;
+  }
+
+  function syncViewUrl(view, mode) {
+    // History API only: no conversation id, prompt text or account data is
+    // ever placed in the URL.  pushState records an explicit navigation;
+    // replaceState keeps a redirect or permission fallback canonical without
+    // adding an entry; "none" leaves the URL of a popstate navigation alone.
+    if (!mode || mode === "none") { return; }
+    var target = VIEW_URLS[view] || VIEW_URLS.chat;
+    var historyApi = window.history;
+    if (!historyApi) { return; }
+    var pathname = "";
+    try { pathname = String(window.location.pathname || ""); } catch (error) { /* non-fatal */ }
+    try {
+      if (mode === "push" && pathname !== target &&
+          typeof historyApi.pushState === "function") {
+        historyApi.pushState({ view: view }, "", target);
+      } else if (mode === "replace" && typeof historyApi.replaceState === "function") {
+        historyApi.replaceState({ view: view }, "", target);
+      }
+    } catch (error) {
+      // A restricted history implementation must not break the workspace.
+    }
+  }
+
+  function showView(view, options) {
+    var settings = options || {};
+    var urlMode = typeof settings.urlMode === "string" ? settings.urlMode : "push";
+    if (!canShowView(view)) {
+      setStatus(globalStatus, view === "admin"
+        ? "Administrator access is not available for this account."
+        : "Review access is not available for this account.", "denied");
+      if (settings.fromUrl) {
+        // A bookmark or Back/Forward entry must never paint or fetch a view the
+        // confirmed profile does not permit.  Fall back to chat and make the
+        // URL canonical without leaving a denied entry behind.
+        showView("chat", { urlMode: "replace", loadChat: settings.loadChat });
+      }
+      return false;
     }
     currentView = view;
     setViewTabs(view);
     topbarTitle.textContent = view === "review" ? "Review" : (view === "admin" ? "Account administration" : "Chat");
     setSidebar(false);
+    syncViewUrl(view, urlMode);
     if (view === "review" && !reviewLoaded) { loadReviewConversations(true); }
-    if (view === "chat" && !listLoaded) { loadConversations(true); }
+    if (view === "chat" && !listLoaded && settings.loadChat !== false) {
+      loadConversations(true);
+    }
     if (view === "admin") { showAdminSection(adminSection); }
+    return true;
+  }
+
+  function showRequestedView(options) {
+    // Called only after /me has confirmed the account.  The URL may select a
+    // view; an unauthorised selection is replaced by chat without fetching it.
+    var settings = options || {};
+    showView(viewFromLocation(), {
+      urlMode: "replace",
+      fromUrl: true,
+      loadChat: settings.loadChat !== false
+    });
   }
 
   tabChat.addEventListener("click", function () { showView("chat"); });
   tabReview.addEventListener("click", function () { showView("review"); });
   tabAdmin.addEventListener("click", function () { showView("admin"); });
+  window.addEventListener("popstate", function () {
+    // Back/Forward already changed the URL.  Re-select the view without adding
+    // a new history entry.  Before sign-in only the URL changes; the eventual
+    // session restore or login reads it once /me confirms the account.
+    if (!signedIn) { return; }
+    showView(viewFromLocation(), { urlMode: "none", fromUrl: true });
+  });
   adminTabUsers.addEventListener("click", function () { showAdminSection("users"); });
   adminTabDepartments.addEventListener("click", function () { showAdminSection("departments"); });
   adminTabPolicies.addEventListener("click", function () { showAdminSection("policies"); });
@@ -5904,7 +5987,7 @@ _WORKSPACE_JS = """
       if (seq !== sessionCheckSeq || epoch !== sessionEpoch) { return; }
       if (loaded && signedIn && profile) {
         appEl.removeAttribute("data-private");
-        topbarTitle.textContent = "Chat";
+        showRequestedView({ loadChat: false });
         setStatus(globalStatus, "");
         var uid = profile.user.id;
         watchBaseline(

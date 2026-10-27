@@ -70,6 +70,37 @@ class WorkspacePageHTTPTests(WorkspaceHTTPBase):
         self.assertEqual(disabled.get("/").status_code, 200)
         self.assertEqual(disabled.get("/admin").status_code, 404)
 
+    def test_workspace_view_urls_serve_the_same_shell_and_headers(self) -> None:
+        legacy = self._page()
+        for path in (
+            "/workspace/",
+            "/workspace/chat",
+            "/workspace/chat/",
+            "/workspace/review",
+            "/workspace/review/",
+            "/workspace/admin",
+            "/workspace/admin/",
+        ):
+            with self.subTest(path=path):
+                response = self.client.get(path)
+                self.assertEqual(response.status_code, 200, response.text)
+                self.assertEqual(response.text, legacy.text)
+                self.assertEqual(response.headers.get("cache-control"), "no-store")
+                self.assertEqual(response.headers.get("x-content-type-options"), "nosniff")
+                self.assertIn("frame-ancestors 'none'", response.headers["content-security-policy"])
+
+        disabled = self.make_client(
+            self.make_app(
+                environ={
+                    "NASI_LEMAK_MODE": "test",
+                    "NASI_LEMAK_ALLOW_UNGUARDED_TEST": "true",
+                }
+            )
+        )
+        for path in ("/workspace/chat", "/workspace/review", "/workspace/admin"):
+            with self.subTest(path=path, enabled=False):
+                self.assertEqual(disabled.get(path).status_code, 404)
+
     def test_csp_hashes_match_the_single_style_and_script(self) -> None:
         html = self._page().text
         styles = re.findall(r"<style>(.*?)</style>", html, re.S)

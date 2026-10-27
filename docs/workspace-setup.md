@@ -12,6 +12,19 @@ review access must be granted explicitly. Existing audit metadata cannot
 reconstruct prompts or answers that were never saved by this workspace; only
 conversations created after activation are available in `/workspace`.
 
+## Workspace URLs and navigation
+
+The workspace shell is served at `/workspace` (and `/workspace/`) as the chat
+entry, and at the explicit views `/workspace/chat`, `/workspace/review` and
+`/workspace/admin` (trailing slashes are accepted). The browser uses the
+History API: tab and in-product navigation update the path with `pushState`,
+and Back/Forward re-select the view without adding history entries. A bookmark
+or refresh is applied only after `/me` confirms the account; a view the profile
+does not permit falls back to chat and canonicalises the URL to
+`/workspace/chat` without issuing that view's protected reads. The URL never
+contains conversation ids, prompts or account data, and the server-side API
+remains the authority for every protected read and write.
+
 Administrator policy profiles and in-app block alerts are described in
 [docs/admin-policies.md](admin-policies.md). That document also contains the
 mandatory **schema-2 to schema-3** upgrade procedure for an existing workspace
