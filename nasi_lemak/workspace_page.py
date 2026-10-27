@@ -141,6 +141,9 @@ textarea:focus-visible { outline-offset: -2px; }
 .topbar {
   display: flex; align-items: center; gap: var(--space-2); min-height: 56px;
   padding: var(--space-2) var(--space-4); border-bottom: 1px solid var(--line); background: var(--bg);
+  /* Keep every wrapped topbar line inside the header box instead of letting
+     the scrollable content pane shrink the header over its own content. */
+  flex: none;
 }
 .topbar-title { flex: 0 1 auto; min-width: 0; margin: 0; color: var(--text-soft); font-size: .86rem; font-weight: 600; }
 .guard-status { position: relative; flex: 0 1 auto; min-width: 0; margin: 0; color: var(--muted); font-size: .75rem; line-height: 1.35; text-align: right; }
@@ -299,6 +302,9 @@ textarea:focus-visible { outline-offset: -2px; }
 .admin-role-note { color: var(--muted-dim); font-size: .72rem; align-self: center; }
 .admin-confirm { border: 1px solid #6b332d; border-radius: var(--radius); background: var(--danger-soft); padding: var(--space-2) var(--space-3); display: grid; gap: var(--space-2); margin-top: var(--space-1); }
 .admin-confirm p { margin: 0; color: var(--text-soft); font-size: .75rem; }
+.admin-confirm p.admin-confirm-consequence { color: var(--muted); font-size: .72rem; }
+.admin-confirm label { color: var(--text-soft); font-size: .75rem; }
+.admin-confirm input { width: 100%; min-width: 0; }
 .admin-confirm button { min-height: 30px; font-size: .75rem; }
 .admin-reset { display: grid; gap: var(--space-2); border-top: 1px solid var(--line); padding-top: var(--space-2); margin-top: var(--space-1); }
 .admin-reset label { color: var(--text-soft); font-size: .75rem; }
@@ -337,21 +343,56 @@ textarea:focus-visible { outline-offset: -2px; }
 .admin-table { display: grid; min-width: 0; max-width: 100%; overflow-x: auto; }
 .admin-table-head, .admin-table-row {
   display: grid; grid-template-columns: repeat(var(--admin-cols, 4), minmax(0, 1fr));
-  gap: var(--space-3); align-items: start; min-width: 620px;
-  padding: var(--space-2) var(--space-3);
+  gap: 12px; align-items: center; min-width: 620px;
+  padding: 12px 16px;
 }
 .admin-table-head { border-bottom: 1px solid var(--line); color: var(--muted-dim); font-size: .7rem; letter-spacing: .06em; text-transform: uppercase; }
-.admin-table-row { border-top: 1px solid var(--line); min-height: 44px; }
+.admin-table-row { border-top: 1px solid var(--line); min-height: 56px; }
 .admin-table-head.cols-2, .admin-table-row.cols-2 { grid-template-columns: minmax(0, 2fr) minmax(0, 1fr); min-width: 360px; }
 .admin-table-head.cols-3, .admin-table-row.cols-3 { grid-template-columns: minmax(0, 1.5fr) minmax(0, 1fr) auto; }
 .admin-table-head.cols-4, .admin-table-row.cols-4 { grid-template-columns: minmax(0, 1.2fr) minmax(0, .8fr) minmax(0, 1.5fr) auto; }
-.admin-table-head.cols-5, .admin-table-row.cols-5 { grid-template-columns: minmax(0, 1.1fr) minmax(0, .9fr) minmax(0, 1.2fr) minmax(0, 1fr) auto; }
-.admin-table-head.cols-6, .admin-table-row.cols-6 { grid-template-columns: minmax(0, 1fr) minmax(0, .8fr) minmax(0, .9fr) minmax(0, 1.2fr) minmax(0, .8fr) auto; }
+/* The three list tables the administrator reads row by row use explicit
+   column widths, so a long name or identifier cannot squeeze its neighbours
+   or detach the action group from the row content. */
+#user-list .cols-5 { grid-template-columns: minmax(150px, 1.4fr) 96px 120px 150px minmax(220px, 300px); min-width: 760px; }
+#access-list .cols-5 { grid-template-columns: 150px 110px minmax(150px, 1.4fr) 120px minmax(150px, 1fr); min-width: 760px; }
+#alert-list .cols-6 { grid-template-columns: 120px minmax(150px, 1.2fr) 86px minmax(150px, 1.4fr) minmax(160px, 1.3fr) minmax(150px, 210px); min-width: 920px; }
+/* The alert summary is a scan strip, not a sentence: each total keeps its
+   own label so the unread, stage and age values cannot run together. */
+.alert-summary { display: flex; flex-wrap: wrap; margin: 0; border: 1px solid var(--line); border-radius: var(--radius); background: var(--panel); overflow: hidden; }
+.alert-summary-cell { display: grid; gap: 2px; flex: 1 1 128px; min-width: 112px; padding: var(--space-2) var(--space-3); border-left: 1px solid var(--line); }
+.alert-summary-cell:first-child { border-left: 0; }
+.alert-summary-value { color: var(--text); font-size: 1rem; font-weight: 650; line-height: 1.2; }
+.alert-summary-label { color: var(--muted-dim); font-size: .68rem; letter-spacing: .06em; text-transform: uppercase; }
+.alert-summary.is-unavailable { display: block; padding: var(--space-2) var(--space-3); border-color: #6b332d; background: var(--danger-soft); color: var(--text-soft); font-size: .78rem; }
+.alert-summary-row { display: flex; flex-wrap: wrap; align-items: flex-start; gap: var(--space-2); }
+.alert-summary-row .alert-summary { flex: 1 1 320px; min-width: 0; }
+.alert-summary-action { flex: none; }
+.alert-stage-badge { display: inline-block; border: 1px solid var(--line-strong); border-radius: 999px; background: var(--surface-raised); color: var(--text-soft); padding: 0 8px; font-size: .68rem; font-weight: 650; letter-spacing: .04em; line-height: 1.7; text-transform: uppercase; }
+.alert-stage-badge.is-output { border-color: var(--amber-line); background: var(--amber-soft); color: var(--amber); }
+.alert-reason { display: -webkit-box; overflow: hidden; color: var(--text-soft); -webkit-box-orient: vertical; -webkit-line-clamp: 2; }
+.alert-state-row { display: flex; flex-wrap: wrap; gap: 4px; margin-top: 4px; }
+.alert-chip { display: inline-block; border: 1px solid var(--line-strong); border-radius: 999px; padding: 0 6px; color: var(--muted); font-size: .66rem; line-height: 1.6; }
+.alert-chip.is-unread { border-color: var(--amber-line); color: var(--amber); }
+.alert-chip.is-read { color: var(--muted-dim); }
+.alert-chip.is-acknowledged { border-color: var(--line-strong); color: var(--text-soft); }
+.alert-profile { display: grid; gap: 2px; }
+.alert-ref-row { display: flex; flex-wrap: wrap; align-items: center; gap: 4px; min-width: 0; }
+.alert-ref-row .cell-id { flex: 1 1 auto; }
+.alert-copy { min-height: 24px; padding: 0 6px; font-size: .66rem; white-space: nowrap; }
+.access-lines { display: grid; gap: 2px; min-width: 0; }
+.access-lines > * { min-width: 0; }
+.access-role { display: inline-block; padding: 0 5px; border: 1px solid var(--line-strong); border-radius: 999px; color: var(--muted); font-size: .64rem; line-height: 1.5; }
+.access-id-row { display: flex; flex-wrap: wrap; align-items: center; gap: 4px; min-width: 0; }
+.access-id-row .cell-truncate { flex: 1 1 auto; }
+.access-copy { min-height: 22px; padding: 0 6px; font-size: .66rem; white-space: nowrap; }
 .admin-table-row:first-child { border-top: 0; }
-.admin-table-row > div { min-width: 0; overflow-wrap: anywhere; color: var(--text-soft); font-size: .78rem; }
+.admin-table-row > div { min-width: 0; overflow-wrap: break-word; color: var(--text-soft); font-size: .78rem; }
+.admin-table-row > div.cell-id { white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+.admin-table-row .cell-truncate { display: block; max-width: 100%; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
 .admin-table-row .cell-muted { color: var(--muted-dim); font-size: .73rem; }
-.admin-table-row .cell-actions { display: flex; flex-wrap: wrap; gap: var(--space-1); }
-.admin-table-row .cell-actions button { min-height: 28px; padding: 0 var(--space-2); font-size: .72rem; }
+.admin-table-row .cell-actions { display: flex; flex-wrap: wrap; gap: var(--space-1); align-content: center; justify-content: flex-start; }
+.admin-table-row .cell-actions button { min-height: 28px; padding: 0 6px; font-size: .7rem; white-space: nowrap; }
 .admin-table-empty { margin: 0; padding: var(--space-3); color: var(--muted-dim); font-size: .78rem; }
 .admin-inline { display: inline-flex; align-items: center; gap: var(--space-1); color: var(--text-soft); font-size: .76rem; }
 .admin-details { border: 1px solid var(--line); border-radius: var(--radius); background: var(--panel); padding: var(--space-2) var(--space-3); }
@@ -372,6 +413,28 @@ textarea:focus-visible { outline-offset: -2px; }
 .effective-summary { border: 1px solid var(--line); border-radius: var(--radius); background: var(--panel); padding: var(--space-3); font-size: .78rem; color: var(--text-soft); }
 .effective-summary p { margin: 0 0 var(--space-1); }
 .effective-summary ul { margin: var(--space-1) 0 0; padding-left: 1.2rem; }
+.effective-preview { display: grid; gap: var(--space-3); }
+.effective-preview p { margin: 0; }
+.effective-preview ul { margin: 0; }
+.effective-intro { color: var(--text); font-weight: 600; }
+.effective-blocks { display: grid; grid-template-columns: repeat(auto-fit, minmax(min(100%, 220px), 1fr)); gap: var(--space-3); }
+.effective-block { display: grid; gap: var(--space-2); align-content: start; border: 1px solid var(--line-strong); border-radius: var(--radius); background: var(--surface); padding: var(--space-3); }
+.effective-block h4, .effective-why h4 { margin: 0; color: var(--muted); font-size: .7rem; font-weight: 650; letter-spacing: .06em; text-transform: uppercase; }
+.effective-chip-row { display: inline-flex; flex-wrap: wrap; gap: var(--space-1); vertical-align: middle; }
+.effective-chip { display: inline-block; border: 1px solid var(--line-strong); border-radius: 999px; background: var(--surface-raised); color: var(--text-soft); padding: 0 8px; font-size: .72rem; line-height: 1.6; }
+.effective-chip.is-disabled { border-color: var(--amber-line); background: var(--amber-soft); color: var(--amber); }
+.effective-chip.is-none { border-style: dashed; background: transparent; color: var(--muted); }
+.effective-chip.is-winner { border-color: var(--amber); background: var(--amber); color: #17130b; font-weight: 650; }
+.effective-why { display: grid; gap: var(--space-2); padding-top: var(--space-3); border-top: 1px solid var(--line); }
+.effective-applied { color: var(--text); }
+.effective-reason { color: var(--muted); }
+.effective-chain { list-style: none; display: grid; gap: var(--space-1); padding: 0; }
+.effective-chain-item { border-left: 1px solid var(--line-strong); color: var(--muted); padding: var(--space-1) 0 var(--space-1) var(--space-2); }
+.effective-chain-item.depth-1 { margin-left: 14px; }
+.effective-chain-item.depth-2 { margin-left: 28px; }
+.effective-chain-item.is-winner { border-left-color: var(--amber); color: var(--text-soft); }
+.effective-chain-item .effective-chip { margin-left: var(--space-1); }
+.effective-action-note { color: var(--muted-dim); }
 .chat-block { margin: 0 0 var(--space-2); padding: var(--space-3); border: 1px solid var(--amber-line); border-radius: var(--radius); background: var(--amber-soft); color: var(--text-soft); font-size: .8rem; overflow-wrap: anywhere; }
 .chat-block h3 { margin: 0 0 var(--space-1); color: var(--amber); font-size: .86rem; }
 .chat-block p { margin: 0 0 var(--space-1); }
@@ -401,6 +464,37 @@ textarea:focus-visible { outline-offset: -2px; }
   .admin-view { padding: var(--space-3); }
   .admin-grid { grid-template-columns: minmax(0, 1fr); }
   .admin-table-head, .admin-table-row { min-width: 560px; }
+  /* At narrow widths the Users, Alerts and Access history lists become
+     labelled cards: no inner horizontal scroll, every action stays on screen,
+     and each value keeps its column heading as an inline label. */
+  .admin-table-list { overflow: visible; gap: 12px; }
+  .admin-table-list .admin-table-head { display: none; }
+  #user-list .admin-table-row, #alert-list .admin-table-row, #access-list .admin-table-row {
+    grid-template-columns: minmax(0, 1fr); min-width: 0; gap: 8px;
+    padding: 12px 16px; border: 1px solid var(--line);
+    border-radius: var(--radius); background: var(--panel);
+  }
+  #user-list .admin-table-row > div, #alert-list .admin-table-row > div,
+  #access-list .admin-table-row > div {
+    display: block; min-width: 0; white-space: normal;
+    overflow: visible; text-overflow: clip;
+  }
+  #user-list .admin-table-row > div::before, #alert-list .admin-table-row > div::before,
+  #access-list .admin-table-row > div::before {
+    content: attr(data-label); display: block; margin-bottom: 2px;
+    color: var(--muted-dim); font-size: .68rem; font-weight: 650;
+    letter-spacing: .06em; text-transform: uppercase;
+  }
+  #access-list .admin-table-row > .access-lines { display: grid; gap: 2px; }
+  #user-list .admin-table-row .cell-truncate, #alert-list .admin-table-row .cell-truncate,
+  #access-list .admin-table-row .cell-truncate {
+    white-space: nowrap; overflow: hidden; text-overflow: ellipsis;
+  }
+  /* The summary keeps its scan order but wraps to two balanced columns
+     instead of shrinking six labels into unreadable text. */
+  .alert-summary-cell { flex: 1 1 45%; border-left: 0; border-top: 1px solid var(--line); }
+  .alert-summary-cell:nth-child(-n+2) { border-top: 0; }
+  .alert-summary-cell:nth-child(even) { border-left: 1px solid var(--line); }
   .policy-history-row { grid-template-columns: 56px minmax(0, 1fr); }
   .policy-history-row > :last-child { grid-column: 1 / -1; }
   .topbar-actions { gap: var(--space-1); }
@@ -596,6 +690,7 @@ _WORKSPACE_JS = """
   var alertUnread = byId("alert-unread");
   var alertAck = byId("alert-ack");
   var alertSummary = byId("alert-summary");
+  var alertMarkAll = byId("alert-mark-all");
   var alertState = byId("alert-state");
   var alertList = byId("alert-list");
   var alertMore = byId("alert-more");
@@ -701,6 +796,8 @@ _WORKSPACE_JS = """
   var alertRefreshTimer = null;
   var alertRefreshEpoch = 0;
   var alertActionBusy = "";
+  var alertMarkAllBusy = false;
+  var alertUnreadCount = null;
   var policySummarySeq = 0;
   // Sign-in and session restore read history and readiness first.  Policy and
   // alert summaries are queued behind those reads so a new startup cannot
@@ -1132,9 +1229,9 @@ _WORKSPACE_JS = """
 
   function policyMasksText(settings) {
     return "Input masks: " +
-      (settings.input_masks.length ? settings.input_masks.join(", ") : "none (explicit no masking)") +
+      (settings.input_masks.length ? settings.input_masks.join(", ") : "None") +
       " · Output masks: " +
-      (settings.output_masks.length ? settings.output_masks.join(", ") : "none (explicit no masking)");
+      (settings.output_masks.length ? settings.output_masks.join(", ") : "None");
   }
 
   function policySettingsSummary(settings) {
@@ -1242,9 +1339,9 @@ _WORKSPACE_JS = """
       row.appendChild(tableCell(policyChecksText(profile.settings)));
 
       var masksCell = tableCell("Input: " + (profile.settings.input_masks.length
-        ? profile.settings.input_masks.join(", ") : "None (explicit no masking)"));
+        ? profile.settings.input_masks.join(", ") : "None"));
       masksCell.appendChild(tableCell("Output: " + (profile.settings.output_masks.length
-        ? profile.settings.output_masks.join(", ") : "None (explicit no masking)"), "cell-muted"));
+        ? profile.settings.output_masks.join(", ") : "None"), "cell-muted"));
       row.appendChild(masksCell);
 
       var actions = document.createElement("div");
@@ -1901,6 +1998,85 @@ _WORKSPACE_JS = """
     });
   }
 
+  function previewScopeText(scopeType, scopeId) {
+    if (scopeType === "workspace") { return "Organisation"; }
+    if (scopeType === "department") {
+      for (var i = 0; i < adminDepartments.length; i += 1) {
+        if (adminDepartments[i].id === scopeId) {
+          return "Department · " + adminDepartments[i].name;
+        }
+      }
+      return "Department (name unavailable)";
+    }
+    if (scopeType === "user") {
+      var user = findAdminUser(scopeId);
+      return user ? "User · @" + user.username : "User (name unavailable)";
+    }
+    return "Unknown scope";
+  }
+
+  function previewProfileName(item) {
+    return typeof item.profile_name === "string" && item.profile_name
+      ? item.profile_name : "Unnamed profile";
+  }
+
+  function effectiveChip(text, className) {
+    var chip = document.createElement("span");
+    chip.className = "effective-chip" + (className ? " " + className : "");
+    chip.textContent = text;
+    return chip;
+  }
+
+  function appendEffectiveChannel(container, stage, title, enabled, masks) {
+    var block = document.createElement("div");
+    block.className = "effective-block";
+    block.setAttribute("data-stage", stage);
+    var heading = document.createElement("h4");
+    heading.textContent = title;
+    block.appendChild(heading);
+    var stateLine = document.createElement("p");
+    stateLine.className = "effective-block-state";
+    stateLine.appendChild(effectiveChip(
+      enabled ? "Checks on" : "Checks off",
+      enabled ? "is-enabled" : "is-disabled"
+    ));
+    block.appendChild(stateLine);
+    var masksLine = document.createElement("p");
+    masksLine.className = "effective-block-masks";
+    var masksLabel = document.createElement("span");
+    masksLabel.className = "effective-mask-label";
+    masksLabel.textContent = "Masks: ";
+    masksLine.appendChild(masksLabel);
+    var row = document.createElement("span");
+    row.className = "effective-chip-row";
+    if (masks.length) {
+      for (var i = 0; i < masks.length; i += 1) {
+        row.appendChild(effectiveChip(masks[i], "is-mask"));
+      }
+    } else {
+      row.appendChild(effectiveChip("None", "is-none"));
+    }
+    masksLine.appendChild(row);
+    block.appendChild(masksLine);
+    container.appendChild(block);
+  }
+
+  function effectiveReason(winner, sources) {
+    if (!winner) {
+      return "The built-in default policy applies because no assignment exists at the " +
+        "organisation, department or user level.";
+    }
+    if (sources.length > 1) {
+      var previous = sources[sources.length - 2];
+      return "It overrides the " + previewScopeText(previous.scope_type, previous.scope_id) +
+        " assignment. All settings come from this profile; no values are combined from " +
+        "lower scopes.";
+    }
+    return "No less-specific assignment is set, so this assignment replaces the built-in " +
+      "default policy. All settings come from this profile; no values are combined from " +
+      "lower scopes.";
+  }
+
   function renderEffectivePreview(data, selectedUserId) {
     clearNode(effectivePolicy);
     var settings = policySettings(data);
@@ -1911,63 +2087,100 @@ _WORKSPACE_JS = """
     var user = findAdminUser(typeof data.user_id === "string" ? data.user_id : selectedUserId);
     var identity = user
       ? "@" + user.username + " (" + user.full_name + ")"
-      : "User " + shortId(typeof data.user_id === "string" ? data.user_id : selectedUserId);
+      : "the selected user";
     var intro = document.createElement("p");
+    intro.className = "effective-intro";
     intro.textContent = "Effective policy for " + identity + ".";
     effectivePolicy.appendChild(intro);
 
-    var input = document.createElement("p");
-    input.textContent = "Input checks: " + (settings.input_check_enabled ? "enabled" : "DISABLED") +
-      " · masks: " + (settings.input_masks.length
-        ? settings.input_masks.join(", ") : "none (explicit no masking)") + ".";
-    effectivePolicy.appendChild(input);
-    var output = document.createElement("p");
-    output.textContent = "Output checks: " + (settings.output_check_enabled ? "enabled" : "DISABLED") +
-      " · masks: " + (settings.output_masks.length
-        ? settings.output_masks.join(", ") : "none (explicit no masking)") + ".";
-    effectivePolicy.appendChild(output);
+    var blocks = document.createElement("div");
+    blocks.className = "effective-blocks";
+    appendEffectiveChannel(
+      blocks, "input", "Input checks / masks",
+      settings.input_check_enabled, settings.input_masks
+    );
+    appendEffectiveChannel(
+      blocks, "output", "Output checks / masks",
+      settings.output_check_enabled, settings.output_masks
+    );
+    effectivePolicy.appendChild(blocks);
 
-    var source = isObject(data.source) ? data.source : null;
-    var winning = document.createElement("p");
-    if (source && typeof source.scope_type === "string") {
-      winning.textContent = "Winning scope: " +
-        policyScopeLabel(source.scope_type, source.scope_id) + " · " +
-        (typeof source.profile_name === "string" && source.profile_name
-          ? source.profile_name : "Profile " + shortId(source.profile_id)) +
-        " revision " + source.revision + ".";
-    } else if (data.is_default === true) {
-      winning.textContent = "Winning scope: default workspace policy. No assignment exists in the inheritance chain.";
-    } else {
-      winning.textContent = "Winning scope: not reported by the server.";
-    }
-    effectivePolicy.appendChild(winning);
-
-    var sources = Array.isArray(data.sources) ? data.sources : [];
-    if (sources.length > 0) {
-      var heading = document.createElement("p");
-      heading.textContent = "Inheritance sources, least to most specific:";
-      effectivePolicy.appendChild(heading);
-      var list = document.createElement("ul");
-      for (var i = 0; i < sources.length; i += 1) {
-        var item = sources[i];
-        if (!isObject(item) || typeof item.scope_type !== "string") { continue; }
-        var entry = document.createElement("li");
-        entry.textContent = policyScopeLabel(item.scope_type, item.scope_id) +
-          " · " + (typeof item.profile_name === "string" && item.profile_name
-            ? item.profile_name : "Profile " + shortId(item.profile_id)) +
-          " revision " + item.revision + ".";
-        list.appendChild(entry);
+    var rawSources = Array.isArray(data.sources) ? data.sources : [];
+    var sources = [];
+    var i;
+    for (i = 0; i < rawSources.length; i += 1) {
+      if (isObject(rawSources[i]) && typeof rawSources[i].scope_type === "string") {
+        sources.push(rawSources[i]);
       }
-      effectivePolicy.appendChild(list);
-    } else if (data.is_default === true) {
-      var defaultNote = document.createElement("p");
-      defaultNote.textContent = "Default inheritance: both checks enabled and all masks selected.";
-      effectivePolicy.appendChild(defaultNote);
+    }
+    var winner = null;
+    if (isObject(data.source) && typeof data.source.scope_type === "string") {
+      winner = data.source;
+    } else if (sources.length) {
+      winner = sources[sources.length - 1];
     }
 
-    var pinned = document.createElement("p");
-    pinned.textContent = "This preview uses the currently pinned revisions. Editing a profile does not change it until an assignment is explicitly reapplied.";
-    effectivePolicy.appendChild(pinned);
+    var why = document.createElement("div");
+    why.className = "effective-why";
+    var whyHeading = document.createElement("h4");
+    whyHeading.textContent = "Why this applies";
+    why.appendChild(whyHeading);
+
+    var applied = document.createElement("p");
+    applied.className = "effective-applied";
+    if (winner) {
+      applied.textContent = "Applied scope: " +
+        previewScopeText(winner.scope_type, winner.scope_id) + ". Profile: " +
+        previewProfileName(winner) + ", revision " +
+        (typeof winner.revision === "number" ? winner.revision : "unknown") + ".";
+    } else if (data.is_default === true) {
+      applied.textContent = "Applied scope: built-in default policy.";
+    } else {
+      applied.textContent = "Applied scope: not reported by the server.";
+    }
+    why.appendChild(applied);
+
+    var reason = document.createElement("p");
+    reason.className = "effective-reason";
+    reason.textContent = effectiveReason(winner, sources);
+    why.appendChild(reason);
+
+    // The server returns the winning settings as one complete snapshot. It does
+    // not report per-field inheritance, so show the scope precedence honestly
+    // rather than claiming that lower scopes contribute individual values.
+    if (sources.length > 1) {
+      var chainHeading = document.createElement("p");
+      chainHeading.className = "effective-chain-heading";
+      chainHeading.textContent = "Scope chain, least to most specific:";
+      why.appendChild(chainHeading);
+      var chain = document.createElement("ul");
+      chain.className = "effective-chain";
+      for (i = 0; i < sources.length; i += 1) {
+        var item = sources[i];
+        var isWinner = i === sources.length - 1;
+        var entry = document.createElement("li");
+        entry.className = "effective-chain-item depth-" + Math.min(i, 2) +
+          (isWinner ? " is-winner" : "");
+        entry.textContent = previewScopeText(item.scope_type, item.scope_id) + " · " +
+          previewProfileName(item) + ", revision " +
+          (typeof item.revision === "number" ? item.revision : "unknown") + " — " +
+          (isWinner ? "applies in full" : "superseded");
+        if (isWinner) { entry.appendChild(effectiveChip("Winner", "is-winner")); }
+        chain.appendChild(entry);
+      }
+      why.appendChild(chain);
+    }
+    effectivePolicy.appendChild(why);
+
+    var note = document.createElement("p");
+    note.className = "effective-action-note";
+    note.textContent = sources.length
+      ? "Changes to a profile do not affect users until you re-apply the assignment to " +
+        "this scope. This preview shows the revision assigned now, so your last profile " +
+        "edit is not live until you re-apply."
+      : "Changes to a profile do not affect this user until an assignment is created at " +
+        "their scope.";
+    effectivePolicy.appendChild(note);
   }
 
   function loadEffectivePreview() {
@@ -2048,6 +2261,89 @@ _WORKSPACE_JS = """
     }, 30000);
   }
 
+  function alertAgeText(seconds) {
+    if (typeof seconds !== "number" || isNaN(seconds)) { return ""; }
+    var delta = Math.floor(Date.now() / 1000 - seconds);
+    if (delta < 0) { delta = 0; }
+    if (delta < 60) { return "just now"; }
+    var minutes = Math.floor(delta / 60);
+    if (minutes < 60) {
+      return minutes + (minutes === 1 ? " minute" : " minutes") + " ago";
+    }
+    var hours = Math.floor(minutes / 60);
+    if (hours < 24) {
+      return hours + (hours === 1 ? " hour" : " hours") + " ago";
+    }
+    var days = Math.floor(hours / 24);
+    return days + (days === 1 ? " day" : " days") + " ago";
+  }
+
+  function appendAlertSummaryCell(container, value, label, className) {
+    var cell = document.createElement("div");
+    cell.className = "alert-summary-cell" + (className ? " " + className : "");
+    var valueNode = document.createElement("span");
+    valueNode.className = "alert-summary-value";
+    valueNode.textContent = value;
+    cell.appendChild(valueNode);
+    var labelNode = document.createElement("span");
+    labelNode.className = "alert-summary-label";
+    labelNode.textContent = label;
+    cell.appendChild(labelNode);
+    container.appendChild(cell);
+  }
+
+  function syncAlertMarkAll() {
+    // The bulk action is offered only while an administrator has a known
+    // positive unread count. A failed or unauthorized summary hides it rather
+    // than implying that no alerts need attention.
+    if (!currentAdmin() || typeof alertUnreadCount !== "number" || alertUnreadCount <= 0) {
+      alertMarkAll.hidden = true;
+      alertMarkAll.disabled = false;
+      return;
+    }
+    alertMarkAll.hidden = false;
+    alertMarkAll.setAttribute("aria-label", "Mark all alerts read");
+    alertMarkAll.disabled = alertMarkAllBusy;
+  }
+
+  function renderAlertSummary(data) {
+    clearNode(alertSummary);
+    alertSummary.className = "alert-summary";
+    var total = Math.max(0, Math.floor(data.total));
+    var unread = Math.max(0, Math.floor(data.unread));
+    var acknowledged = Math.max(0, Math.floor(data.acknowledged));
+    alertUnreadCount = unread;
+    syncAlertMarkAll();
+    appendAlertSummaryCell(alertSummary, total + " total", "All alerts");
+    appendAlertSummaryCell(alertSummary, unread + " unread", "Needs attention");
+    appendAlertSummaryCell(
+      alertSummary,
+      typeof data.input === "number" && !isNaN(data.input)
+        ? String(Math.max(0, Math.floor(data.input))) : "Not reported",
+      "Input alerts"
+    );
+    appendAlertSummaryCell(
+      alertSummary,
+      typeof data.output === "number" && !isNaN(data.output)
+        ? String(Math.max(0, Math.floor(data.output))) : "Not reported",
+      "Output alerts"
+    );
+    appendAlertSummaryCell(alertSummary, acknowledged + " acknowledged", "Acknowledged");
+    if (typeof data.oldest_unread_at === "number" && !isNaN(data.oldest_unread_at)) {
+      appendAlertSummaryCell(
+        alertSummary,
+        formatDate(data.oldest_unread_at),
+        "Oldest unread · " + alertAgeText(data.oldest_unread_at)
+      );
+    } else {
+      appendAlertSummaryCell(
+        alertSummary,
+        unread === 0 ? "None" : "Not reported",
+        "Oldest unread"
+      );
+    }
+  }
+
   function loadAlertSummary() {
     if (!signedIn || !profile || !profile.user || profile.user.role !== "admin") {
       return Promise.resolve(false);
@@ -2076,6 +2372,9 @@ _WORKSPACE_JS = """
           alertsBell.setAttribute("aria-label", "Alerts unavailable");
         }
         alertsBadge.hidden = true;
+        alertUnreadCount = null;
+        syncAlertMarkAll();
+        alertSummary.className = "alert-summary is-unavailable";
         alertSummary.textContent = "Alerts are unavailable. Alert counts are unknown; do not assume there are none.";
         clearAlertRefresh();
         return false;
@@ -2088,8 +2387,7 @@ _WORKSPACE_JS = """
       alertsBell.setAttribute("aria-label", "Alerts, " + unread + " unread, " + total + " total");
       alertsBadge.textContent = String(unread);
       alertsBadge.hidden = unread === 0;
-      alertSummary.textContent = "Block alerts: " + total + " total, " + unread +
-        " unread, " + acknowledged + " acknowledged.";
+      renderAlertSummary(result.data);
       return true;
     });
   }
@@ -2196,6 +2494,8 @@ _WORKSPACE_JS = """
       alertsBadge.textContent = "0";
       alertsBell.setAttribute("aria-label", "Alerts unavailable");
       alertsBell.removeAttribute("data-state");
+      alertUnreadCount = null;
+      syncAlertMarkAll();
     }
     if (!isAdmin && currentView === "admin") { showView("chat"); }
     authView.hidden = true;
@@ -3556,10 +3856,29 @@ _WORKSPACE_JS = """
     container.appendChild(head);
   }
 
-  function tableCell(text, className) {
+  function tableCell(text, className, label) {
     var cell = document.createElement("div");
     if (className) { cell.className = className; }
+    if (label) { cell.setAttribute("data-label", label); }
     cell.textContent = text;
+    return cell;
+  }
+
+  function identifierCell(label, value, className) {
+    // Identifiers are deliberately kept on one line: the CSS ellipsis keeps a
+    // long request or conversation ID from wrapping mid-token, and the title
+    // exposes the full value to a mouse or assistive-technology user.
+    var cell = document.createElement("div");
+    cell.className = "cell-id" + (className ? " " + className : "");
+    if (typeof value === "string" && value) {
+      var text = document.createElement("span");
+      text.className = "cell-truncate";
+      text.textContent = label + value;
+      text.setAttribute("title", label + value);
+      cell.appendChild(text);
+    } else {
+      cell.textContent = label + "none";
+    }
     return cell;
   }
 
@@ -3574,6 +3893,8 @@ _WORKSPACE_JS = """
     removeActiveConfirm();
     var box = document.createElement("div");
     box.className = "admin-confirm";
+    box.setAttribute("role", "group");
+    box.setAttribute("aria-label", question);
     var copy = document.createElement("p");
     copy.textContent = question;
     var yes = document.createElement("button");
@@ -3600,6 +3921,151 @@ _WORKSPACE_JS = """
     container.appendChild(box);
     adminActiveConfirm = box;
     try { no.focus(); } catch (error) { /* non-fatal */ }
+  }
+
+  function askTypedConfirm(container, question, consequence, expected, label, onConfirm) {
+    removeActiveConfirm();
+    var box = document.createElement("div");
+    box.className = "admin-confirm";
+    box.setAttribute("role", "group");
+    box.setAttribute("aria-label", question);
+    var copy = document.createElement("p");
+    copy.textContent = question;
+    var detail = document.createElement("p");
+    detail.className = "admin-confirm-consequence";
+    detail.textContent = consequence;
+    var detailId = "admin-delete-consequence-" + expected;
+    detail.id = detailId;
+    var field = document.createElement("label");
+    field.textContent = "Type the username " + expected + " exactly to confirm deletion";
+    var input = document.createElement("input");
+    input.type = "text";
+    input.className = "admin-confirm-input";
+    input.autocomplete = "off";
+    input.autocapitalize = "none";
+    input.spellcheck = false;
+    input.setAttribute("maxlength", "128");
+    input.setAttribute("aria-label", "Type the username " + expected + " exactly to confirm deletion");
+    input.setAttribute("aria-describedby", detailId);
+    var fieldId = "admin-delete-confirm-" + expected;
+    field.setAttribute("for", fieldId);
+    input.id = fieldId;
+    var actions = document.createElement("div");
+    actions.className = "admin-reset-actions";
+    var yes = document.createElement("button");
+    yes.type = "button";
+    yes.className = "danger";
+    yes.textContent = label;
+    yes.disabled = true;
+    var no = document.createElement("button");
+    no.type = "button";
+    no.className = "ghost";
+    no.textContent = "Cancel";
+    input.addEventListener("input", function () {
+      yes.disabled = input.value !== expected;
+    });
+    input.addEventListener("keydown", function (event) {
+      if ((event.key === "Enter" || event.keyCode === 13) && input.value === expected) {
+        event.preventDefault();
+        yes.click();
+      }
+    });
+    no.addEventListener("click", function () {
+      if (box.parentNode) { box.parentNode.removeChild(box); }
+      if (adminActiveConfirm === box) { adminActiveConfirm = null; }
+      try { container.focus(); } catch (error) { /* non-fatal */ }
+    });
+    yes.addEventListener("click", function () {
+      if (input.value !== expected) { return; }
+      yes.disabled = true;
+      no.disabled = true;
+      onConfirm(box);
+    });
+    actions.appendChild(yes);
+    actions.appendChild(no);
+    box.appendChild(copy);
+    box.appendChild(detail);
+    box.appendChild(field);
+    box.appendChild(input);
+    box.appendChild(actions);
+    container.appendChild(box);
+    adminActiveConfirm = box;
+    try { input.focus(); } catch (error) { /* non-fatal */ }
+  }
+
+  function openEnableUser(row, item, fullName) {
+    askConfirm(row, "Enable " + fullName + " (@" + item.username + ")? " +
+      "Their existing sign-ins stay revoked. They sign in again with their current password; their role, password and saved conversations are unchanged.",
+      "Confirm enable", function (box) {
+        var epoch = sessionEpoch;
+        var token = adminStateEpoch;
+        setStatus(adminStatus, "Enabling @" + item.username + "…");
+        api("/workspace/api/admin/users/" + encodeURIComponent(item.id) + "/enable", {
+          method: "POST",
+          body: "{}"
+        }).then(function (result) {
+          if (epoch !== sessionEpoch || token !== adminStateEpoch) { return; }
+          if (adminGuard(result, adminStatus)) {
+            closeRoleConfirm(box, row);
+            return;
+          }
+          if (!result.ok) {
+            setStatus(adminStatus, result.status === 409
+              ? "The account is already active. Nothing was changed."
+              : serverMessage(result, timeoutOrNetwork(result)), "error");
+            closeRoleConfirm(box, row);
+            return;
+          }
+          setStatus(adminStatus, "Account @" + item.username +
+            " enabled. Previously revoked sessions stay revoked; the user can sign in again with their existing password.", "ok");
+          closeRoleConfirm(box, row);
+          queueAdminList(function () { return loadUsers(true); }).then(function (ok) {
+            if (!ok && epoch === sessionEpoch && token === adminStateEpoch) {
+              setStatus(adminStatus, "Account enabled, but the list could not be refreshed.", "warning");
+            }
+          });
+        });
+      });
+  }
+
+  function openDeleteUser(row, item, fullName) {
+    askTypedConfirm(row,
+      "Delete " + fullName + " (@" + item.username + ")?",
+      "This permanently erases the account, its saved conversations and messages, and block-alert metadata it owns. Access and policy audit history is kept without transcript content. This cannot be undone. Deletion is refused when retained policy or grant history, a user-scoped policy assignment, or an in-progress turn prevents a clean removal; nothing is silently cascaded.",
+      item.username, "Confirm delete", function (box) {
+        var epoch = sessionEpoch;
+        var token = adminStateEpoch;
+        setStatus(adminStatus, "Deleting @" + item.username + "…");
+        api("/workspace/api/admin/users/" + encodeURIComponent(item.id) + "/delete", {
+          method: "POST",
+          body: JSON.stringify({ confirm_username: item.username })
+        }).then(function (result) {
+          if (epoch !== sessionEpoch || token !== adminStateEpoch) { return; }
+          if (adminGuard(result, adminStatus)) {
+            closeRoleConfirm(box, row);
+            return;
+          }
+          if (!result.ok) {
+            setStatus(adminStatus, result.status === 409
+              ? "Deletion was refused: this account authored retained policy or grant history, is the target of a user-scoped policy assignment, has an in-progress turn, or is the last active administrator. Nothing was deleted."
+              : serverMessage(result, timeoutOrNetwork(result)), "error");
+            closeRoleConfirm(box, row);
+            return;
+          }
+          var data = isObject(result.data) ? result.data : {};
+          var conversations = typeof data.deleted_conversations === "number" ? data.deleted_conversations : 0;
+          var messages = typeof data.deleted_messages === "number" ? data.deleted_messages : 0;
+          setStatus(adminStatus, "Account @" + item.username + " deleted. Removed " +
+            conversations + " conversation(s) and " + messages +
+            " message(s); its sessions were revoked. Access history keeps the administrative event without transcript content.", "ok");
+          closeRoleConfirm(box, row);
+          queueAdminList(function () { return loadUsers(true); }).then(function (ok) {
+            if (!ok && epoch === sessionEpoch && token === adminStateEpoch) {
+              setStatus(adminStatus, "Account deleted, but the list could not be refreshed.", "warning");
+            }
+          });
+        });
+      });
   }
 
   function departmentLabel(id) {
@@ -3872,14 +4338,27 @@ _WORKSPACE_JS = """
       var row = document.createElement("div");
       row.className = "admin-table-row cols-5";
       row.setAttribute("data-user", item.id);
-      var account = tableCell(fullName + " · @" + item.username);
+      var account = tableCell(fullName + " · @" + item.username, "", "Account");
       if (item.id === selfId) { account.appendChild(tableCell("This is your account", "cell-muted")); }
       row.appendChild(account);
-      row.appendChild(tableCell(role));
-      row.appendChild(tableCell(department));
-      row.appendChild(tableCell(status + (item.disabled ? "" : " · signed in sessions allowed"), "cell-muted"));
+      row.appendChild(tableCell(role, "", "Role"));
+      row.appendChild(tableCell(department, "", "Department"));
+      row.appendChild(tableCell(status + (item.disabled ? "" : " · signed in sessions allowed"),
+        "cell-muted", "Status"));
       var actions = document.createElement("div");
       actions.className = "cell-actions";
+      actions.setAttribute("data-label", "Actions");
+      if (item.disabled) {
+        var enableButton = document.createElement("button");
+        enableButton.type = "button";
+        enableButton.className = "ghost";
+        enableButton.textContent = "Enable";
+        enableButton.setAttribute("aria-label", "Enable @" + item.username);
+        enableButton.addEventListener("click", function (target, userItem, displayName) {
+          return function () { openEnableUser(target, userItem, displayName); };
+        }(row, item, fullName));
+        actions.appendChild(enableButton);
+      }
       if (!item.disabled && item.id !== selfId) {
         var disableButton = document.createElement("button");
         disableButton.type = "button";
@@ -3934,6 +4413,17 @@ _WORKSPACE_JS = """
         return function () { openPasswordReset(target, userItem); };
       }(row, item));
       actions.appendChild(resetButton);
+      if (item.id !== selfId) {
+        var deleteButton = document.createElement("button");
+        deleteButton.type = "button";
+        deleteButton.className = "danger";
+        deleteButton.textContent = "Delete";
+        deleteButton.setAttribute("aria-label", "Delete @" + item.username);
+        deleteButton.addEventListener("click", function (target, userItem, displayName) {
+          return function () { openDeleteUser(target, userItem, displayName); };
+        }(row, item, fullName));
+        actions.appendChild(deleteButton);
+      }
       row.appendChild(actions);
       userList.appendChild(row);
       shown += 1;
@@ -4004,6 +4494,197 @@ _WORKSPACE_JS = """
     }
   }
 
+  var ACCESS_ACTION_LABELS = {
+    "owner.delete_conversation": "Deleted own conversation",
+    "reviewer.list_conversations": "Listed conversations for review",
+    "reviewer.read_conversation": "Read a conversation for review",
+    "admin.disable_user": "Disabled an account",
+    "admin.enable_user": "Enabled an account",
+    "admin.delete_user": "Deleted an account",
+    "admin.reset_password": "Reset an account password",
+    "admin.grant_review": "Granted review access",
+    "admin.revoke_review": "Revoked review access",
+    "admin.set_user_role": "Changed an account role"
+  };
+
+  function accessActionLabel(action) {
+    // Stored actions remain machine names; purely prepend a display label.
+    // Suffixes such as ":user-id:admin" stay in the tooltip and are never
+    // parsed as prompt content.
+    var base = action.split(":")[0];
+    return ACCESS_ACTION_LABELS[base] || action;
+  }
+
+  function accessRoleLabel(role) {
+    if (role === "admin") { return "Administrator"; }
+    if (role === "employee") { return "Employee"; }
+    return "";
+  }
+
+  function accessLinesCell(label) {
+    var cell = document.createElement("div");
+    cell.className = "access-lines";
+    cell.setAttribute("data-label", label);
+    return cell;
+  }
+
+  function accessActorCell(item) {
+    var fullName = typeof item.actor_full_name === "string" ? item.actor_full_name : "";
+    var username = typeof item.actor_username === "string" ? item.actor_username : "";
+    var roleLabel = accessRoleLabel(item.actor_role);
+    var cell = accessLinesCell("Actor");
+    var actorId = typeof item.actor_id === "string" ? item.actor_id : "";
+    if (item.actor_deleted !== true && (fullName || username)) {
+      var name = document.createElement("span");
+      name.className = "cell-truncate";
+      name.textContent = fullName || ("@" + username);
+      name.setAttribute("title", fullName && username
+        ? fullName + " (@" + username + ")"
+        : name.textContent);
+      cell.appendChild(name);
+      var detail = document.createElement("span");
+      detail.className = "cell-muted";
+      detail.textContent = username ? "@" + username : "";
+      if (roleLabel) {
+        if (detail.textContent) { detail.appendChild(document.createTextNode(" · ")); }
+        var badge = document.createElement("span");
+        badge.className = "access-role";
+        badge.textContent = roleLabel;
+        detail.appendChild(badge);
+      }
+      if (detail.textContent) { cell.appendChild(detail); }
+      return cell;
+    }
+    var deleted = document.createElement("span");
+    deleted.className = "cell-truncate";
+    deleted.textContent = item.actor_deleted === true ? "Deleted user" : "Unknown user";
+    deleted.setAttribute("title", item.actor_deleted === true
+      ? "This account no longer exists; audit actor ID " + (actorId || "unknown")
+      : "No account metadata is available; audit actor ID " + (actorId || "unknown"));
+    cell.appendChild(deleted);
+    var deletedMeta = document.createElement("span");
+    deletedMeta.className = "cell-muted";
+    deletedMeta.textContent = "ID " + shortId(actorId) +
+      (item.actor_deleted === true ? " · account no longer exists" : "");
+    cell.appendChild(deletedMeta);
+    return cell;
+  }
+
+  function accessDepartmentCell(item) {
+    var departmentId = typeof item.department_id === "string" ? item.department_id : "";
+    var name = typeof item.department_name === "string" ? item.department_name : "";
+    if (!departmentId) {
+      var unscoped = tableCell("—", "cell-muted", "Department");
+      unscoped.setAttribute("title", "Not department-scoped");
+      return unscoped;
+    }
+    if (!name) {
+      // The access log endpoint normally resolves this name.  The loaded
+      // department list is a safe secondary source; otherwise say the
+      // department row is gone instead of calling the event unscoped.
+      var local = departmentLabel(departmentId);
+      if (local !== "No department" && local.indexOf("Department ") !== 0) {
+        name = local;
+      }
+    }
+    if (name) { return tableCell(name, "", "Department"); }
+    var cell = accessLinesCell("Department");
+    var deleted = document.createElement("span");
+    deleted.className = "cell-truncate";
+    deleted.textContent = "Deleted department";
+    deleted.setAttribute("title", "Department ID " + departmentId + " no longer exists");
+    cell.appendChild(deleted);
+    var meta = document.createElement("span");
+    meta.className = "cell-muted";
+    meta.textContent = "ID " + shortId(departmentId);
+    cell.appendChild(meta);
+    return cell;
+  }
+
+  function accessConversationCell(item) {
+    var conversationId = typeof item.conversation_id === "string" ? item.conversation_id : "";
+    if (!conversationId) {
+      var unscoped = tableCell("—", "cell-muted", "Conversation");
+      unscoped.setAttribute("title", "Not linked to a conversation");
+      return unscoped;
+    }
+    var created = typeof item.conversation_created_at === "number"
+      ? item.conversation_created_at : null;
+    var updated = typeof item.conversation_updated_at === "number"
+      ? item.conversation_updated_at : null;
+    var cell = accessLinesCell("Conversation");
+    var label = document.createElement("span");
+    label.className = "cell-truncate";
+    if (item.conversation_deleted === true) {
+      label.textContent = "Deleted conversation";
+      label.setAttribute("title", "This conversation no longer exists; ID " + conversationId);
+    } else if (created !== null || updated !== null) {
+      label.textContent = conversationLabel({
+        id: conversationId, created_at: created, updated_at: updated
+      });
+      label.setAttribute("title", label.textContent);
+    } else {
+      label.textContent = "Conversation " + shortId(conversationId);
+      label.setAttribute("title", "Conversation ID " + conversationId);
+    }
+    cell.appendChild(label);
+
+    var idRow = document.createElement("span");
+    idRow.className = "access-id-row";
+    var idText = document.createElement("span");
+    idText.className = "cell-muted cell-truncate";
+    idText.textContent = "ID " + shortId(conversationId);
+    idText.setAttribute("title", "Conversation ID " + conversationId);
+    idRow.appendChild(idText);
+    var copyButton = document.createElement("button");
+    copyButton.type = "button";
+    copyButton.className = "ghost access-copy";
+    copyButton.textContent = "Copy";
+    copyButton.setAttribute("aria-label", "Copy full conversation ID " + conversationId);
+    copyButton.title = "Copy full conversation ID";
+    copyButton.addEventListener("click", function () {
+      copyAccessIdentifier(conversationId);
+    });
+    idRow.appendChild(copyButton);
+    cell.appendChild(idRow);
+    return cell;
+  }
+
+  function accessConversationSearchText(item) {
+    if (typeof item.conversation_id !== "string" || !item.conversation_id) { return ""; }
+    if (item.conversation_deleted === true) {
+      return "deleted conversation " + item.conversation_id;
+    }
+    var created = typeof item.conversation_created_at === "number"
+      ? item.conversation_created_at : null;
+    var updated = typeof item.conversation_updated_at === "number"
+      ? item.conversation_updated_at : null;
+    if (created === null && updated === null) {
+      return "conversation " + item.conversation_id;
+    }
+    return conversationLabel({
+      id: item.conversation_id, created_at: created, updated_at: updated
+    }) + " " + item.conversation_id;
+  }
+
+  function copyAccessIdentifier(value) {
+    if (!value) { return; }
+    if (typeof navigator !== "undefined" && navigator.clipboard &&
+        typeof navigator.clipboard.writeText === "function") {
+      navigator.clipboard.writeText(value).then(function () {
+        setStatus(accessState, "Conversation ID copied.", "ok");
+      }, function () {
+        setStatus(accessState,
+          "The conversation ID could not be copied. The full identifier is in the tooltip.",
+          "error");
+      });
+      return;
+    }
+    setStatus(accessState,
+      "Copy is unavailable in this browser. The full identifier is in the tooltip; select it manually.",
+      "warning");
+  }
+
   function renderAccess(items, reset) {
     if (reset) {
       clearNode(accessList);
@@ -4014,21 +4695,33 @@ _WORKSPACE_JS = """
     for (var i = 0; i < items.length; i += 1) {
       var item = items[i];
       if (!isObject(item) || typeof item.action !== "string") { continue; }
-      var actor = typeof item.actor_id === "string" && item.actor_id
-        ? shortId(item.actor_id) : "unknown";
-      var department = departmentLabel(item.department_id);
-      var conversation = typeof item.conversation_id === "string" && item.conversation_id
-        ? shortId(item.conversation_id) : "none";
+      var actionLabel = accessActionLabel(item.action);
+      var actorText = [
+        typeof item.actor_full_name === "string" ? item.actor_full_name : "",
+        typeof item.actor_username === "string" ? "@" + item.actor_username : "",
+        accessRoleLabel(item.actor_role),
+        item.actor_deleted === true ? "deleted user" : "",
+        item.actor_id
+      ].join(" ");
+      var departmentText = [
+        typeof item.department_name === "string" ? item.department_name : "",
+        item.department_id ? "" : "not department-scoped"
+      ].join(" ");
+      var conversationText = accessConversationSearchText(item);
       var when = formatDate(item.created_at);
-      var haystack = (when + " " + actor + " " + item.action + " " + department + " " + conversation).toLowerCase();
+      var haystack = (when + " " + actorText + " " + item.action + " " + actionLabel +
+        " " + departmentText + " " + conversationText).toLowerCase();
       if (query && haystack.indexOf(query) < 0) { continue; }
       var row = document.createElement("div");
       row.className = "admin-table-row cols-5";
-      row.appendChild(tableCell(when, "cell-muted"));
-      row.appendChild(tableCell("Actor " + actor));
-      row.appendChild(tableCell(item.action));
-      row.appendChild(tableCell(department));
-      row.appendChild(tableCell("Conversation " + conversation, "cell-muted"));
+      row.appendChild(tableCell(when, "cell-muted", "Time"));
+      row.appendChild(accessActorCell(item));
+      var actionCell = tableCell(actionLabel, "", "Action");
+      // The stored machine name stays available verbatim as a tooltip.
+      actionCell.setAttribute("title", item.action);
+      row.appendChild(actionCell);
+      row.appendChild(accessDepartmentCell(item));
+      row.appendChild(accessConversationCell(item));
       accessList.appendChild(row);
       shown += 1;
     }
@@ -4219,18 +4912,34 @@ _WORKSPACE_JS = """
   }
 
   function alertReason(item) {
+    // Prefer the server's fixed, client-safe reason for a known code. A long
+    // free-text reason is only a fallback, and its full value stays in the
+    // title so the row remains compact without hiding text permanently.
+    var detail = Object.prototype.hasOwnProperty.call(BLOCK_DETAILS, item.reason_code)
+      ? BLOCK_DETAILS[item.reason_code] : null;
+    if (detail) { return detail.reason; }
     if (typeof item.reason_text === "string" && item.reason_text) {
       return item.reason_text;
     }
-    var detail = Object.prototype.hasOwnProperty.call(BLOCK_DETAILS, item.reason_code)
-      ? BLOCK_DETAILS[item.reason_code] : null;
-    return detail ? detail.reason : "Blocked by policy.";
+    return "Blocked by policy.";
+  }
+
+  function alertControlSource(item) {
+    var sources = Array.isArray(item.control_sources) ? item.control_sources : [];
+    for (var i = sources.length - 1; i >= 0; i -= 1) {
+      if (isObject(sources[i]) && typeof sources[i].scope_type === "string") {
+        return sources[i];
+      }
+    }
+    return null;
   }
 
   function alertProfile(item) {
-    var sources = Array.isArray(item.control_sources) ? item.control_sources : [];
-    var source = sources.length > 0 ? sources[sources.length - 1] : null;
-    var scopeType = source && typeof source.scope_type === "string" ? source.scope_type : "";
+    var source = alertControlSource(item);
+    // No assignment lineage means the built-in default applied. Saying
+    // "revision unavailable" here would imply stored metadata is missing.
+    if (!source) { return "Default policy"; }
+    var scopeType = source.scope_type;
     var scope = "Workspace";
     if (scopeType === "department") {
       var department = typeof item.department_name === "string" && item.department_name
@@ -4245,10 +4954,10 @@ _WORKSPACE_JS = """
     }
     // The visible label uses only the validated numeric source revision. The
     // full opaque control_revision stays inside Technical details.
-    var revision = source && typeof source.revision === "number" &&
+    var revision = typeof source.revision === "number" &&
       source.revision >= 1 && !isNaN(source.revision)
-      ? String(source.revision) : "unavailable";
-    var loaded = source && typeof source.profile_id === "string"
+      ? String(source.revision) : "not reported";
+    var loaded = typeof source.profile_id === "string"
       ? findPolicyProfile(source.profile_id) : null;
     var name = loaded && typeof loaded.name === "string" && loaded.name
       ? loaded.name
@@ -4260,12 +4969,31 @@ _WORKSPACE_JS = """
   }
 
   function alertProfileCell(item) {
-    var cell = tableCell(alertProfile(item));
+    var cell = tableCell(alertProfile(item), "alert-profile");
+    cell.setAttribute("data-label", "Policy and reference");
     var revision = typeof item.control_revision === "string" && item.control_revision
       ? item.control_revision : "unavailable";
     var digest = typeof item.control_digest === "string" && item.control_digest
       ? item.control_digest : "unavailable";
+    var reference = typeof item.request_id === "string" ? item.request_id : "";
+    var referenceRow = document.createElement("div");
+    referenceRow.className = "alert-ref-row";
+    referenceRow.appendChild(identifierCell("Reference ", reference, "cell-muted"));
+    if (reference) {
+      var copyButton = document.createElement("button");
+      copyButton.type = "button";
+      copyButton.className = "ghost alert-copy";
+      copyButton.textContent = "Copy";
+      copyButton.setAttribute("aria-label", "Copy reference " + reference);
+      copyButton.title = "Copy reference";
+      copyButton.addEventListener("click", function () {
+        copyAlertReference(reference);
+      });
+      referenceRow.appendChild(copyButton);
+    }
+    cell.appendChild(referenceRow);
     var details = document.createElement("details");
+    details.className = "admin-details alert-profile-details";
     var summary = document.createElement("summary");
     summary.textContent = "Technical details";
     details.appendChild(summary);
@@ -4277,6 +5005,44 @@ _WORKSPACE_JS = """
     details.appendChild(digestLine);
     cell.appendChild(details);
     return cell;
+  }
+
+  function alertAcknowledgedActor(item) {
+    if (isObject(item.acknowledged_by)) {
+      if (typeof item.acknowledged_by.full_name === "string" &&
+          item.acknowledged_by.full_name) {
+        return item.acknowledged_by.full_name;
+      }
+      if (typeof item.acknowledged_by.username === "string" &&
+          item.acknowledged_by.username) {
+        return "@" + item.acknowledged_by.username;
+      }
+    }
+    if (typeof item.acknowledged_by_name === "string" && item.acknowledged_by_name) {
+      return item.acknowledged_by_name;
+    }
+    if (typeof item.acknowledged_by_username === "string" &&
+        item.acknowledged_by_username) {
+      return "@" + item.acknowledged_by_username;
+    }
+    if (typeof item.acknowledged_by === "string" && item.acknowledged_by) {
+      return item.acknowledged_by;
+    }
+    return "";
+  }
+
+  function copyAlertReference(value) {
+    if (!value) { return; }
+    if (typeof navigator !== "undefined" && navigator.clipboard &&
+        typeof navigator.clipboard.writeText === "function") {
+      navigator.clipboard.writeText(value).then(function () {
+        setStatus(alertState, "Reference copied.", "ok");
+      }, function () {
+        setStatus(alertState, "The reference could not be copied. Select it and copy it manually.", "error");
+      });
+      return;
+    }
+    setStatus(alertState, "Copy is unavailable in this browser. Select the reference and copy it manually.", "warning");
   }
 
   function appendAlertRetry(container, reset) {
@@ -4349,6 +5115,61 @@ _WORKSPACE_JS = """
     });
   }
 
+  function markAllAlertsRead() {
+    if (!currentAdmin() || alertMarkAllBusy ||
+        typeof alertUnreadCount !== "number" || alertUnreadCount <= 0) {
+      return;
+    }
+    var epoch = sessionEpoch;
+    var token = adminStateEpoch;
+    var uid = profile.user.id;
+    alertMarkAllBusy = true;
+    syncAlertMarkAll();
+    setStatus(alertState, "Marking all alerts read…");
+    api("/workspace/api/admin/alerts/read-all", {
+      method: "POST",
+      body: "{}"
+    }).then(function (result) {
+      if (epoch !== sessionEpoch || token !== adminStateEpoch || !currentAdmin(uid)) {
+        return;
+      }
+      if (authFailure(result)) { return; }
+      alertMarkAllBusy = false;
+      if (result.status === 403) {
+        // The server did not accept the administrator role. Hide the bulk
+        // action instead of leaving it available to a stale client role.
+        alertUnreadCount = null;
+        syncAlertMarkAll();
+        setStatus(alertState, "Administrator permission was denied by the server.", "denied");
+        return;
+      }
+      if (!result.ok) {
+        syncAlertMarkAll();
+        setStatus(alertState, serverMessage(result, timeoutOrNetwork(result)), "error");
+        return;
+      }
+      var marked = isObject(result.data) && typeof result.data.marked_read === "number"
+        ? Math.max(0, Math.floor(result.data.marked_read)) : null;
+      // Every alert is read now; keep the control hidden while the authoritative
+      // summary and the filtered list refresh.
+      alertUnreadCount = 0;
+      syncAlertMarkAll();
+      loadAlertSummary();
+      loadAlerts(true).then(function (ok) {
+        if (!ok || epoch !== sessionEpoch || token !== adminStateEpoch || !currentAdmin(uid)) {
+          return;
+        }
+        setStatus(
+          alertState,
+          marked === null
+            ? "All alerts marked read."
+            : "Marked " + marked + " alert" + (marked === 1 ? "" : "s") + " read.",
+          "ok"
+        );
+      });
+    });
+  }
+
   function viewAlertConversation(item) {
     if (!currentAdmin() || typeof item.conversation_id !== "string" || !item.conversation_id) {
       return;
@@ -4379,12 +5200,18 @@ _WORKSPACE_JS = """
     openReviewConversation(conversationId);
   }
 
+  function appendAlertChip(container, text, className) {
+    var chip = document.createElement("span");
+    chip.className = "alert-chip" + (className ? " " + className : "");
+    chip.textContent = text;
+    container.appendChild(chip);
+  }
+
   function renderAlerts(items, reset) {
     if (reset) {
       clearNode(alertList);
       renderTableHead(alertList, [
-        "User", "Department", "Time and state", "Stage and reason",
-        "Profile and reference", "Actions"
+        "User and time", "Reason", "Stage", "State", "Policy and reference", "Actions"
       ], 6);
     }
     if (reset && items.length === 0) {
@@ -4395,58 +5222,104 @@ _WORKSPACE_JS = """
       if (!isObject(item) || typeof item.id !== "string") { continue; }
       var username = typeof item.username === "string" ? item.username : "unknown";
       var fullName = typeof item.full_name === "string" ? item.full_name : "Unknown employee";
-      var department = typeof item.department_name === "string" && item.department_name
-        ? item.department_name : departmentLabel(item.department_id);
       var row = document.createElement("div");
       row.className = "admin-table-row cols-6";
       row.setAttribute("data-alert", item.id);
-      row.appendChild(tableCell(fullName + " · @" + username));
-      row.appendChild(tableCell(department));
-      row.appendChild(tableCell(
-        formatDate(item.created_at) + " · " + (item.read ? "Read" : "Unread") +
-        " · " + (item.acknowledged ? "Acknowledged" : "Not acknowledged"),
-        "cell-muted"
-      ));
-      var stage = tableCell(item.stage === "output" ? "Output" : "Input");
-      stage.appendChild(tableCell(alertReason(item), "cell-muted"));
-      row.appendChild(stage);
+
+      var userCell = document.createElement("div");
+      userCell.className = "alert-user";
+      userCell.setAttribute("data-label", "User and time");
+      var nameText = document.createElement("span");
+      nameText.className = "cell-truncate";
+      nameText.textContent = fullName;
+      nameText.title = fullName + " · @" + username;
+      userCell.appendChild(nameText);
+      var timeText = document.createElement("span");
+      timeText.className = "cell-muted cell-truncate";
+      timeText.textContent = "@" + username + " · " + formatDate(item.created_at);
+      timeText.title = timeText.textContent;
+      userCell.appendChild(timeText);
+      row.appendChild(userCell);
+
+      var reason = alertReason(item);
+      var reasonCell = tableCell(reason, "alert-reason", "Reason");
+      reasonCell.title = reason;
+      row.appendChild(reasonCell);
+
+      var stageCell = document.createElement("div");
+      stageCell.setAttribute("data-label", "Stage");
+      var stageBadge = document.createElement("span");
+      stageBadge.className = "alert-stage-badge" + (item.stage === "output" ? " is-output" : "");
+      stageBadge.textContent = item.stage === "output" ? "Output" : "Input";
+      stageCell.appendChild(stageBadge);
+      row.appendChild(stageCell);
+
+      var stateCell = document.createElement("div");
+      stateCell.setAttribute("data-label", "State");
+      var stateRow = document.createElement("div");
+      stateRow.className = "alert-state-row";
+      appendAlertChip(stateRow, item.read === true ? "Read" : "Unread",
+        item.read === true ? "is-read" : "is-unread");
+      appendAlertChip(stateRow,
+        item.acknowledged === true ? "Acknowledged" : "Not acknowledged",
+        item.acknowledged === true ? "is-acknowledged" : "");
+      stateCell.appendChild(stateRow);
+      if (item.acknowledged === true) {
+        var acknowledgedActor = alertAcknowledgedActor(item);
+        var acknowledgedTime = typeof item.acknowledged_at === "number" &&
+          item.acknowledged_at > 0 ? formatDate(item.acknowledged_at) : "";
+        if (acknowledgedActor || acknowledgedTime) {
+          var acknowledgedLine = document.createElement("span");
+          acknowledgedLine.className = "cell-muted cell-truncate";
+          acknowledgedLine.textContent = "Acknowledged" +
+            (acknowledgedActor ? " by " + acknowledgedActor : "") +
+            (acknowledgedTime ? " at " + acknowledgedTime : "");
+          acknowledgedLine.title = acknowledgedLine.textContent;
+          stateCell.appendChild(acknowledgedLine);
+        }
+      }
+      row.appendChild(stateCell);
+
       var profileCell = alertProfileCell(item);
-      profileCell.appendChild(tableCell(
-        "Reference " + (typeof item.request_id === "string" && item.request_id
-          ? item.request_id : "Unavailable"),
-        "cell-muted"
-      ));
       row.appendChild(profileCell);
+
       var actions = document.createElement("div");
       actions.className = "cell-actions";
-      var readButton = document.createElement("button");
-      readButton.type = "button";
-      readButton.className = "ghost";
-      readButton.textContent = "Mark read";
-      readButton.disabled = item.read === true;
-      var ackButton = document.createElement("button");
-      ackButton.type = "button";
-      ackButton.className = "ghost";
-      ackButton.textContent = "Acknowledge";
-      ackButton.disabled = item.acknowledged === true;
-      var viewButton = document.createElement("button");
-      viewButton.type = "button";
-      viewButton.className = "ghost";
-      viewButton.textContent = "View conversation";
-      viewButton.disabled = typeof item.conversation_id !== "string" || !item.conversation_id;
-      var buttons = [readButton, ackButton, viewButton];
-      readButton.addEventListener("click", function (alertItem, controls) {
-        return function () { runAlertAction(alertItem, "read", controls); };
-      }(item, buttons));
-      ackButton.addEventListener("click", function (alertItem, controls) {
-        return function () { runAlertAction(alertItem, "ack", controls); };
-      }(item, buttons));
-      viewButton.addEventListener("click", function (alertItem) {
-        return function () { viewAlertConversation(alertItem); };
-      }(item));
-      actions.appendChild(readButton);
-      actions.appendChild(ackButton);
-      actions.appendChild(viewButton);
+      actions.setAttribute("data-label", "Actions");
+      var buttons = [];
+      if (item.read !== true) {
+        var readButton = document.createElement("button");
+        readButton.type = "button";
+        readButton.className = "ghost";
+        readButton.textContent = "Mark read";
+        readButton.addEventListener("click", function (alertItem, controls) {
+          return function () { runAlertAction(alertItem, "read", controls); };
+        }(item, buttons));
+        actions.appendChild(readButton);
+        buttons.push(readButton);
+      }
+      if (item.acknowledged !== true) {
+        var ackButton = document.createElement("button");
+        ackButton.type = "button";
+        ackButton.className = "ghost";
+        ackButton.textContent = "Acknowledge";
+        ackButton.addEventListener("click", function (alertItem, controls) {
+          return function () { runAlertAction(alertItem, "ack", controls); };
+        }(item, buttons));
+        actions.appendChild(ackButton);
+        buttons.push(ackButton);
+      }
+      if (typeof item.conversation_id === "string" && item.conversation_id) {
+        var viewButton = document.createElement("button");
+        viewButton.type = "button";
+        viewButton.className = "ghost";
+        viewButton.textContent = "View conversation";
+        viewButton.addEventListener("click", function (alertItem) {
+          return function () { viewAlertConversation(alertItem); };
+        }(item));
+        actions.appendChild(viewButton);
+        buttons.push(viewButton);
+      }
       row.appendChild(actions);
       alertList.appendChild(row);
     }
@@ -4611,6 +5484,9 @@ _WORKSPACE_JS = """
     alertSummarySeq += 1;
     alertSummaryEpoch += 1;
     alertActionBusy = "";
+    alertMarkAllBusy = false;
+    alertUnreadCount = null;
+    syncAlertMarkAll();
     userSearchText = "";
     departmentSearchText = "";
     accessSearchText = "";
@@ -4663,6 +5539,7 @@ _WORKSPACE_JS = """
     alertMore.hidden = true;
     alertMore.disabled = false;
     resetAlertFilterOptions();
+    alertSummary.className = "alert-summary";
     alertSummary.textContent = "Alert summary loading…";
     departmentMore.hidden = true;
     userMore.hidden = true;
@@ -4837,6 +5714,7 @@ _WORKSPACE_JS = """
     queueAdminList(function () { return loadAccessLog(false); });
   });
   alertMore.addEventListener("click", function () { loadAlerts(false); });
+  alertMarkAll.addEventListener("click", markAllAlertsRead);
   alertRefresh.addEventListener("click", function () { loadAlerts(true); });
   alertStage.addEventListener("change", function () { loadAlerts(true); });
   alertDepartment.addEventListener("change", function () { loadAlerts(true); });
@@ -5264,6 +6142,7 @@ WORKSPACE_HTML = """<!doctype html>
 <button id="new-user-toggle" type="button">New user</button>
 </div>
 <p class="admin-note">Loaded accounts only. Use Load more to extend the list.</p>
+<p class="admin-note">Disable keeps saved conversations but revokes existing sign-ins. Enable restores sign-in with the same password, role and conversations; previously revoked sessions stay revoked. Delete permanently erases the account's saved conversations, messages and owned alert metadata, while access and policy audit events are retained. Deletion is refused for your own account, the last active administrator, an account with an in-progress turn, or an account whose retained policy, grant or user-scoped assignment history would otherwise be cascaded.</p>
 <div class="admin-toolbar">
 <label class="admin-search" for="user-search">Search users<input id="user-search" type="search" autocomplete="off" spellcheck="false"></label>
 </div>
@@ -5289,7 +6168,7 @@ WORKSPACE_HTML = """<!doctype html>
 </div>
 </form>
 <p id="user-state" class="admin-note" role="status" aria-live="polite"></p>
-<div id="user-list" class="admin-table" aria-label="User accounts"></div>
+<div id="user-list" class="admin-table admin-table-list" aria-label="User accounts"></div>
 <button id="user-more" class="admin-more" type="button" hidden>Load more users</button>
 </section>
 
@@ -5397,7 +6276,7 @@ WORKSPACE_HTML = """<!doctype html>
 <button id="effective-preview" type="button">Preview</button>
 </div>
 <p id="effective-state" class="admin-note" role="status" aria-live="polite"></p>
-<div id="effective-policy" class="effective-summary" aria-label="Effective policy preview"></div>
+<div id="effective-policy" class="effective-summary effective-preview" aria-label="Effective policy preview"></div>
 </section>
 
 <section id="admin-alerts-panel" class="admin-panel-section" role="tabpanel" aria-labelledby="admin-tab-alerts" hidden>
@@ -5425,9 +6304,13 @@ WORKSPACE_HTML = """<!doctype html>
 <option value="false">Not acknowledged</option>
 </select></label>
 </div>
-<p id="alert-summary" class="admin-note" role="status" aria-live="polite">Alert summary loading…</p>
+<div class="alert-summary-row">
+<div id="alert-summary" class="alert-summary" role="status" aria-live="polite">Alert summary loading…</div>
+<button id="alert-mark-all" class="ghost alert-summary-action" type="button" aria-label="Mark all alerts read" hidden>Mark all read</button>
+</div>
+<p class="admin-search-note">Summary totals cover all alerts. The list below shows only alerts that match the selected filters and have been loaded.</p>
 <p id="alert-state" class="admin-note" role="status" aria-live="polite"></p>
-<div id="alert-list" class="admin-table" aria-label="Block alerts"></div>
+<div id="alert-list" class="admin-table admin-table-list" aria-label="Block alerts"></div>
 <button id="alert-more" class="admin-more" type="button" hidden>Load more alerts</button>
 <div id="alert-detail" class="effective-summary" aria-label="Alert conversation detail" hidden></div>
 </section>
@@ -5442,7 +6325,7 @@ WORKSPACE_HTML = """<!doctype html>
 <label class="admin-search" for="access-search">Search access events<input id="access-search" type="search" autocomplete="off" spellcheck="false"></label>
 </div>
 <p class="admin-search-note">Search applies only to access rows loaded so far; it is not a global audit search.</p>
-<div id="access-list" class="admin-table" aria-label="Access log metadata"></div>
+<div id="access-list" class="admin-table admin-table-list" aria-label="Access log metadata"></div>
 <button id="access-more" class="admin-more" type="button" hidden>Load more access events</button>
 <p id="access-state" class="admin-note" role="status" aria-live="polite"></p>
 <details id="grants-details" class="admin-details">

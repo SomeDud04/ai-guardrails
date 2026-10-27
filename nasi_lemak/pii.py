@@ -27,7 +27,7 @@ MASK_TOKENS = {
 # Narrow reviewed repair: a period may terminate a sentence, but it may not
 # continue a domain/hyphenated suffix or start a double-dot suffix.
 _EMAIL = re.compile(r"(?<![\w.+-])[A-Z0-9._%+-]+@[A-Z0-9.-]+\.[A-Z]{2,}(?![\w-]|\.[\w.-])", re.I)
-_PHONE = re.compile(r"(?<!\w)(?:\+?60|0)1[0-9](?:[ -]?\d){7,8}(?!\w)")
+_PHONE = re.compile(r"(?<!\w)(?:\+?60[ -]?|0)1[0-9](?:[ -]?\d){7,8}(?!\w)")
 _MYKAD = re.compile(r"(?<!\d)\d{6}-?\d{2}-?\d{4}(?!\d)")
 
 _RECOGNIZERS = (

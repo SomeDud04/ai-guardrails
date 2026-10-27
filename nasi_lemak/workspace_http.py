@@ -339,6 +339,8 @@ def _required_store_methods() -> tuple[str, ...]:
         "list_users",
         "create_user",
         "disable_user",
+        "enable_user",
+        "delete_user",
         "set_user_role",
         "list_grants",
         "grant_review",
@@ -365,6 +367,7 @@ def _required_store_methods() -> tuple[str, ...]:
         "get_block_alert",
         "alert_summary",
         "mark_block_alert_read",
+        "mark_all_block_alerts_read",
         "acknowledge_block_alert",
     )
 
@@ -1088,6 +1091,57 @@ def register_workspace_routes(app: FastAPI, runtime: WorkspaceRuntime) -> None:
         except Exception as exc:
             return admin_body_error(request, exc)
         return _ok({"status": "disabled"})
+
+    @app.post("/workspace/api/admin/users/{user_id}/enable")
+    async def admin_enable_user(request: Request, user_id: str):
+        guard = _request_guard(request, runtime)
+        if guard is not None:
+            return guard
+        actor, source, error = await admin_principal(request)
+        if error is not None:
+            return error
+        csrf = _cookie_mutation_guard(request, source)
+        if csrf is not None:
+            return csrf
+        try:
+            body = await _read_json(request, app)
+            if body:
+                raise ValueError("body must be empty")
+            result = await _db_call(
+                app, runtime.store.enable_user, actor["id"], user_id
+            )
+        except _BodyProblem as exc:
+            return _ws_error(request, "INVALID_REQUEST", exc.status)
+        except Exception as exc:
+            return admin_body_error(request, exc)
+        return _ok(result)
+
+    @app.post("/workspace/api/admin/users/{user_id}/delete")
+    async def admin_delete_user(request: Request, user_id: str):
+        guard = _request_guard(request, runtime)
+        if guard is not None:
+            return guard
+        actor, source, error = await admin_principal(request)
+        if error is not None:
+            return error
+        csrf = _cookie_mutation_guard(request, source)
+        if csrf is not None:
+            return csrf
+        try:
+            body = await _read_json(request, app)
+            _body_fields(body, {"confirm_username"}, {"confirm_username"})
+            result = await _db_call(
+                app,
+                runtime.store.delete_user,
+                actor["id"],
+                user_id,
+                body["confirm_username"],
+            )
+        except _BodyProblem as exc:
+            return _ws_error(request, "INVALID_REQUEST", exc.status)
+        except Exception as exc:
+            return admin_body_error(request, exc)
+        return _ok(result)
 
     @app.post("/workspace/api/admin/users/{user_id}/role")
     async def admin_set_user_role(request: Request, user_id: str):

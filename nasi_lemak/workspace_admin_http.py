@@ -486,6 +486,27 @@ def register_admin_policy_routes(app: FastAPI, runtime: Any) -> None:
             return _store_error(request, exc)
         return _ok(result)
 
+    @app.post("/workspace/api/admin/alerts/read-all")
+    async def admin_alerts_read_all(request: Request):
+        actor, source, error = await admin_context(request)
+        if error is not None:
+            return error
+        csrf = secure_mutation(request, source)
+        if csrf is not None:
+            return csrf
+        try:
+            body = await _read_json(request, app)
+            if body:
+                raise ValueError("body must be empty")
+            result = await _db_call(
+                app, runtime.store.mark_all_block_alerts_read, actor["id"]
+            )
+        except _BodyProblem as exc:
+            return _ws_error(request, "INVALID_REQUEST", exc.status)
+        except Exception as exc:
+            return _store_error(request, exc)
+        return _ok(result)
+
     @app.post("/workspace/api/admin/alerts/{alert_id}/read")
     async def admin_alert_read(request: Request, alert_id: str):
         actor, source, error = await admin_context(request)

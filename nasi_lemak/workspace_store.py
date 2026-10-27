@@ -694,6 +694,20 @@ class WorkspaceStore(PolicyAdminMixin, AlertAdminMixin):
         if db.dialect == "postgres":
             db.query("SELECT pg_advisory_xact_lock(?)", (_ADMIN_ROLE_LOCK,))
 
+    @staticmethod
+    def _lock_target_user(db: _Db, user_id: str) -> None:
+        """Serialise account deletion with session/turn creation for one user.
+
+        PostgreSQL foreign-key checks take a key-share lock on the referenced
+        user row.  Locking the target for update closes the window between the
+        in-flight-turn check and the final delete.  SQLite already holds the
+        database write lock for the whole transaction.
+        """
+        if db.dialect == "postgres":
+            db.query(
+                "SELECT id FROM ws_users WHERE id = ? FOR UPDATE", (user_id,)
+            )
+
     def _require_admin(self, db: _Db, actor_id: str) -> dict[str, Any]:
         row = db.query_one(
             "SELECT id, role, disabled FROM ws_users WHERE id = ?", (actor_id,)
@@ -1003,6 +1017,178 @@ class WorkspaceStore(PolicyAdminMixin, AlertAdminMixin):
                 department_id=row["department_id"],
                 now=now,
             )
+
+    @_guard
+    def enable_user(self, actor_id: str, user_id: str) -> dict[str, Any]:
+        """Restore sign-in for a disabled account without changing anything else.
+
+        The stored password hash, role, department, saved conversations and
+        review grants are left exactly as they were.  Previously issued
+        sessions stay revoked; the user signs in again with the same password.
+        """
+        if not isinstance(user_id, str) or not 1 <= len(user_id) <= 64:
+            raise NotFound("user not found")
+        now = self._now()
+        with self._backend.transaction() as db:
+            self._lock_admin_roles(db)
+            self._require_admin(db, actor_id)
+            row = db.query_one(
+                "SELECT id, username, full_name, department_id, role, disabled, "
+                "created_at FROM ws_users WHERE id = ?",
+                (user_id,),
+            )
+            if not row:
+                raise NotFound("user not found")
+            if int(row["disabled"]) == 0:
+                raise Conflict("user is already active")
+            db.execute("UPDATE ws_users SET disabled = 0 WHERE id = ?", (user_id,))
+            updated = db.query_one(
+                "SELECT id, username, full_name, department_id, role, disabled, "
+                "created_at FROM ws_users WHERE id = ?",
+                (user_id,),
+            )
+            self._log_access(
+                db,
+                actor_id,
+                "admin.enable_user",
+                conversation_id=None,
+                department_id=updated["department_id"],
+                now=now,
+            )
+            return self._public_user(updated)
+
+    @_guard
+    def delete_user(
+        self, actor_id: str, user_id: str, confirm_username: str
+    ) -> dict[str, Any]:
+        """Delete one ordinary account and erase its conversation content.
+
+        Documented deletion rule (no silent cascade):
+
+        * the acting account itself and the last active administrator are
+          rejected, mirroring the existing self-demotion protection;
+        * the caller must repeat the target's exact username (``confirm_username``)
+          in addition to the UI's typed confirmation;
+        * an account that authored review grants or policy profiles/revisions/
+          assignments is rejected: those audit rows are retained on purpose and
+          the foreign keys are ``ON DELETE RESTRICT``;
+        * an account that is the target of a user-scoped policy assignment is
+          rejected instead of letting the foreign key silently cascade the
+          assignment;
+        * an account with an in-flight conversation lease is rejected rather
+          than orphaning a running turn;
+        * sessions are revoked, then the user's messages and conversations are
+          deleted explicitly (counts are returned and audited), their own review
+          grants and per-alert read state are removed, and their block-alert
+          metadata rows are removed because those rows are owned by the account.
+          Immutable ``ws_access_log`` and ``ws_policy_audit`` rows are retained
+          with the stable actor id, so the administrative action remains
+          auditable without transcript content.
+        """
+        if not isinstance(user_id, str) or not 1 <= len(user_id) <= 64:
+            raise NotFound("user not found")
+        if not isinstance(confirm_username, str):
+            raise ValueError("confirmation does not match")
+        now = self._now()
+        with self._backend.transaction() as db:
+            self._lock_admin_roles(db)
+            self._require_admin(db, actor_id)
+            self._lock_target_user(db, user_id)
+            row = db.query_one(
+                "SELECT id, username, department_id, role, disabled FROM ws_users "
+                "WHERE id = ?",
+                (user_id,),
+            )
+            if not row:
+                raise NotFound("user not found")
+            if row["id"] == actor_id:
+                raise Conflict("you cannot delete your own account")
+            if _normalise_username(confirm_username) != row["username"]:
+                raise ValueError("confirmation does not match")
+            if row["role"] == "admin" and int(row["disabled"]) == 0:
+                active = db.query_one(
+                    "SELECT COUNT(*) AS total FROM ws_users "
+                    "WHERE role = 'admin' AND disabled = 0"
+                )
+                if int(active["total"]) <= 1:
+                    raise Conflict("last active admin cannot be deleted")
+            authored = (
+                ("ws_review_grants", "created_by"),
+                ("ws_policy_profiles", "created_by"),
+                ("ws_policy_profile_revisions", "created_by"),
+                ("ws_policy_assignments", "created_by"),
+                ("ws_policy_assignments", "updated_by"),
+            )
+            for table, column in authored:
+                reference = db.query_one(
+                    f"SELECT id FROM {table} WHERE {column} = ? LIMIT 1", (user_id,)
+                )
+                if reference:
+                    raise Conflict(
+                        "account authored retained policy or grant history"
+                    )
+            if db.query_one(
+                "SELECT id FROM ws_policy_assignments WHERE user_id = ? LIMIT 1",
+                (user_id,),
+            ):
+                raise Conflict(
+                    "account is the target of a user-scoped policy assignment"
+                )
+            busy = db.query_one(
+                "SELECT id FROM ws_conversations WHERE owner_id = ? AND ("
+                "status = 'appending' OR (status = 'pending' "
+                "AND lease_expires_at IS NOT NULL AND lease_expires_at > ?)) LIMIT 1",
+                (user_id, now),
+            )
+            if busy:
+                raise Conflict("account has an active conversation turn")
+
+            message_row = db.query_one(
+                "SELECT COUNT(*) AS total FROM ws_messages WHERE conversation_id IN "
+                "(SELECT id FROM ws_conversations WHERE owner_id = ?)",
+                (user_id,),
+            )
+            conversation_row = db.query_one(
+                "SELECT COUNT(*) AS total FROM ws_conversations WHERE owner_id = ?",
+                (user_id,),
+            )
+            deleted_messages = int(message_row["total"]) if message_row else 0
+            deleted_conversations = (
+                int(conversation_row["total"]) if conversation_row else 0
+            )
+            db.execute(
+                "DELETE FROM ws_messages WHERE conversation_id IN "
+                "(SELECT id FROM ws_conversations WHERE owner_id = ?)",
+                (user_id,),
+            )
+            db.execute(
+                "DELETE FROM ws_conversations WHERE owner_id = ?", (user_id,)
+            )
+            # Remove this account's own alert metadata and its personal
+            # read/acknowledgement rows; alerts about other users stay.
+            db.execute("DELETE FROM ws_block_alerts WHERE user_id = ?", (user_id,))
+            db.execute("DELETE FROM ws_alert_state WHERE admin_id = ?", (user_id,))
+            db.execute("DELETE FROM ws_review_grants WHERE user_id = ?", (user_id,))
+            db.execute(
+                "UPDATE ws_sessions SET revoked = 1 WHERE user_id = ? AND revoked = 0",
+                (user_id,),
+            )
+            applied = db.execute("DELETE FROM ws_users WHERE id = ?", (user_id,))
+            if applied != 1:
+                raise NotFound("user not found")
+            self._log_access(
+                db,
+                actor_id,
+                f"admin.delete_user:{user_id}",
+                conversation_id=None,
+                department_id=row["department_id"],
+                now=now,
+            )
+            return {
+                "status": "deleted",
+                "deleted_conversations": deleted_conversations,
+                "deleted_messages": deleted_messages,
+            }
 
     @_guard
     def set_user_role(
@@ -2009,15 +2195,33 @@ class WorkspaceStore(PolicyAdminMixin, AlertAdminMixin):
         with self._backend.transaction() as db:
             self._require_admin(db, actor_id)
             params: list[Any] = []
+            # The audit row itself is immutable and contains machine IDs only.
+            # Display metadata is joined read-only: the actor and department
+            # names, and the conversation's own timestamps.  The transcript
+            # table is deliberately never joined, so no prompt or reply text can
+            # be reconstructed from this endpoint.  A deleted user or
+            # conversation keeps its stable ID and is labelled by the caller.
             sql = (
-                "SELECT id, actor_id, action, conversation_id, department_id, "
-                "created_at FROM ws_access_log WHERE 1 = 1"
+                "SELECT a.id, a.actor_id, a.action, a.conversation_id, "
+                "a.department_id, a.created_at, "
+                "u.full_name AS actor_full_name, u.username AS actor_username, "
+                "u.role AS actor_role, d.name AS department_name, "
+                "c.created_at AS conversation_created_at, "
+                "c.updated_at AS conversation_updated_at "
+                "FROM ws_access_log AS a "
+                "LEFT JOIN ws_users AS u ON u.id = a.actor_id "
+                "LEFT JOIN ws_departments AS d ON d.id = a.department_id "
+                "LEFT JOIN ws_conversations AS c ON c.id = a.conversation_id "
+                "WHERE 1 = 1"
             )
             if after is not None:
                 created_at, last_id = _decode_cursor(after)
-                sql += " AND (created_at < ? OR (created_at = ? AND id < ?))"
+                sql += (
+                    " AND (a.created_at < ? OR "
+                    "(a.created_at = ? AND a.id < ?))"
+                )
                 params.extend((created_at, created_at, last_id))
-            sql += " ORDER BY created_at DESC, id DESC LIMIT ?"
+            sql += " ORDER BY a.created_at DESC, a.id DESC LIMIT ?"
             params.append(limit + 1)
             rows = db.query(sql, tuple(params))
             items = [
@@ -2028,6 +2232,28 @@ class WorkspaceStore(PolicyAdminMixin, AlertAdminMixin):
                     "conversation_id": row["conversation_id"],
                     "department_id": row["department_id"],
                     "created_at": float(row["created_at"]),
+                    # Safe display metadata, additive to the machine fields.
+                    # ``actor_deleted``/``conversation_deleted`` distinguish an
+                    # orphaned audit reference from a merely missing value.
+                    "actor_full_name": row["actor_full_name"],
+                    "actor_username": row["actor_username"],
+                    "actor_role": row["actor_role"],
+                    "actor_deleted": row["actor_username"] is None,
+                    "department_name": row["department_name"],
+                    "conversation_created_at": (
+                        float(row["conversation_created_at"])
+                        if row["conversation_created_at"] is not None
+                        else None
+                    ),
+                    "conversation_updated_at": (
+                        float(row["conversation_updated_at"])
+                        if row["conversation_updated_at"] is not None
+                        else None
+                    ),
+                    "conversation_deleted": (
+                        row["conversation_id"] is not None
+                        and row["conversation_created_at"] is None
+                    ),
                 }
                 for row in rows[:limit]
             ]

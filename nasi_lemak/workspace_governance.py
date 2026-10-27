@@ -1449,6 +1449,44 @@ class AlertAdminMixin:
             return self._state_metadata(alert_id, row)
 
     @_policy_guard
+    def mark_all_block_alerts_read(self, actor_id: str) -> dict[str, Any]:
+        """Mark every alert read for one administrator in one statement.
+
+        Only the authenticated administrator's own ``ws_alert_state`` rows are
+        written.  Existing rows are left untouched, so an earlier read timestamp
+        and any acknowledgement are preserved and a repeated call is a no-op.
+        The response is a fixed-size status/count object; no alert content is
+        returned.
+        """
+
+        now = self._now()
+        with self._backend.transaction() as db:
+            self._require_admin(db, actor_id)
+            marked = db.execute(
+                """
+                INSERT INTO ws_alert_state(
+                    alert_id, admin_id, read_at, acknowledged_at
+                )
+                SELECT a.id, ?, ?, NULL
+                FROM ws_block_alerts AS a
+                -- A set-based ON CONFLICT needs an explicit WHERE: SQLite parses
+                -- a bare ``ON`` after a FROM-only SELECT as a join clause.
+                WHERE TRUE
+                ON CONFLICT (alert_id, admin_id) DO NOTHING
+                """,
+                (actor_id, now),
+            )
+            row = db.query_one(
+                "SELECT COUNT(*) AS total FROM ws_block_alerts"
+            )
+            total = int(row["total"]) if row else 0
+            return {
+                "status": "ok",
+                "marked_read": int(marked),
+                "total": total,
+            }
+
+    @_policy_guard
     def acknowledge_block_alert(self, actor_id: str, alert_id: str) -> dict[str, Any]:
         alert_id = _require_safe_id(alert_id, "alert")
         now = self._now()
@@ -1482,7 +1520,15 @@ class AlertAdminMixin:
             return self._state_metadata(alert_id, row)
 
     @_policy_guard
-    def alert_summary(self, actor_id: str) -> dict[str, int]:
+    def alert_summary(self, actor_id: str) -> dict[str, Any]:
+        empty = {
+            "total": 0,
+            "unread": 0,
+            "acknowledged": 0,
+            "input": 0,
+            "output": 0,
+            "oldest_unread_at": None,
+        }
         with self._backend.transaction() as db:
             self._require_admin(db, actor_id)
             row = db.query_one(
@@ -1491,7 +1537,13 @@ class AlertAdminMixin:
                        COALESCE(SUM(CASE WHEN s.read_at IS NULL THEN 1 ELSE 0 END), 0)
                            AS unread,
                        COALESCE(SUM(CASE WHEN s.acknowledged_at IS NOT NULL
-                                         THEN 1 ELSE 0 END), 0) AS acknowledged
+                                         THEN 1 ELSE 0 END), 0) AS acknowledged,
+                       COALESCE(SUM(CASE WHEN a.stage = 'input'
+                                         THEN 1 ELSE 0 END), 0) AS "input",
+                       COALESCE(SUM(CASE WHEN a.stage = 'output'
+                                         THEN 1 ELSE 0 END), 0) AS "output",
+                       MIN(CASE WHEN s.read_at IS NULL
+                                THEN a.created_at END) AS oldest_unread_at
                 FROM ws_block_alerts AS a
                 LEFT JOIN ws_alert_state AS s ON s.alert_id = a.id
                  AND s.admin_id = ?
@@ -1499,9 +1551,15 @@ class AlertAdminMixin:
                 (actor_id,),
             )
             if not row:
-                return {"total": 0, "unread": 0, "acknowledged": 0}
+                return empty
+            oldest_unread = row["oldest_unread_at"]
             return {
                 "total": int(row["total"]),
                 "unread": int(row["unread"]),
                 "acknowledged": int(row["acknowledged"]),
+                "input": int(row["input"]),
+                "output": int(row["output"]),
+                "oldest_unread_at": (
+                    float(oldest_unread) if oldest_unread is not None else None
+                ),
             }

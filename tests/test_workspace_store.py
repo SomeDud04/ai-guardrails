@@ -454,6 +454,75 @@ class WorkspaceStoreTest(unittest.TestCase):
         self.assertIn("reviewer.list_conversations", actions)
         self.assertIn("reviewer.read_conversation", actions)
 
+    def test_access_log_display_metadata_is_safe_and_deleted_rows_are_labelled(
+        self,
+    ) -> None:
+        reviewer = self._user("rita", "Rita Reviewer", self.hr["id"])
+        self.store.grant_review(
+            self.admin["id"], reviewer["id"], "department", self.accounting["id"]
+        )
+        conv = self._conversation()
+        self.store.read_conversation(reviewer["id"], conv["id"])
+        events = self.store.list_access_log(self.admin["id"], limit=100)["items"]
+        review_event = next(
+            row for row in events if row["action"] == "reviewer.read_conversation"
+        )
+        self.assertEqual(review_event["actor_id"], reviewer["id"])
+        self.assertEqual(review_event["actor_full_name"], "Rita Reviewer")
+        self.assertEqual(review_event["actor_username"], "rita")
+        self.assertEqual(review_event["actor_role"], "employee")
+        self.assertFalse(review_event["actor_deleted"])
+        self.assertEqual(review_event["department_id"], self.accounting["id"])
+        self.assertEqual(review_event["department_name"], "Accounting")
+        self.assertEqual(review_event["conversation_id"], conv["id"])
+        self.assertEqual(review_event["conversation_created_at"], conv["created_at"])
+        self.assertEqual(review_event["conversation_updated_at"], conv["updated_at"])
+        self.assertFalse(review_event["conversation_deleted"])
+        self.assertNotIn(CANARY, repr(review_event))
+        self.assertNotIn(REPLY, repr(review_event))
+
+        # A non-administrator cannot read the audit, even with enriched fields.
+        with self.assertRaises(AccessDenied):
+            self.store.list_access_log(self.bob["id"], limit=10)
+
+        self.store.delete_conversation(self.alice["id"], conv["id"])
+        deleted_conversation = next(
+            row
+            for row in self.store.list_access_log(self.admin["id"], limit=100)["items"]
+            if row["action"] == "owner.delete_conversation"
+        )
+        self.assertEqual(deleted_conversation["conversation_id"], conv["id"])
+        self.assertTrue(deleted_conversation["conversation_deleted"])
+        self.assertIsNone(deleted_conversation["conversation_created_at"])
+        self.assertIsNone(deleted_conversation["conversation_updated_at"])
+
+        self.store.delete_user(self.admin["id"], self.alice["id"], "alice")
+        deleted_actor = next(
+            row
+            for row in self.store.list_access_log(self.admin["id"], limit=100)["items"]
+            if row["id"] == deleted_conversation["id"]
+        )
+        self.assertEqual(deleted_actor["actor_id"], self.alice["id"])
+        self.assertIsNone(deleted_actor["actor_full_name"])
+        self.assertIsNone(deleted_actor["actor_username"])
+        self.assertIsNone(deleted_actor["actor_role"])
+        self.assertTrue(deleted_actor["actor_deleted"])
+        self.assertTrue(deleted_actor["conversation_deleted"])
+
+        # Joins must not change the keyset pages or the stored machine fields.
+        full = self.store.list_access_log(self.admin["id"], limit=100)
+        seen: list[str] = []
+        after = None
+        for _ in range(20):
+            page = self.store.list_access_log(self.admin["id"], limit=2, after=after)
+            seen.extend(item["id"] for item in page["items"])
+            after = page["next"]
+            if after is None:
+                break
+        self.assertEqual(seen, [item["id"] for item in full["items"]])
+        self.assertNotIn(CANARY, repr(full))
+        self.assertNotIn(REPLY, repr(full))
+
     def test_reviewer_read_fails_closed_when_audit_write_fails(self) -> None:
         reviewer = self._user("rita", "Rita Reviewer", self.hr["id"])
         self.store.grant_review(self.admin["id"], reviewer["id"], "global")

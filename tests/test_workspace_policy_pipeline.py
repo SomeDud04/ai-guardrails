@@ -11,7 +11,7 @@ from typing import Any
 
 from nasi_lemak.controls import block_detail
 from nasi_lemak.workspace_store import WorkspaceStorageError
-from tests.test_workspace_http import WorkspaceHTTPBase, _ProxyStore
+from tests.test_workspace_http import PASSWORD, WorkspaceHTTPBase, _ProxyStore
 
 
 class PolicyPipelineTests(WorkspaceHTTPBase):
@@ -43,6 +43,161 @@ class PolicyPipelineTests(WorkspaceHTTPBase):
         )
         self.assertEqual(response.status_code, 200, response.text)
         return response.json()["items"]
+
+    def _blocked_alert(self, owner: dict, request_id: str) -> str:
+        control = self.store.resolve_gateway_control(owner["id"])
+        conversation = self.store.create_conversation(owner["id"])
+        lease = self.store.reserve_turn(owner["id"], conversation["id"])
+        result = self.store.record_failed_turn(
+            owner["id"],
+            conversation["id"],
+            lease["token"],
+            user_prompt="synthetic blocked prompt",
+            outcome="blocked",
+            request_id=request_id,
+            error_code="POLICY_BLOCK",
+            alert={
+                "stage": "input",
+                "reason_code": "INPUT_GUARD_BLOCK",
+                "revision": control.revision,
+                "digest": control.digest,
+                "sources": control.metadata()["sources"],
+            },
+        )
+        return result["alert_id"]
+
+    def _cookie_login(self, client: Any = None, username: str = "root.admin") -> None:
+        response = (client or self.client).post(
+            "/workspace/api/login",
+            json={"username": username, "password": PASSWORD, "cookie": True},
+            headers={"Origin": "http://testserver"},
+        )
+        self.assertEqual(response.status_code, 200, response.text)
+
+    def test_read_all_marks_twelve_alerts_for_one_admin_only(self) -> None:
+        for index in range(12):
+            self._blocked_alert(self.alice, f"req_read_all_{index}")
+        second_admin = self.store.create_user(
+            self.admin["id"],
+            "second.admin",
+            PASSWORD,
+            "Second Admin",
+            self.accounting["id"],
+            "admin",
+        )
+        admin_token = self.login("root.admin")
+        second_token = self.login("second.admin")
+
+        first = self.client.post(
+            "/workspace/api/admin/alerts/read-all",
+            json={},
+            headers=self.auth(admin_token),
+        )
+        self.assertEqual(first.status_code, 200, first.text)
+        self.assertEqual(
+            first.json(), {"status": "ok", "marked_read": 12, "total": 12}
+        )
+        alerts = self._alerts(admin_token)
+        self.assertEqual(len(alerts), 12)
+        self.assertTrue(all(item["read"] for item in alerts))
+        self.assertEqual(
+            self.client.get(
+                "/workspace/api/admin/alerts/summary",
+                headers=self.auth(admin_token),
+            ).json()["unread"],
+            0,
+        )
+
+        # A second administrator's own read state is untouched.
+        other = self._alerts(second_token)
+        self.assertEqual(len(other), 12)
+        self.assertFalse(any(item["read"] for item in other))
+        self.assertEqual(
+            self.client.get(
+                "/workspace/api/admin/alerts/summary",
+                headers=self.auth(second_token),
+            ).json()["unread"],
+            12,
+        )
+        self.assertEqual(second_admin["role"], "admin")
+
+        # Repeating the bulk mark is a no-op, so the route is idempotent.
+        repeated = self.client.post(
+            "/workspace/api/admin/alerts/read-all",
+            json={},
+            headers=self.auth(admin_token),
+        )
+        self.assertEqual(repeated.status_code, 200, repeated.text)
+        self.assertEqual(repeated.json()["marked_read"], 0)
+
+        # The employee role is denied before the body is read or state written.
+        alice_token = self.login()
+        denied = self.client.post(
+            "/workspace/api/admin/alerts/read-all",
+            json={},
+            headers=self.auth(alice_token),
+        )
+        self.assert_error(denied, 403, "FORBIDDEN")
+        self.assertTrue(all(item["read"] for item in self._alerts(admin_token)))
+
+    def test_read_all_requires_csrf_and_an_empty_json_body(self) -> None:
+        for index in range(12):
+            self._blocked_alert(self.alice, f"req_read_all_guard_{index}")
+        admin_token = self.login("root.admin")
+        unread = lambda: self.client.get(  # noqa: E731
+            "/workspace/api/admin/alerts/summary", headers=self.auth(admin_token)
+        ).json()["unread"]
+        self.assertEqual(unread(), 12)
+
+        for body in ({"unexpected": True}, {"read": False}):
+            response = self.client.post(
+                "/workspace/api/admin/alerts/read-all",
+                json=body,
+                headers=self.auth(admin_token),
+            )
+            self.assert_error(response, 400, "INVALID_REQUEST")
+        self.assertEqual(unread(), 12)
+
+        duplicate = self.client.post(
+            "/workspace/api/admin/alerts/read-all",
+            content=b'{"unexpected":true,"unexpected":false}',
+            headers={**self.auth(admin_token), "content-type": "application/json"},
+        )
+        self.assert_error(duplicate, 400, "INVALID_REQUEST")
+        missing_json = self.client.post(
+            "/workspace/api/admin/alerts/read-all",
+            content=b"",
+            headers=self.auth(admin_token),
+        )
+        self.assert_error(missing_json, 400, "INVALID_REQUEST")
+        self.assertEqual(unread(), 12)
+
+        # Use a separate client so the cookie credential never mixes with the
+        # bearer token used by the read-state assertions above.
+        cookie_client = self.make_client(self.app)
+        self._cookie_login(cookie_client)
+        cookie_headers = {"X-Workspace-User": self.admin["id"]}
+        for origin in (None, "https://evil.example", "null", "http://testserver/"):
+            headers = dict(cookie_headers)
+            if origin is not None:
+                headers["Origin"] = origin
+            denied = cookie_client.post(
+                "/workspace/api/admin/alerts/read-all", json={}, headers=headers
+            )
+            self.assert_error(denied, 403, "FORBIDDEN")
+        self.assertEqual(unread(), 12)
+
+        marked = cookie_client.post(
+            "/workspace/api/admin/alerts/read-all",
+            json={},
+            headers={
+                **cookie_headers,
+                "Origin": "http://testserver",
+            },
+        )
+        self.assertEqual(marked.status_code, 200, marked.text)
+        self.assertEqual(marked.json()["marked_read"], 12)
+        self.assertEqual(unread(), 0)
 
     def test_assignment_changes_next_turn_masks_and_self_policy(self) -> None:
         alice_token = self.login()

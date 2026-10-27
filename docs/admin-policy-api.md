@@ -265,7 +265,9 @@ control_revision, control_digest, control_sources, created_at, read, read_at,
 acknowledged, acknowledged_at}``. Read/ack state is per administrator.
 
 ```python
-alert_summary(actor_id: str) -> {"total": int, "unread": int, "acknowledged": int}
+alert_summary(actor_id: str)
+    -> {"total": int, "unread": int, "acknowledged": int, "input": int,
+        "output": int, "oldest_unread_at": float | None}
 
 mark_block_alert_read(actor_id: str, alert_id: str)
     -> {"alert_id", "read", "read_at", "acknowledged", "acknowledged_at"}

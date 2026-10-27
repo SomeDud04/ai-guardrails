@@ -14,7 +14,7 @@ class SharedPiiSpanTests(unittest.TestCase):
             "call +60123456789 or 0123456789": "call [MY_PHONE] or [MY_PHONE]",
             "id 900101-12-3456 and 900101123456": "id [MYKAD] and [MYKAD]",
             "reach me: a@test.invalid / +60 12-345 6789 / 900101123456":
-                "reach me: [EMAIL] / +60 12-345 6789 / [MYKAD]",
+                "reach me: [EMAIL] / [MY_PHONE] / [MYKAD]",
             "not phone 0123456 and 012345678901234":
                 "not phone 0123456 and 012345678901234",
             "x@y.invalid, 0 1 2 3 4 5 6 7 8 9":
@@ -138,6 +138,31 @@ class SharedPiiSpanTests(unittest.TestCase):
                 self.assertEqual(
                     [item.entity_type for item in find_redactions(text)],
                     ["MYKAD"],
+                )
+
+    def test_malaysian_country_code_with_space_or_dash_is_masked(self):
+        # 27 Oct 2026 live defect: the country code had to touch the digits, so
+        # the most natural Malaysian mobile format reached the model raw. All
+        # six reported formats (two previously leaking, four passing) must now
+        # mask, for both the production input and output masking paths.
+        cases = {
+            "+60 12-000 0000": "[MY_PHONE]",
+            "+60-12-000 0000": "[MY_PHONE]",
+            "+60120000000": "[MY_PHONE]",
+            "60120000000": "[MY_PHONE]",
+            "012-000 0000": "[MY_PHONE]",
+            "012 000 0000": "[MY_PHONE]",
+            "SMS ke +60 12-000 0000 esok": "SMS ke [MY_PHONE] esok",
+            "SMS ke +60-12-000 0000 esok": "SMS ke [MY_PHONE] esok",
+            "reach me on +60 12 000 0000.": "reach me on [MY_PHONE].",
+        }
+        for text, expected in cases.items():
+            with self.subTest(text=text):
+                self.assertEqual(mask_text(text), expected)
+                self.assertEqual(mask_pii(text), expected)
+                self.assertEqual(
+                    [item.entity_type for item in find_redactions(text)],
+                    ["MY_PHONE"],
                 )
 
     def test_email_phone_mykad_order_is_preserved(self):

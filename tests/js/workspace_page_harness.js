@@ -184,6 +184,16 @@ function createApp(options) {
       created.push(element);
       return element;
     },
+    createTextNode(text) {
+      // The page appends literal separators between spans; model a DOM Text
+      // node so parent textContent concatenation behaves like the browser.
+      return {
+        nodeType: 3,
+        nodeName: "#text",
+        textContent: String(text),
+        children: [],
+      };
+    },
   };
   const windowListeners = Object.create(null);
   const window = {
@@ -502,7 +512,7 @@ async function signIn(app, profile, username) {
     "a confirmed profile must reveal the workspace");
 }
 
-async function settleSummarySurfaces(app) {
+async function settleSummarySurfaces(app, summary) {
   // The page reads its own effective policy and, for an administrator, the
   // alert count only after the initial history and readiness reads settle.
   // Both consume bounded admission slots, so settle them before a scenario
@@ -518,7 +528,7 @@ async function settleSummarySurfaces(app) {
     "/workspace/api/admin/alerts/summary"
   ).pop();
   if (alertSummary) {
-    alertSummary.respond(EMPTY_ALERT_SUMMARY, 200);
+    alertSummary.respond(summary || EMPTY_ALERT_SUMMARY, 200);
     await settle();
   }
 }
@@ -1352,7 +1362,22 @@ async function scenarioAdmin() {
   access.respond(
     {
       items: [
-        { id: "log-1", actor_id: "user-admin", action: "review.read", conversation_id: "conv-1", department_id: "dept-accounting", created_at: 1700000004 },
+        {
+          id: "log-1", actor_id: "user-admin", actor_full_name: "Ada Admin",
+          actor_username: "admin", actor_role: "admin", actor_deleted: false,
+          action: "reviewer.read_conversation", conversation_id: "conv-1",
+          department_id: "dept-accounting", department_name: "Accounting",
+          conversation_created_at: 1700000000, conversation_updated_at: 1700000004,
+          conversation_deleted: false, created_at: 1700000004,
+        },
+        {
+          id: "log-2", actor_id: "user-gone", actor_full_name: null,
+          actor_username: null, actor_role: null, actor_deleted: true,
+          action: "owner.delete_conversation", conversation_id: "conv-gone",
+          department_id: null, department_name: null,
+          conversation_created_at: null, conversation_updated_at: null,
+          conversation_deleted: true, created_at: 1700000002,
+        },
       ],
       next: "access-cursor",
     },
@@ -1366,9 +1391,52 @@ async function scenarioAdmin() {
   assert(app.elementFor("user-list").textContent.indexOf("Ada Admin") >= 0, "user list did not render");
   assert(app.elementFor("grant-list").textContent.indexOf("@alice") >= 0, "grant list did not render");
   const accessText = app.elementFor("access-list").textContent;
-  assert(accessText.indexOf("review.read") >= 0 && accessText.indexOf("conv-1") >= 0,
-    "access log metadata missing");
+  assert(
+    accessText.indexOf("Read a conversation for review") >= 0 &&
+      accessText.indexOf("Ada Admin") >= 0 &&
+      accessText.indexOf("@admin") >= 0 &&
+      accessText.indexOf("Administrator") >= 0 &&
+      accessText.indexOf("Accounting") >= 0 &&
+      accessText.indexOf("Deleted own conversation") >= 0 &&
+      accessText.indexOf("Deleted user") >= 0 &&
+      accessText.indexOf("Deleted conversation") >= 0,
+    "access log must show human actor, action, department and conversation names"
+  );
+  assert(accessText.indexOf("reviewer.read_conversation") < 0 &&
+    accessText.indexOf("owner.delete_conversation") < 0,
+    "machine action names must not be the primary display text");
   assert(accessText.indexOf("prompt") < 0, "access log must not contain message text");
+  const accessRows = collect(app.elementFor("access-list")).filter(
+    (element) => String(element.className).indexOf("admin-table-row") >= 0
+  );
+  assert(accessRows.length === 2, "access log rows missing");
+  const accessRow = accessRows[0];
+  assert(
+    accessRow.children.map((cell) => cell.getAttribute("data-label")).join(",") ===
+      "Time,Actor,Action,Department,Conversation",
+    "access rows must keep labelled cells for the narrow stacked layout"
+  );
+  const accessActionCell = accessRow.children[2];
+  assert(accessActionCell.textContent === "Read a conversation for review",
+    "the action must use its plain-language label");
+  assert(accessActionCell.getAttribute("title") === "reviewer.read_conversation",
+    "the original machine action must stay available as a title");
+  const accessDepartmentCell = accessRows[1].children[3];
+  assert(accessDepartmentCell.textContent.trim() === "—",
+    "an unscoped department must render as an em dash");
+  assert(accessDepartmentCell.getAttribute("title") === "Not department-scoped",
+    "an unscoped department must explain itself in a tooltip");
+  const accessConversationCell = accessRow.children[4];
+  const accessConversationText = collect(accessConversationCell).find(
+    (element) => element.getAttribute("title") === "Conversation ID conv-1"
+  );
+  assert(accessConversationText,
+    "the full conversation identifier must stay available as a title");
+  assert(String(accessConversationText.className).indexOf("cell-truncate") >= 0,
+    "the conversation identifier must use the non-wrapping cell style");
+  assert(collect(accessConversationCell).some(
+    (element) => element.tagName === "BUTTON" && element.textContent === "Copy"
+  ), "the full conversation identifier must be copyable");
   const adminDisableButtons = collect(app.elementFor("user-list")).filter(
     (element) => element.tagName === "BUTTON" && element.textContent.trim() === "Disable"
   );
@@ -1376,6 +1444,13 @@ async function scenarioAdmin() {
 
   let aliceRow = findDataRow(app.elementFor("user-list"), "data-user", "user-alice");
   assert(aliceRow, "the employee row was not rendered");
+  assert(
+    aliceRow.children.map((cell) => cell.getAttribute("data-label")).join(",") ===
+      "Account,Role,Department,Status,Actions",
+    "user rows must keep labelled cells for the narrow stacked layout"
+  );
+  assert(aliceRow.children[4].getAttribute("data-label") === "Actions",
+    "the action group must stay associated with the user row");
   assert(findButton(aliceRow, "Grant admin"), "an employee must be offered Grant admin");
   let selfRow = findDataRow(app.elementFor("user-list"), "data-user", "user-admin");
   assert(findButton(selfRow, "Revoke admin"), "an administrator must be offered Revoke admin");
@@ -1736,6 +1811,194 @@ async function scenarioAdmin() {
   assert(app.elementFor("workspace-view").hidden === true, "logout must hide the workspace");
 }
 
+async function scenarioAdminEnableAndDelete() {
+  const app = createApp({ maxInflight: 2 });
+  await start(app);
+  const adminProfile = {
+    user: { ...ALICE_USER, id: "user-admin", username: "admin", full_name: "Ada Admin", role: "admin" },
+    department: { id: "dept-accounting", name: "Accounting" },
+    review_scope: null,
+    review_department_ids: [],
+    review_grants: [],
+  };
+  const adminRow = {
+    id: "user-admin", username: "admin", full_name: "Ada Admin",
+    department_id: "dept-accounting", role: "admin", disabled: false, created_at: 1700000002,
+  };
+  const disabledAlice = {
+    id: "user-alice", username: "alice", full_name: "Alice Tan",
+    department_id: "dept-accounting", role: "employee", disabled: true, created_at: 1700000001,
+  };
+  const activeAlice = { ...disabledAlice, disabled: false };
+  await signIn(app, adminProfile);
+  app.lastMatching("/workspace/api/conversations?limit=25").respond({ items: [], next: null }, 200);
+  await settle();
+  await settleSummarySurfaces(app);
+
+  app.elementFor("tab-admin").dispatch("click");
+  await settle();
+  app.lastMatching("/workspace/api/admin/departments?limit=25").respond(
+    { items: [{ id: "dept-accounting", name: "Accounting", created_at: 1700000000 }], next: null },
+    200
+  );
+  await settle();
+  app.lastMatching("/workspace/api/admin/users?limit=25").respond(
+    { items: [adminRow, disabledAlice], next: null },
+    200
+  );
+  await settle();
+
+  const selfRow = findDataRow(app.elementFor("user-list"), "data-user", "user-admin");
+  assert(selfRow && !findButton(selfRow, "Delete"),
+    "an administrator must not be offered self-delete");
+  assert(!findButton(selfRow, "Disable"), "an administrator must not be offered self-disable");
+
+  let aliceRow = findDataRow(app.elementFor("user-list"), "data-user", "user-alice");
+  assert(aliceRow, "the disabled account row was not rendered");
+  assert(findButton(aliceRow, "Enable"),
+    "a disabled account must offer Enable instead of only password reset");
+  assert(findButton(aliceRow, "Reset password"),
+    "a disabled account must still offer Reset password");
+  assert(findButton(aliceRow, "Delete"),
+    "an ordinary target account must offer Delete");
+  assert(!findButton(aliceRow, "Disable"), "a disabled account must not offer Disable");
+  assert(!findButton(aliceRow, "Grant admin") && !findButton(aliceRow, "Revoke admin"),
+    "a disabled account must not offer a role change");
+
+  findButton(aliceRow, "Enable").dispatch("click");
+  let enableBox = findByClass(aliceRow, "admin-confirm");
+  assert(enableBox, "Enable must open an inline confirmation");
+  assert(enableBox.getAttribute("role") === "group", "the enable confirmation must be an accessible group");
+  assert(String(enableBox.getAttribute("aria-label")).indexOf("@alice") >= 0,
+    "the enable confirmation must name the target in its accessible label");
+  assert(enableBox.textContent.indexOf("existing sign-ins stay revoked") >= 0,
+    "the enable confirmation must state that previous sessions stay revoked");
+  findButton(enableBox, "Cancel").dispatch("click");
+  assert(app.callsMatching("/workspace/api/admin/users/user-alice/enable").length === 0,
+    "cancelled enable must not send a request");
+
+  findButton(aliceRow, "Enable").dispatch("click");
+  findButton(findByClass(aliceRow, "admin-confirm"), "Confirm enable").dispatch("click");
+  let enableCall = app.lastMatching("/workspace/api/admin/users/user-alice/enable");
+  assert(enableCall && enableCall.options.method === "POST", "confirmed enable was not sent");
+  assert(enableCall.options.body === "{}", "enable must send an empty JSON object");
+  assert(enableCall.options.headers["Content-Type"] === "application/json",
+    "enable must declare a JSON Content-Type");
+  assert(enableCall.options.credentials === "same-origin", "enable must use same-origin cookies");
+  assert(enableCall.options.headers["X-Workspace-User"] === "user-admin",
+    "enable must name the current profile");
+  enableCall.respond({ error: { code: "CONFLICT", message: "user is already active" } }, 409);
+  await settle();
+  assert(app.elementFor("admin-status").textContent.indexOf("already active") >= 0,
+    "a 409 enable refusal must be visible");
+  assert(app.elementFor("admin-status").getAttribute("data-kind") === "error",
+    "a refused enable must be reported as an error");
+  assert(findButton(aliceRow, "Enable"), "a refused enable must leave the account disabled");
+
+  findButton(aliceRow, "Enable").dispatch("click");
+  findButton(findByClass(aliceRow, "admin-confirm"), "Confirm enable").dispatch("click");
+  enableCall = app.lastMatching("/workspace/api/admin/users/user-alice/enable");
+  enableCall.respond(activeAlice, 200);
+  await settle();
+  const enableRefresh = app.lastMatching("/workspace/api/admin/users?limit=25");
+  assert(enableRefresh && !enableRefresh.settled,
+    "a successful enable must refresh the user list");
+  enableRefresh.respond({ items: [adminRow, activeAlice], next: null }, 200);
+  await settle();
+  assert(app.elementFor("admin-status").textContent.indexOf("enabled") >= 0,
+    "a successful enable must be reported");
+  aliceRow = findDataRow(app.elementFor("user-list"), "data-user", "user-alice");
+  assert(aliceRow && findButton(aliceRow, "Disable") && !findButton(aliceRow, "Enable"),
+    "the refreshed row must be active and offer Disable");
+  assert(findButton(aliceRow, "Grant admin"), "the refreshed row must offer a role change again");
+  assert(findButton(aliceRow, "Delete"), "the refreshed row must still offer Delete");
+
+  findButton(aliceRow, "Delete").dispatch("click");
+  let deleteBox = findByClass(aliceRow, "admin-confirm");
+  assert(deleteBox, "Delete must open an inline typed confirmation");
+  assert(deleteBox.getAttribute("role") === "group",
+    "the delete confirmation must be an accessible group");
+  assert(String(deleteBox.getAttribute("aria-label")).indexOf("Delete Alice Tan") >= 0 &&
+    String(deleteBox.getAttribute("aria-label")).indexOf("@alice") >= 0,
+    "the delete confirmation must name the account in its accessible label");
+  const deleteText = deleteBox.textContent;
+  assert(deleteText.indexOf("permanently erases") >= 0 &&
+    deleteText.indexOf("saved conversations") >= 0 &&
+    deleteText.indexOf("cannot be undone") >= 0,
+    "the delete confirmation must show the erasure consequence");
+  assert(deleteText.indexOf("alice") >= 0, "the delete confirmation must name the exact username");
+  const consequence = findByClass(deleteBox, "admin-confirm-consequence");
+  let deleteInput = findByClass(deleteBox, "admin-confirm-input");
+  assert(consequence && deleteInput, "the typed delete confirmation is missing its parts");
+  assert(deleteInput.getAttribute("aria-describedby") === consequence.id,
+    "the typed input must be described by the erasure consequence");
+  assert(String(deleteInput.getAttribute("aria-label")).indexOf("alice") >= 0,
+    "the typed input must have an accessible label naming the username");
+  const confirmDelete = findButton(deleteBox, "Confirm delete");
+  assert(confirmDelete.disabled === true,
+    "delete must stay disabled until the exact username is typed");
+
+  deleteInput.value = "alica";
+  deleteInput.dispatch("input");
+  assert(confirmDelete.disabled === true, "a mismatched username must keep delete disabled");
+  confirmDelete.dispatch("click");
+  assert(app.callsMatching("/workspace/api/admin/users/user-alice/delete").length === 0,
+    "a mismatched typed confirmation must not send a delete request");
+
+  deleteInput.value = "alice";
+  deleteInput.dispatch("input");
+  assert(confirmDelete.disabled === false, "the exact username must enable delete");
+
+  confirmDelete.dispatch("click");
+  let deleteCall = app.lastMatching("/workspace/api/admin/users/user-alice/delete");
+  assert(deleteCall && deleteCall.options.method === "POST", "confirmed delete was not sent");
+  assert(JSON.parse(deleteCall.options.body).confirm_username === "alice",
+    "the delete request must repeat the exact username");
+  assert(deleteCall.options.headers["Content-Type"] === "application/json",
+    "delete must declare a JSON Content-Type");
+  assert(deleteCall.options.credentials === "same-origin", "delete must use same-origin cookies");
+  deleteCall.respond(
+    { error: { code: "CONFLICT", message: "account has an active conversation turn" } },
+    409
+  );
+  await settle();
+  assert(app.elementFor("admin-status").textContent.indexOf("Deletion was refused") >= 0,
+    "a 409 delete refusal must be visible");
+  assert(app.elementFor("admin-status").getAttribute("data-kind") === "error",
+    "a refused delete must be reported as an error");
+  assert(findDataRow(app.elementFor("user-list"), "data-user", "user-alice"),
+    "a refused delete must leave the row in place");
+
+  aliceRow = findDataRow(app.elementFor("user-list"), "data-user", "user-alice");
+  findButton(aliceRow, "Delete").dispatch("click");
+  deleteBox = findByClass(aliceRow, "admin-confirm");
+  deleteInput = findByClass(deleteBox, "admin-confirm-input");
+  deleteInput.value = "alice";
+  deleteInput.dispatch("input");
+  findButton(deleteBox, "Confirm delete").dispatch("click");
+  deleteCall = app.lastMatching("/workspace/api/admin/users/user-alice/delete");
+  deleteCall.respond(
+    { status: "deleted", deleted_conversations: 2, deleted_messages: 5 },
+    200
+  );
+  await settle();
+  const deleteRefresh = app.lastMatching("/workspace/api/admin/users?limit=25");
+  assert(deleteRefresh && !deleteRefresh.settled,
+    "a successful delete must refresh the user list");
+  deleteRefresh.respond({ items: [adminRow], next: null }, 200);
+  await settle();
+  const deleteStatus = app.elementFor("admin-status").textContent;
+  assert(deleteStatus.indexOf("deleted") >= 0 &&
+    deleteStatus.indexOf("2 conversation") >= 0 &&
+    deleteStatus.indexOf("5 message") >= 0,
+    "a successful delete must report the erasure counts");
+  assert(!findDataRow(app.elementFor("user-list"), "data-user", "user-alice"),
+    "a successful delete must remove the row after refresh");
+  const finalSelfRow = findDataRow(app.elementFor("user-list"), "data-user", "user-admin");
+  assert(finalSelfRow && !findButton(finalSelfRow, "Delete"),
+    "the refreshed list must never offer self-delete");
+}
+
 async function scenarioAdminOwnRoleChange() {
   const app = createApp({ maxInflight: 2 });
   await start(app);
@@ -1795,6 +2058,220 @@ async function scenarioAdminOwnRoleChange() {
     "an own demotion must explain that admin tools are gone");
 }
 
+async function scenarioEffectivePolicyPreview() {
+  const app = createApp();
+  await start(app);
+  const adminProfile = {
+    user: { ...ALICE_USER, id: "user-admin", username: "admin", full_name: "Ada Admin", role: "admin" },
+    department: { id: "dept-accounting", name: "Accounting" },
+    review_scope: null,
+    review_department_ids: [],
+    review_grants: [],
+  };
+  const adminRow = {
+    id: "user-admin", username: "admin", full_name: "Ada Admin",
+    department_id: "dept-accounting", role: "admin", disabled: false, created_at: 1700000002,
+  };
+  const aliceRow = {
+    id: "user-alice", username: "alice", full_name: "Alice Tan",
+    department_id: "dept-accounting", role: "employee", disabled: false, created_at: 1700000001,
+  };
+  const openProfile = {
+    id: "profile-input-open",
+    name: "No input PII masking",
+    revision: 1,
+    settings: {
+      input_check_enabled: true,
+      output_check_enabled: true,
+      input_masks: [],
+      output_masks: ["EMAIL"],
+    },
+    settings_digest: "a".repeat(64),
+  };
+  await signIn(app, adminProfile);
+  app.lastMatching("/workspace/api/conversations?limit=25").respond({ items: [], next: null }, 200);
+  await settle();
+  await settleSummarySurfaces(app);
+
+  app.elementFor("tab-admin").dispatch("click");
+  await settle();
+  app.lastMatching("/workspace/api/admin/departments?limit=25").respond(
+    { items: [{ id: "dept-accounting", name: "Accounting", created_at: 1700000000 }], next: null },
+    200
+  );
+  await settle();
+  app.lastMatching("/workspace/api/admin/users?limit=25").respond(
+    { items: [adminRow, aliceRow], next: null },
+    200
+  );
+  await settle();
+  app.elementFor("admin-tab-policies").dispatch("click");
+  await settle();
+  app.lastMatching("/workspace/api/admin/policy/profiles?limit=25").respond(
+    { items: [openProfile], next: null },
+    200
+  );
+  await settle();
+  const assignment = app.lastMatching("/workspace/api/admin/policy/assignments/workspace");
+  assert(assignment, "the policies tab must read the current workspace assignment");
+  assignment.respond({ assignment: null }, 200);
+  await settle();
+
+  app.elementFor("effective-user").value = "user-alice";
+  app.elementFor("effective-preview").dispatch("click");
+  const single = app.lastMatching("/workspace/api/admin/policy/effective?user_id=user-alice");
+  assert(single, "the effective preview request is missing");
+  single.respond(
+    {
+      user_id: "user-alice",
+      department_id: "dept-accounting",
+      input_check_enabled: true,
+      output_check_enabled: true,
+      input_masks: [],
+      output_masks: ["EMAIL"],
+      revision: "profile:profile-input-open:1",
+      settings_digest: "a".repeat(64),
+      source: {
+        scope_type: "user",
+        scope_id: "user-alice",
+        profile_id: "profile-input-open",
+        profile_name: "No input PII masking",
+        revision: 1,
+      },
+      sources: [
+        {
+          scope_type: "user",
+          scope_id: "user-alice",
+          profile_id: "profile-input-open",
+          profile_name: "No input PII masking",
+          revision: 1,
+        },
+      ],
+      is_default: false,
+    },
+    200
+  );
+  await settle();
+
+  const preview = app.elementFor("effective-policy");
+  const singleText = preview.textContent;
+  assert(singleText.indexOf("explicit no masking") < 0,
+    "an empty mask list must be a neutral chip, not a warning-like phrase");
+  assert(singleText.indexOf("Winning scope") < 0 && singleText.indexOf("Inheritance sources") < 0,
+    "the preview must replace scope and inheritance jargon");
+  assert(singleText.indexOf("Input checks / masks") >= 0 &&
+    singleText.indexOf("Output checks / masks") >= 0,
+    "input and output must be separate labelled blocks");
+  const blocks = collect(preview).filter(
+    (element) => String(element.className).split(" ").indexOf("effective-block") >= 0
+  );
+  assert(blocks.length === 2, "the preview must render exactly two channel blocks");
+  const inputBlock = blocks.find((element) => element.getAttribute("data-stage") === "input");
+  const outputBlock = blocks.find((element) => element.getAttribute("data-stage") === "output");
+  assert(inputBlock && inputBlock.textContent.indexOf("Masks: None") >= 0,
+    "the no-masking input block must show a plain None chip");
+  const noneChip = collect(inputBlock).find(
+    (element) => String(element.className).split(" ").indexOf("is-none") >= 0 &&
+      element.textContent === "None"
+  );
+  assert(noneChip, "None must be rendered as its own neutral chip");
+  assert(outputBlock && outputBlock.textContent.indexOf("EMAIL") >= 0,
+    "the output block must list its masks explicitly");
+  assert(!collect(outputBlock).some(
+    (element) => String(element.className).split(" ").indexOf("is-none") >= 0
+  ), "a masked channel must not also show a None chip");
+  assert(singleText.indexOf("User · @alice") >= 0 &&
+    singleText.indexOf("No input PII masking") >= 0 &&
+    singleText.indexOf("revision 1") >= 0,
+    "the preview must name the winning scope, human profile name and revision");
+  assert(singleText.indexOf("profile-input-open") < 0,
+    "an internal profile identifier must not be presented as a human label");
+  assert(singleText.indexOf("re-apply the assignment") >= 0,
+    "the preview must state the re-apply action instead of pinning jargon");
+  assert(!collect(preview).some(
+    (element) => String(element.className).split(" ").indexOf("effective-chain") >= 0
+  ), "a single source must not render an inheritance chain");
+
+  app.elementFor("effective-preview").dispatch("click");
+  const multi = app.lastMatching("/workspace/api/admin/policy/effective?user_id=user-alice");
+  assert(multi && multi !== single, "a second preview request is missing");
+  multi.respond(
+    {
+      user_id: "user-alice",
+      department_id: "dept-accounting",
+      input_check_enabled: false,
+      output_check_enabled: true,
+      input_masks: ["EMAIL"],
+      output_masks: ["EMAIL", "MYKAD"],
+      revision: "profile:profile-user:3",
+      settings_digest: "b".repeat(64),
+      source: {
+        scope_type: "user",
+        scope_id: "user-alice",
+        profile_id: "profile-user",
+        profile_name: "No input PII masking",
+        revision: 3,
+      },
+      sources: [
+        {
+          scope_type: "workspace",
+          scope_id: "workspace",
+          profile_id: "profile-workspace",
+          profile_name: "Baseline",
+          revision: 1,
+        },
+        {
+          scope_type: "department",
+          scope_id: "dept-accounting",
+          profile_id: "profile-department",
+          profile_name: "Accounting policy",
+          revision: 2,
+        },
+        {
+          scope_type: "user",
+          scope_id: "user-alice",
+          profile_id: "profile-user",
+          profile_name: "No input PII masking",
+          revision: 3,
+        },
+      ],
+      is_default: false,
+    },
+    200
+  );
+  await settle();
+
+  const multiText = preview.textContent;
+  const chainItems = collect(preview).filter(
+    (element) => String(element.className).split(" ").indexOf("effective-chain-item") >= 0
+  );
+  assert(chainItems.length === 3, "a multi-scope preview must render the full scope chain");
+  assert(chainItems[0].textContent.indexOf("Organisation") >= 0 &&
+    chainItems[0].textContent.indexOf("Baseline") >= 0 &&
+    chainItems[1].textContent.indexOf("Department · Accounting") >= 0 &&
+    chainItems[1].textContent.indexOf("superseded") >= 0 &&
+    chainItems[2].textContent.indexOf("User · @alice") >= 0 &&
+    chainItems[2].textContent.indexOf("Winner") >= 0,
+    "the chain must order scopes, label non-winners superseded and mark the winner");
+  assert(chainItems[2].className.indexOf("is-winner") >= 0,
+    "the winning chain item must carry the winner style");
+  assert(multiText.indexOf("dept-accounting") < 0 && multiText.indexOf("user-alice") < 0,
+    "scope identifiers must not be shown as human labels");
+  assert(multiText.indexOf("overrides the Department · Accounting assignment") >= 0,
+    "the preview must name the less-specific assignment that was overridden");
+  assert(multiText.indexOf("no values are combined") >= 0,
+    "the preview must state honestly that settings are not merged field by field");
+  const multiInput = collect(preview).find(
+    (element) => String(element.className).split(" ").indexOf("effective-block") >= 0 &&
+      element.getAttribute("data-stage") === "input"
+  );
+  assert(multiInput && multiInput.textContent.indexOf("Checks off") >= 0,
+    "a disabled channel must show an explicit off state");
+  assert(collect(multiInput).some(
+    (element) => String(element.className).split(" ").indexOf("is-disabled") >= 0
+  ), "an off channel must use the disabled state chip");
+}
+
 async function scenarioAlertProfileFallbackAndAcknowledgement() {
   const app = createApp();
   await start(app);
@@ -1808,7 +2285,36 @@ async function scenarioAlertProfileFallbackAndAcknowledgement() {
   await signIn(app, adminProfile);
   app.lastMatching("/workspace/api/conversations?limit=25").respond({ items: [], next: null }, 200);
   await settle();
-  await settleSummarySurfaces(app);
+  const oldestUnreadAt = 1700000200;
+  await settleSummarySurfaces(app, {
+    total: 12,
+    unread: 3,
+    acknowledged: 9,
+    input: 8,
+    output: 4,
+    oldest_unread_at: oldestUnreadAt,
+  });
+  assert(app.elementFor("alerts-bell").getAttribute("aria-label").indexOf("3 unread") >= 0,
+    "the bell must report the summary unread count");
+  assert(app.elementFor("alert-summary").textContent.indexOf("12 total") >= 0,
+    "the summary must report the total alert count");
+  assert(app.elementFor("alert-summary").textContent.indexOf("3 unread") >= 0,
+    "the summary must report the unread count");
+  assert(app.elementFor("alert-summary").textContent.indexOf("8Input alerts") >= 0,
+    "the summary must report the input-stage count");
+  assert(app.elementFor("alert-summary").textContent.indexOf("4Output alerts") >= 0,
+    "the summary must report the output-stage count");
+  const oldestCell = app.elementFor("alert-summary").children.find((cell) => {
+    const label = findByClass(cell, "alert-summary-label");
+    return label && label.textContent.indexOf("Oldest unread") === 0;
+  });
+  assert(oldestCell, "the summary must keep an oldest-unread cell");
+  const oldestValue = findByClass(oldestCell, "alert-summary-value").textContent;
+  assert(oldestValue && oldestValue !== "None" && oldestValue !== "Not reported",
+    "a reported oldest unread time must render its date");
+  assert(findByClass(oldestCell, "alert-summary-label").textContent.indexOf("ago") > 0,
+    "the oldest-unread label must report the age");
+
 
   const alertId = "alert:one";
   const conversationId = "conv-secret-alert";
@@ -1846,6 +2352,7 @@ async function scenarioAlertProfileFallbackAndAcknowledgement() {
     ...alertItem,
     id: "alert:user-scope",
     request_id: "req-alert-2",
+    stage: "output",
     control_revision: "profile:unloaded-profile:1",
     control_digest: "sha256:user-full-control-digest",
     control_sources: [
@@ -1872,6 +2379,28 @@ async function scenarioAlertProfileFallbackAndAcknowledgement() {
       },
     ],
   };
+  const defaultPolicyAlert = {
+    ...alertItem,
+    id: "alert:default-policy",
+    request_id: "req-alert-4",
+    control_revision: "",
+    control_digest: "",
+    control_sources: [],
+  };
+  // Ten loaded rows plus the scoped alerts above: the list must render every
+  // row it received rather than truncating at the old page size.
+  const extraAlerts = [];
+  for (let i = 0; i < 9; i += 1) {
+    extraAlerts.push({
+      ...alertItem,
+      id: "alert:extra-" + i,
+      request_id: "req-extra-" + i,
+      stage: i % 2 === 0 ? "output" : "input",
+    });
+  }
+  const allAlerts = [
+    alertItem, userScopeAlert, workspaceScopeAlert, defaultPolicyAlert, ...extraAlerts
+  ];
 
   app.elementFor("alerts-bell").dispatch("click");
   await settle();
@@ -1888,7 +2417,7 @@ async function scenarioAlertProfileFallbackAndAcknowledgement() {
   // The alert list is answered before either filter list, so the concise
   // label must not depend on department or user lookups completing.
   alerts.respond(
-    { items: [alertItem, userScopeAlert, workspaceScopeAlert], next: null },
+    { items: allAlerts, next: null },
     200
   );
   await settle();
@@ -1918,6 +2447,13 @@ async function scenarioAlertProfileFallbackAndAcknowledgement() {
   const profileCell = rendered.children[4];
   const details = profileCell.children.find((child) => child.tagName === "DETAILS");
   assert(details, "alert profile must expose technical details");
+  const referenceText = collect(profileCell).find(
+    (element) => String(element.className).indexOf("cell-truncate") >= 0
+  );
+  assert(referenceText && referenceText.getAttribute("title") === "Reference req-alert-1",
+    "the full request reference must stay available as a title");
+  assert(rendered.children[5].getAttribute("data-label") === "Actions",
+    "the alert action group must stay associated with the alert row");
   const profileSummary = conciseProfileText(rendered);
   assert(profileSummary.indexOf("Department · Accounting · revision 7") >= 0,
     "the concise profile summary must carry scope and revision");
@@ -1943,6 +2479,44 @@ async function scenarioAlertProfileFallbackAndAcknowledgement() {
     ).length === 0,
     "opening the bell must not mark any alert read"
   );
+
+  const loadedRows = app.elementFor("alert-list").children.filter(
+    (child) => child.getAttribute("data-alert")
+  );
+  assert(loadedRows.length === allAlerts.length,
+    "the alert list must render every loaded row, including ten or more alerts");
+  assert(loadedRows[loadedRows.length - 1].getAttribute("data-alert") ===
+    extraAlerts[extraAlerts.length - 1].id,
+    "the alert list must render the final row of a long page");
+
+  const inputBadge = findByClass(rendered, "alert-stage-badge");
+  assert(inputBadge && inputBadge.textContent === "Input",
+    "an input alert must carry an Input stage badge");
+  assert(String(inputBadge.className).indexOf("is-output") < 0,
+    "an input alert must not carry the output badge style");
+  const outputRow = alertRow(userScopeAlert.id);
+  const outputBadge = findByClass(outputRow, "alert-stage-badge");
+  assert(outputBadge && outputBadge.textContent === "Output",
+    "an output alert must carry an Output stage badge");
+  assert(String(outputBadge.className).indexOf("is-output") >= 0,
+    "an output alert must carry the output badge style");
+
+  const copyReference = findButton(rendered, "Copy");
+  assert(copyReference &&
+    copyReference.getAttribute("aria-label") === "Copy reference req-alert-1",
+    "the reference copy action must name the full request reference");
+  assert(copyReference.title === "Copy reference",
+    "the reference copy action must explain itself on hover");
+
+  const defaultRow = alertRow(defaultPolicyAlert.id);
+  assert(defaultRow, "an alert with no assignment lineage must still render");
+  assert(conciseProfileText(defaultRow).indexOf("Default policy") === 0,
+    "an alert with no assignment lineage must name the built-in default policy");
+  const defaultDetails = defaultRow.children[4].children.find(
+    (child) => child.tagName === "DETAILS"
+  );
+  assert(defaultDetails.textContent.indexOf("Policy revision: unavailable") >= 0,
+    "the default policy must not invent a revision");
 
   departments.respond(
     {
@@ -2022,8 +2596,12 @@ async function scenarioAlertProfileFallbackAndAcknowledgement() {
   assert(acknowledged, "the acknowledged alert must stay rendered after refresh");
   assert(acknowledged.textContent.indexOf("Acknowledged") >= 0,
     "the acknowledged state must render");
-  assert(findButton(acknowledged, "Acknowledge").disabled === true,
-    "an acknowledged alert must not offer Acknowledge again");
+  assert(!findButton(acknowledged, "Acknowledge"),
+    "an acknowledged alert must not render an inapplicable Acknowledge action");
+  assert(!findButton(acknowledged, "Mark read"),
+    "a read alert must not render an inapplicable Mark read action");
+  assert(findButton(acknowledged, "View conversation"),
+    "an acknowledged alert must keep the conversation action");
   assert(app.elementFor("alert-state").textContent.indexOf("Alert acknowledged.") >= 0,
     "acknowledgement success must be reported");
 
@@ -2044,6 +2622,173 @@ async function scenarioAlertProfileFallbackAndAcknowledgement() {
     "the denial must not request review content");
   assert(app.callsMatching(conversationId).length === conversationCallsBefore,
     "the denial must not request conversation content");
+
+  app.elementFor("alert-stage").value = "output";
+  app.elementFor("alert-unread").value = "false";
+  app.elementFor("alert-ack").value = "false";
+  app.elementFor("alert-stage").dispatch("change");
+  await settle();
+  const filtered = app.lastMatching("/workspace/api/admin/alerts?limit=50");
+  assert(filtered &&
+    filtered.url ===
+      "/workspace/api/admin/alerts?limit=50&stage=output&unread=false&acknowledged=false",
+    "the stage and state filters must be sent as encoded query parameters");
+  filtered.respond({ items: [], next: null }, 200);
+  await settle();
+  assert(app.elementFor("alert-state").textContent.indexOf(
+    "No block alerts match these filters") >= 0,
+    "an empty filtered list must say that no alerts matched rather than that none exist");
+}
+
+async function scenarioMarkAllAlertsRead() {
+  const app = createApp();
+  await start(app);
+  const adminProfile = {
+    user: { ...ALICE_USER, id: "user-admin", username: "admin", full_name: "Ada Admin", role: "admin" },
+    department: { id: "dept-accounting", name: "Accounting" },
+    review_scope: null,
+    review_department_ids: [],
+    review_grants: [],
+  };
+  await signIn(app, adminProfile);
+  app.lastMatching("/workspace/api/conversations?limit=25").respond({ items: [], next: null }, 200);
+  await settle();
+  await settleSummarySurfaces(app, {
+    total: 4,
+    unread: 2,
+    acknowledged: 2,
+    input: 3,
+    output: 1,
+  });
+
+  const markAll = app.elementFor("alert-mark-all");
+  assert(markAll.hidden === false,
+    "an administrator with unread alerts must see Mark all read");
+  assert(markAll.disabled === false,
+    "Mark all read must be enabled with unread alerts and no request in flight");
+  assert(markAll.getAttribute("aria-label") === "Mark all alerts read",
+    "the bulk action must have an accessible label");
+
+  // Open the alert panel, then select filters that the refresh after a
+  // successful bulk action must preserve.
+  app.elementFor("alerts-bell").dispatch("click");
+  await settle();
+  const departments = app.lastMatching("/workspace/api/admin/departments?limit=25");
+  assert(departments, "opening the alerts panel must load filter options");
+  departments.respond(
+    {
+      items: [{ id: "dept-accounting", name: "Accounting", created_at: 1700000000 }],
+      next: null,
+    },
+    200
+  );
+  await settle();
+  const users = app.lastMatching("/workspace/api/admin/users?limit=25");
+  assert(users, "the alert user filter must load after departments");
+  users.respond(
+    {
+      items: [
+        { id: "user-alice", username: "alice", full_name: "Alice Tan", department_id: "dept-accounting", role: "employee", disabled: false, created_at: 1700000001 },
+      ],
+      next: null,
+    },
+    200
+  );
+  const initialList = app.lastMatching("/workspace/api/admin/alerts?limit=50");
+  assert(initialList, "opening the alerts panel must load the list");
+  initialList.respond({ items: [], next: null }, 200);
+  await settle();
+
+  app.elementFor("alert-stage").value = "output";
+  app.elementFor("alert-unread").value = "true";
+  app.elementFor("alert-stage").dispatch("change");
+  await settle();
+  const filtered = app.lastMatching("/workspace/api/admin/alerts?limit=50");
+  assert(filtered &&
+    filtered.url === "/workspace/api/admin/alerts?limit=50&stage=output&unread=true",
+    "the fixture must be reading a filtered alert list");
+  filtered.respond({ items: [], next: null }, 200);
+  await settle();
+
+  markAll.dispatch("click");
+  const failed = app.lastMatching("/workspace/api/admin/alerts/read-all");
+  assert(failed, "Mark all read must POST to the read-all endpoint");
+  assert(failed.options.method === "POST", "Mark all read must use POST");
+  assert(failed.options.body === "{}", "Mark all read must send an empty JSON body");
+  assert(failed.options.headers["Content-Type"] === "application/json",
+    "Mark all read must declare a JSON Content-Type");
+  assert(failed.options.credentials === "same-origin",
+    "Mark all read must use same-origin cookie credentials");
+  assert(failed.options.headers["X-Workspace-User"] === "user-admin",
+    "Mark all read must name the current profile");
+  assert(failed.options.headers.Authorization === undefined,
+    "Mark all read must not use bearer auth");
+  assert(markAll.disabled === true && markAll.hidden === false,
+    "the bulk action must stay visible but disabled while the request is in flight");
+  failed.respond(
+    { error: { code: "UNAVAILABLE", message: "The workspace is busy." } },
+    503
+  );
+  await settle();
+  assert(markAll.disabled === false && markAll.hidden === false,
+    "a failed bulk action must re-enable the control for a retry");
+  assert(app.elementFor("alert-state").textContent.indexOf("The workspace is busy.") >= 0,
+    "a failed bulk action must show the server message");
+  assert(app.elementFor("alert-state").getAttribute("data-kind") === "error",
+    "a failed bulk action must be reported as an error");
+  assert(app.callsMatching("/workspace/api/admin/alerts/read-all").length === 1,
+    "a failed bulk action must not be repeated automatically");
+
+  markAll.dispatch("click");
+  const readAll = app.lastMatching("/workspace/api/admin/alerts/read-all");
+  assert(readAll && readAll !== failed, "the retry must issue a new read-all request");
+  readAll.respond({ status: "read", marked_read: 2, total: 4 }, 200);
+  await settle();
+
+  const summaryRefresh = app.pendingCallsMatching("/workspace/api/admin/alerts/summary").pop();
+  assert(summaryRefresh, "a successful bulk action must refresh the summary");
+  const listRefresh = app.pendingCallsMatching("/workspace/api/admin/alerts?limit=50").pop();
+  assert(listRefresh, "a successful bulk action must refresh the filtered list");
+  assert(
+    listRefresh.url === "/workspace/api/admin/alerts?limit=50&stage=output&unread=true",
+    "the post-read refresh must keep the selected filters"
+  );
+  summaryRefresh.respond(
+    { total: 4, unread: 0, acknowledged: 4, input: 3, output: 1 },
+    200
+  );
+  listRefresh.respond({ items: [], next: null }, 200);
+  await settle();
+
+  assert(app.elementFor("alert-summary").textContent.indexOf("0 unread") >= 0,
+    "the refreshed summary must report zero unread");
+  assert(app.elementFor("alert-state").textContent.indexOf("Marked 2 alerts read.") >= 0,
+    "a successful bulk action must report how many alerts were marked");
+  assert(app.elementFor("alert-state").getAttribute("data-kind") === "ok",
+    "a successful bulk action must be reported as success");
+  assert(markAll.hidden === true && markAll.disabled === false,
+    "zero unread must hide the bulk action after the refresh");
+  assert(app.elementFor("alerts-bell").getAttribute("aria-label").indexOf("0 unread") >= 0,
+    "the bell must reflect the refreshed unread count");
+
+  // An employee never receives the administrator bulk action or its endpoint.
+  const employeeApp = createApp();
+  await start(employeeApp);
+  await signIn(employeeApp);
+  employeeApp.lastMatching("/workspace/api/conversations?limit=25").respond(
+    { items: [], next: null },
+    200
+  );
+  await settle();
+  const employeeMarkAll = employeeApp.elementFor("alert-mark-all");
+  assert(employeeMarkAll.hidden === true,
+    "an employee must never be shown the administrator bulk action");
+  employeeMarkAll.dispatch("click");
+  await settle();
+  assert(employeeApp.callsMatching("/workspace/api/admin/alerts/read-all").length === 0,
+    "an employee must not be able to post the bulk read action");
+  assert(employeeApp.callsMatching("/workspace/api/admin").length === 0,
+    "an employee must not fetch any administrator endpoint");
 }
 
 async function scenarioOwnNavigationFromAdmin() {
@@ -3357,8 +4102,11 @@ async function main() {
   await scenarioQueuedAuthChangeCannotRevealLoginProfile();
   await scenarioLogoutFailureIsRetryable();
   await scenarioAdmin();
+  await scenarioAdminEnableAndDelete();
   await scenarioAdminOwnRoleChange();
+  await scenarioEffectivePolicyPreview();
   await scenarioAlertProfileFallbackAndAcknowledgement();
+  await scenarioMarkAllAlertsRead();
   await scenarioOwnNavigationFromAdmin();
   await scenarioConversationListRetryAndPreservation();
   await scenarioListAttemptCannotOutliveIdentityChange();

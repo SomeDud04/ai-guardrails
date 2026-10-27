@@ -202,6 +202,7 @@ class PolicyAdminTests(GovernanceTestBase):
             "alert": lambda: self.store.get_block_alert(employee, alert_id),
             "summary": lambda: self.store.alert_summary(employee),
             "read": lambda: self.store.mark_block_alert_read(employee, alert_id),
+            "read_all": lambda: self.store.mark_all_block_alerts_read(employee),
             "ack": lambda: self.store.acknowledge_block_alert(employee, alert_id),
         }
         for name, call in calls.items():
@@ -921,11 +922,25 @@ class BlockAlertTests(GovernanceTestBase):
 
         self.assertEqual(
             self.store.alert_summary(admin_one),
-            {"total": 2, "unread": 2, "acknowledged": 0},
+            {
+                "total": 2,
+                "unread": 2,
+                "acknowledged": 0,
+                "input": 2,
+                "output": 0,
+                "oldest_unread_at": 1_700_000_000.0,
+            },
         )
         self.assertEqual(
             self.store.alert_summary(admin_two),
-            {"total": 2, "unread": 2, "acknowledged": 0},
+            {
+                "total": 2,
+                "unread": 2,
+                "acknowledged": 0,
+                "input": 2,
+                "output": 0,
+                "oldest_unread_at": 1_700_000_000.0,
+            },
         )
 
         read_one = self.store.mark_block_alert_read(admin_one, first["alert_id"])
@@ -955,7 +970,14 @@ class BlockAlertTests(GovernanceTestBase):
         )
         self.assertEqual(
             self.store.alert_summary(admin_one),
-            {"total": 2, "unread": 1, "acknowledged": 1},
+            {
+                "total": 2,
+                "unread": 1,
+                "acknowledged": 1,
+                "input": 2,
+                "output": 0,
+                "oldest_unread_at": 1_700_000_000.0,
+            },
         )
         self.assertEqual(self.store.alert_summary(admin_two)["acknowledged"], 0)
 
@@ -964,7 +986,14 @@ class BlockAlertTests(GovernanceTestBase):
         self.assertTrue(unread_ack["acknowledged"])
         self.assertEqual(
             self.store.alert_summary(admin_one),
-            {"total": 2, "unread": 0, "acknowledged": 2},
+            {
+                "total": 2,
+                "unread": 0,
+                "acknowledged": 2,
+                "input": 2,
+                "output": 0,
+                "oldest_unread_at": None,
+            },
         )
 
         for call in (
@@ -976,6 +1005,117 @@ class BlockAlertTests(GovernanceTestBase):
                 call()
         with self.assertRaises(ValueError):
             self.store.get_block_alert(admin_one, "bad alert id")
+
+    def test_alert_summary_counts_stages_and_tracks_oldest_unread(self) -> None:
+        alert_ids: list[str] = []
+        created: list[float] = []
+        for index in range(12):
+            self.clock.value = 1_700_000_000.0 + index
+            stage = "output" if index % 3 == 0 else "input"
+            reason_code = (
+                "OUTPUT_GUARD_BLOCK" if stage == "output" else "INPUT_GUARD_BLOCK"
+            )
+            _conversation, blocked = self._blocked_turn(
+                self.alice,
+                f"req_summary_{index}",
+                stage=stage,
+                reason_code=reason_code,
+            )
+            alert_ids.append(blocked["alert_id"])
+            created.append(self.clock.value)
+
+        admin_one = self.admin["id"]
+        summary = self.store.alert_summary(admin_one)
+        self.assertEqual(
+            summary,
+            {
+                "total": 12,
+                "unread": 12,
+                "acknowledged": 0,
+                "input": 8,
+                "output": 4,
+                "oldest_unread_at": created[0],
+            },
+        )
+
+        self.store.acknowledge_block_alert(admin_one, alert_ids[0])
+        summary = self.store.alert_summary(admin_one)
+        self.assertEqual((summary["unread"], summary["acknowledged"]), (11, 1))
+        self.assertEqual(summary["oldest_unread_at"], created[1])
+
+        self.store.mark_block_alert_read(admin_one, alert_ids[1])
+        summary = self.store.alert_summary(admin_one)
+        self.assertEqual((summary["unread"], summary["acknowledged"]), (10, 1))
+        self.assertEqual((summary["input"], summary["output"]), (8, 4))
+        self.assertEqual(summary["oldest_unread_at"], created[2])
+
+        other = self.store.alert_summary(self.second_admin["id"])
+        self.assertEqual(
+            (other["unread"], other["oldest_unread_at"]), (12, created[0])
+        )
+
+    def test_mark_all_alerts_read_marks_only_the_admin_and_preserves_state(
+        self,
+    ) -> None:
+        alert_ids: list[str] = []
+        for index in range(12):
+            self.clock.value = 1_700_000_000.0 + index
+            _conversation, blocked = self._blocked_turn(
+                self.alice, f"req_mark_all_{index}"
+            )
+            alert_ids.append(blocked["alert_id"])
+        admin_one, admin_two = self.admin["id"], self.second_admin["id"]
+
+        # Pre-existing per-administrator state must survive the bulk mark.
+        self.clock.value = 1_700_000_100.0
+        acked = self.store.acknowledge_block_alert(admin_one, alert_ids[0])
+        self.clock.value = 1_700_000_101.0
+        read_only = self.store.mark_block_alert_read(admin_one, alert_ids[1])
+
+        self.clock.value = 1_700_000_200.0
+        marked = self.store.mark_all_block_alerts_read(admin_one)
+        self.assertEqual(
+            marked, {"status": "ok", "marked_read": 10, "total": 12}
+        )
+        summary = self.store.alert_summary(admin_one)
+        self.assertEqual(
+            (summary["total"], summary["unread"], summary["acknowledged"]),
+            (12, 0, 1),
+        )
+        preserved_ack = self.store.get_block_alert(admin_one, alert_ids[0])
+        self.assertEqual(preserved_ack["read_at"], acked["read_at"])
+        self.assertEqual(
+            preserved_ack["acknowledged_at"], acked["acknowledged_at"]
+        )
+        preserved_read = self.store.get_block_alert(admin_one, alert_ids[1])
+        self.assertEqual(preserved_read["read_at"], read_only["read_at"])
+        self.assertFalse(preserved_read["acknowledged"])
+        self.assertEqual(
+            self.store.get_block_alert(admin_one, alert_ids[2])["read_at"],
+            1_700_000_200.0,
+        )
+
+        # Repeating the bulk mark is a no-op and keeps the earlier timestamps.
+        self.clock.value = 1_700_000_300.0
+        repeated = self.store.mark_all_block_alerts_read(admin_one)
+        self.assertEqual(
+            repeated, {"status": "ok", "marked_read": 0, "total": 12}
+        )
+        self.assertEqual(
+            self.store.get_block_alert(admin_one, alert_ids[2])["read_at"],
+            1_700_000_200.0,
+        )
+
+        # The second administrator's state is untouched.
+        other = self.store.alert_summary(admin_two)
+        self.assertEqual(
+            (other["total"], other["unread"], other["acknowledged"]),
+            (12, 12, 0),
+        )
+        self.assertFalse(self.store.get_block_alert(admin_two, alert_ids[0])["read"])
+        with self.assertRaises(AccessDenied):
+            self.store.mark_all_block_alerts_read(self.alice["id"])
+        self.assertEqual(self.store.alert_summary(admin_two)["unread"], 12)
 
     def test_request_id_makes_alert_persistence_idempotent(self) -> None:
         first_conversation, first = self._blocked_turn(self.alice, "req_same_turn")

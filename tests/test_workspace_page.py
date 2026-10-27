@@ -109,6 +109,55 @@ class WorkspacePageHTTPTests(WorkspaceHTTPBase):
         self.assertIn("#workspace-view {", html)
         self.assertIn("flex-direction: column;", html)
 
+    def test_admin_table_density_and_identifier_styles_are_present(self) -> None:
+        html = self._page().text
+        styles = re.findall(r"<style>(.*?)</style>", html, re.S)
+        self.assertEqual(len(styles), 1)
+        css = styles[0]
+        # UX-01: one dense rhythm for every admin row and explicit widths for
+        # the three list tables an administrator reads row by row.
+        self.assertIn(".admin-table-head, .admin-table-row {", css)
+        self.assertIn("padding: 12px 16px;", css)
+        self.assertIn("gap: 12px;", css)
+        self.assertIn("#user-list .cols-5", css)
+        self.assertIn("#access-list .cols-5", css)
+        self.assertIn("#alert-list .cols-6", css)
+        self.assertIn(".cell-truncate", css)
+        self.assertIn("text-overflow: ellipsis;", css)
+        self.assertIn("white-space: nowrap;", css)
+        # The narrow layout turns these lists into labelled cards instead of a
+        # horizontally scrolled table whose actions sit off-screen.
+        self.assertIn(".admin-table-list", css)
+        self.assertIn("content: attr(data-label);", css)
+        for table_id in ("user-list", "alert-list", "access-list"):
+            self.assertIn(
+                f'id="{table_id}" class="admin-table admin-table-list"', html
+            )
+
+    def test_mobile_topbar_keeps_wrapped_guard_status_inside_the_header(self) -> None:
+        html = self._page().text
+        css = re.findall(r"<style>(.*?)</style>", html, re.S)[0]
+        topbar = re.search(r"\.topbar\s*\{([^}]*)\}", css, re.S)
+        self.assertIsNotNone(topbar)
+        # At 390px the topbar wraps to several lines. As a flex item in .main it
+        # must not shrink below that content height, otherwise #guard-status
+        # overflows onto the Admin heading while its own box stays 63px tall.
+        self.assertRegex(topbar.group(1), r"flex:\s*none;")
+        self.assertIn("flex-wrap: wrap;", css)
+        self.assertIn(".guard-status { order: 10; flex-basis: 100%;", css)
+
+    def test_alert_mark_all_control_is_accessible_and_admin_only(self) -> None:
+        html = self._page().text
+        self.assertRegex(
+            html,
+            r'<button id="alert-mark-all"[^>]*type="button"[^>]*'
+            r'aria-label="Mark all alerts read"[^>]*hidden[^>]*>Mark all read</button>',
+        )
+        alerts = html.split('id="admin-alerts-panel"', 1)[1]
+        self.assertLess(
+            alerts.index('id="alert-mark-all"'), alerts.index('id="alert-list"')
+        )
+
     def test_review_metadata_is_joined_and_stays_inside_the_grant(self) -> None:
         self.store.grant_review(
             self.admin["id"], self.bob["id"], "department", self.accounting["id"]
