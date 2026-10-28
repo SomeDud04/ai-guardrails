@@ -181,6 +181,10 @@ value other than `chat_content`, a non-integer or non-positive `bytes`, or a
 `char` that is not exactly one character must be reported as `ERROR`, not as
 `PASS` or `FAIL`: the runner could not build the request the row describes.
 
+## Deny-phrase matching guarantee
+
+Policy deny phrases and candidate text share one normalisation pipeline: Unicode NFKC, removal of every `Cf` format character (zero-width space, BOM, bidi controls and the rest), whitespace collapsing to single ASCII spaces with edges stripped, and `casefold`. Exact, uppercase, double-spaced, newline, fullwidth, zero-width and non-ASCII-whitespace spellings therefore all return `403`/`POLICY_BLOCK`; accents are preserved rather than stripped; phrases that normalise to empty are rejected at activation instead of becoming a match-all; and matching stays per accepted message (and per buffered output), so a phrase split across two turns is deliberately not joined and remains unblocked by this literal control.
+
 ## Outcome vocabulary
 
 A session records exactly one of four outcomes per row.

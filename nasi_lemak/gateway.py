@@ -9,8 +9,9 @@ import re
 import secrets
 import threading
 import time
+import unicodedata
 import uuid
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
 
@@ -39,6 +40,23 @@ class _ScanCancelled(Exception):
     """Internal marker: the per-request scan context is cancelled/deadlined."""
 
 
+def _normalize_deny_text(text: str) -> str:
+    """Canonical form shared by policy phrases and candidate text.
+
+    NFKC first, so compatibility variants (for example fullwidth letters) fold
+    to their canonical spelling.  Every Unicode ``Cf`` character (zero-width
+    space, bidi controls, soft hyphen, BOM and the rest) is then removed, all
+    whitespace runs collapse to one ASCII space and the edges are stripped, and
+    the result is casefolded.  Accents are preserved: this is canonical
+    equivalence, not accent or diacritic stripping.
+    """
+    normalized = unicodedata.normalize("NFKC", text)
+    visible = "".join(
+        char for char in normalized if unicodedata.category(char) != "Cf"
+    )
+    return " ".join(visible.split()).casefold()
+
+
 @dataclass(frozen=True)
 class Policy:
     """Immutable activated policy.
@@ -54,6 +72,11 @@ class Policy:
     token_budget: int = 512
     app_id: str = "synthetic-app"
     deny_phrases: tuple[str, ...] = ()
+    # Derived once at construction, never serialized, hashed or exposed.  It is
+    # excluded from equality so policy identity stays the raw configured fields.
+    _normalized_deny_phrases: tuple[str, ...] = field(
+        init=False, repr=False, compare=False, default=()
+    )
 
     def __post_init__(self):
         if isinstance(self.deny_phrases, list):
@@ -89,13 +112,32 @@ class Policy:
                 or len(phrase) > MAX_DENY_PHRASE_LENGTH
             ):
                 raise ValueError("invalid policy")
+        normalized: list[str] = []
+        for phrase in self.deny_phrases:
+            candidate = _normalize_deny_text(phrase)
+            # A phrase made only of format characters and/or whitespace would
+            # normalize to "", and an empty needle matches every text.  Reject
+            # it instead of silently dropping the phrase or denying everything.
+            if not candidate:
+                raise ValueError("invalid policy")
+            normalized.append(candidate)
+        object.__setattr__(self, "_normalized_deny_phrases", tuple(normalized))
 
     def denies(self, text: str) -> bool:
-        """Literal, case-insensitive substring match; never a regex search."""
+        """Literal substring match on normalized text; never a regex search.
+
+        Policy phrases and candidate text use the same normalizer, so
+        compatibility variants, invisible format characters and whitespace
+        runs cannot hide a configured phrase.  Callers check each message (or
+        the complete buffered output) separately: this method never joins
+        turn boundaries, so a phrase split across turns is not matched.
+        """
         if not isinstance(text, str):
             return True
-        folded = text.casefold()
-        return any(phrase.casefold() in folded for phrase in self.deny_phrases)
+        normalized = _normalize_deny_text(text)
+        return any(
+            phrase in normalized for phrase in self._normalized_deny_phrases
+        )
 
     @property
     def digest(self) -> str:
