@@ -437,6 +437,72 @@ class RebaselineTests(unittest.TestCase):
         ]
         self.assertEqual(not_holding, ["LLM06-002"])
 
+    def test_inverse_class_covers_every_expect_200_row_that_cannot_return_200(self):
+        """The inverse class must be complete against the corpus, not just one row.
+
+        The product counter and the declared reference configuration are used,
+        because those are exactly what turn an expect-200 row into a 413. The
+        real ASGI replay of all expect-200 rows lives in
+        tests/test_deny_normalisation.py; this module keeps the map structurally
+        complete without importing the HTTP stack.
+        """
+        from nasi_lemak.generation import conservative_byte_budget
+        from nasi_lemak.gateway import serialize_messages
+
+        inverse = self.map["inverse_class"]
+        self.assertTrue(inverse["complete"])
+        self.assertEqual(inverse["replayed_expect_200_rows"], 81)
+        ids = [row["id"] for row in inverse["rows"]]
+        self.assertEqual(ids, sorted(ids), "keep the inverse class ordered by corpus id")
+        self.assertEqual(len(ids), len(set(ids)), "duplicate ids in the inverse class")
+        self.assertFalse(
+            set(ids) & {row["id"] for row in self.map["rows"]},
+            "inverse class must be disjoint from the deterministic rows",
+        )
+
+        expect_200 = {
+            record_id: record
+            for record_id, record in self.records.items()
+            if record["expect_status"] == 200
+        }
+        self.assertEqual(len(expect_200), 81)
+        predicted = []
+        for record_id, record in expect_200.items():
+            serialized = serialize_messages(record["messages"])
+            units = conservative_byte_budget(serialized)
+            body_bytes = len(
+                json.dumps(
+                    {"model": "pilot-local", "messages": record["messages"]},
+                    separators=(",", ":"),
+                ).encode("utf-8")
+            )
+            if (
+                len(record["messages"]) > REFERENCE_CONFIGURATION["context_messages"]
+                or units > REFERENCE_CONFIGURATION["context_budget"]
+                or units > REFERENCE_CONFIGURATION["policy_token_budget"]
+                or body_bytes > REFERENCE_CONFIGURATION["body_limit_bytes"]
+            ):
+                predicted.append(record_id)
+        self.assertEqual(predicted, ids)
+        self.assertEqual(ids, ["CTRL-007"])
+
+        row = inverse["rows"][0]
+        self.assertEqual(row["expect_status"], expect_200["CTRL-007"]["expect_status"])
+        self.assertIsNone(row["expect_code"])
+        self.assertEqual(row["observed_status"], 413)
+        self.assertEqual(row["observed_code"], "INPUT_LIMIT")
+        self.assertEqual(row["observed_content_characters"], 1439)
+        self.assertEqual(row["observed_conservative_units"], 1449)
+        self.assertGreater(
+            row["observed_conservative_units"],
+            REFERENCE_CONFIGURATION["policy_token_budget"],
+        )
+        self.assertEqual(row["allowed_at"]["policy_token_budget_min"], 1449)
+        self.assertGreaterEqual(
+            row["allowed_at"]["verified_policy_token_budget"],
+            row["allowed_at"]["policy_token_budget_min"],
+        )
+
 
 class BuilderImportTests(unittest.TestCase):
     def test_builder_imports_without_openpyxl_at_module_scope(self):

@@ -41,20 +41,43 @@ class _ScanCancelled(Exception):
 
 
 def _normalize_deny_text(text: str) -> str:
-    """Canonical form shared by policy phrases and candidate text.
+    """Canonical form (a) shared by policy phrases and candidate text.
 
     NFKC first, so compatibility variants (for example fullwidth letters) fold
     to their canonical spelling.  Every Unicode ``Cf`` character (zero-width
-    space, bidi controls, soft hyphen, BOM and the rest) is then removed, all
+    space, bidi controls, soft hyphen, BOM and the rest) is then **deleted**, all
     whitespace runs collapse to one ASCII space and the edges are stripped, and
-    the result is casefolded.  Accents are preserved: this is canonical
-    equivalence, not accent or diacritic stripping.
+    the result is casefolded.  This form catches a format character inserted
+    inside a word.  Accents are preserved: this is canonical equivalence, not
+    accent or diacritic stripping.
+
+    Form (a) is matched only against :func:`_normalize_deny_text_spaced`'s
+    counterpart for the candidate; see ``Policy.denies``.
     """
     normalized = unicodedata.normalize("NFKC", text)
     visible = "".join(
         char for char in normalized if unicodedata.category(char) != "Cf"
     )
     return " ".join(visible.split()).casefold()
+
+
+def _normalize_deny_text_spaced(text: str) -> str:
+    """Canonical form (b): every ``Cf`` character becomes one ASCII space.
+
+    Used together with :func:`_normalize_deny_text` and never instead of it.
+    Deleting a format character that stands in for the word separator would
+    join two words ("synthetic\\u200bdenied" -> "syntheticdenied") and evade a
+    literal phrase, so form (b) keeps the separation.  Whitespace runs still
+    collapse to a single space and are never removed, so a phrase itself still
+    requires its own word boundaries.  NFKC and casefold are identical to form
+    (a); accents stay preserved.
+    """
+    normalized = unicodedata.normalize("NFKC", text)
+    spaced = "".join(
+        " " if unicodedata.category(char) == "Cf" else char
+        for char in normalized
+    )
+    return " ".join(spaced.split()).casefold()
 
 
 @dataclass(frozen=True)
@@ -72,9 +95,14 @@ class Policy:
     token_budget: int = 512
     app_id: str = "synthetic-app"
     deny_phrases: tuple[str, ...] = ()
-    # Derived once at construction, never serialized, hashed or exposed.  It is
-    # excluded from equality so policy identity stays the raw configured fields.
+    # Derived once at construction, never serialized, hashed or exposed.  They
+    # are excluded from equality so policy identity stays the raw configured
+    # fields.  Matching uses the union of both canonical forms: (a) deletes
+    # format characters, (b) turns each one into a word separator.
     _normalized_deny_phrases: tuple[str, ...] = field(
+        init=False, repr=False, compare=False, default=()
+    )
+    _spaced_deny_phrases: tuple[str, ...] = field(
         init=False, repr=False, compare=False, default=()
     )
 
@@ -113,31 +141,43 @@ class Policy:
             ):
                 raise ValueError("invalid policy")
         normalized: list[str] = []
+        spaced: list[str] = []
         for phrase in self.deny_phrases:
             candidate = _normalize_deny_text(phrase)
+            spaced_candidate = _normalize_deny_text_spaced(phrase)
             # A phrase made only of format characters and/or whitespace would
             # normalize to "", and an empty needle matches every text.  Reject
             # it instead of silently dropping the phrase or denying everything.
-            if not candidate:
+            if not candidate or not spaced_candidate:
                 raise ValueError("invalid policy")
             normalized.append(candidate)
+            spaced.append(spaced_candidate)
         object.__setattr__(self, "_normalized_deny_phrases", tuple(normalized))
+        object.__setattr__(self, "_spaced_deny_phrases", tuple(spaced))
 
     def denies(self, text: str) -> bool:
-        """Literal substring match on normalized text; never a regex search.
+        """Literal substring match on both normalized forms; never a regex.
 
-        Policy phrases and candidate text use the same normalizer, so
+        Policy phrases and candidate text use the same two normalizers, so
         compatibility variants, invisible format characters and whitespace
-        runs cannot hide a configured phrase.  Callers check each message (or
-        the complete buffered output) separately: this method never joins
-        turn boundaries, so a phrase split across turns is not matched.
+        runs cannot hide a configured phrase.  Form (a) deletes format
+        characters (catching one inserted inside a word); form (b) turns each
+        into a space (catching one standing in for the word separator).  A
+        phrase is only compared with the candidate in its own form, so real
+        whitespace is still required: ``"notallowed"`` never matches
+        ``"not allowed"``.  Callers check each message (or the complete
+        buffered output) separately: this method never joins turn boundaries,
+        so a phrase split across turns is not matched.
         """
         if not isinstance(text, str):
             return True
         normalized = _normalize_deny_text(text)
-        return any(
+        if any(
             phrase in normalized for phrase in self._normalized_deny_phrases
-        )
+        ):
+            return True
+        spaced = _normalize_deny_text_spaced(text)
+        return any(phrase in spaced for phrase in self._spaced_deny_phrases)
 
     @property
     def digest(self) -> str:
