@@ -4,7 +4,7 @@
 production certification and not a claim of complete OWASP coverage. The API
 guard adapters, installer/Compose selection and guard-evaluation harness are
 implemented and fixture-tested locally; live guard API acceptance, actual model
-quality and held-out capacity remain pending. Inspected against source `ac6b5d1` and committed
+quality and held-out capacity remain pending. Inspected against source `1b0aa43` and committed
 tests. Caller ran this turn: `python -m unittest tests.test_operator
 tests.test_policy tests.test_chat_deadline -q` -> **51 tests in 3.961s, OK** on
 synthetic local fixtures. The docs worker ran only documentation checks; no
@@ -160,6 +160,31 @@ outside this repository.
 | OWASP-LLM10-03 | CSV export and spreadsheet formula handling (`nasi_lemak/export.py`) | Metadata cells beginning with `=`, `+`, `-`, `@`, control prefixes or whitespace-prefixed formula characters should be neutralized; the CSV should be bounded, app-scoped and metadata-only; generated response text, raw audit rows and secrets are never exported. | `tests/test_export.py::test_formula_and_text_cells_are_neutralized_without_db_mutation`, `test_export.py::test_formula_neutralization_is_strict_and_idempotent_after_apostrophe`, `test_export.py::test_export_read_is_one_bounded_app_scoped_select`; `tests/test_operator.py::test_event_text_is_json_only_and_not_reflected_into_shell` | No spreadsheet application or downstream CSV consumer was exercised. | Covered locally for encoding; consumer acceptance pending |
 | OWASP-LLM10-04 | Malicious output and downstream-consumer egress | Proposed real-browser and downstream checks: render output containing `<img src=...>`, `<script>`, `javascript:` links and Markdown/HTML-like text; expect no network request, script execution or navigation. Downstream systems must treat model text as data, never as SQL/shell/HTML/code. | The local Node harness covers plain-text rendering; no downstream consumer test exists. | Entire egress/downstream contract is **proposed**. The gateway cannot sanitize a downstream consumer that chooses to interpret text as code. | Proposed; downstream limits explicit |
 | OWASP-LLM10-05 | Unsupported tool/function output from a provider (`generation._extract_content`) | A provider response containing `tool_calls`, `function_call`, a refusal or a non-`stop` finish must be rejected rather than released as ordinary text. | `tests/test_generation.py::test_malformed_or_unsupported_completions_are_rejected` | No live provider shape check; provider contract is operator-configured. | Covered locally with fixtures; live pending |
+
+## Corpus cross-reference (placeholder)
+
+The frozen payload corpus under `evals/owasp/llm-top10-2026/` (128 records, see
+`docs/owasp-corpus.md`) has no runner in this repository yet. This table is the
+placeholder that will carry, per corpus id, the matrix row it exercises and the
+recorded outcome once a runner exists. **Every outcome below is pending; no cell
+is a pass.** Deterministic rows (`expect_status` in `{400, 413}`) already have
+their current product limit and reproduction status recorded in
+`evals/owasp/rebaseline-llm-top10-2026.json`; that map is input to the table, not
+a substitute for a run.
+
+| Corpus ids | Candidate matrix row(s) | Outcome |
+|---|---|---|
+| LLM01-001..020 | OWASP-LLM01-01, OWASP-LLM01-02, OWASP-LLM01-03, OWASP-LLM01-04 | Pending (no runner) |
+| LLM02-001..016 | OWASP-LLM02-01, OWASP-LLM02-02, OWASP-LLM02-03, OWASP-LLM02-04 | Pending (no runner) |
+| LLM03-001..008 | OWASP-LLM03-01, OWASP-LLM03-02 | Pending (no runner) |
+| LLM04-001..007 | OWASP-LLM04-01, OWASP-LLM04-02, OWASP-LLM04-03 | Pending (no runner) |
+| LLM05-001..005 | OWASP-LLM05-01, OWASP-LLM05-02 | Pending (no runner) |
+| LLM06-001..012 | OWASP-LLM06-01, OWASP-LLM06-02, OWASP-LLM06-03, OWASP-LLM06-04, OWASP-LLM06-05, OWASP-LLM06-06 | Pending (no runner) |
+| LLM07-001..009 | OWASP-LLM07-01, OWASP-LLM07-02, OWASP-LLM07-03 | Pending (no runner) |
+| LLM08-001..014 | OWASP-LLM08-01, OWASP-LLM08-02, OWASP-LLM08-03 | Pending (no runner) |
+| LLM09-001..006 | OWASP-LLM09-01, OWASP-LLM09-02 | Pending (no runner) |
+| LLM10-001..013 | OWASP-LLM10-01, OWASP-LLM10-02, OWASP-LLM10-03, OWASP-LLM10-04, OWASP-LLM10-05 | Pending (no runner) |
+| CTRL-001..018 | None yet: benign controls measure false positives on the same path and have no dedicated matrix row | Pending (no runner) |
 
 ## Cross-cutting limitations
 
