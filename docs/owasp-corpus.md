@@ -256,6 +256,152 @@ Rules that follow from the vocabulary:
 - `PASS` on a `needs_guard_model: true` row is a single observation against one
   deployed classifier at one threshold, not classifier quality.
 
+## Running the deterministic lane
+
+Two local scripts turn the frozen artifacts into executable evidence.  Neither
+script edits the corpus, the manifest, the workbook or the re-baselining map,
+and neither installs a dependency.  Both use the canonical policy fixture
+`scripts/owasp_corpus_policy.yaml`, loaded through the production
+`nasi_lemak.policy.load_policy`, whose only deny phrase is
+`synthetic denied phrase`.
+
+### Conformance runner
+
+```text
+.\.venv\Scripts\python.exe scripts\run_owasp_corpus.py --dry-run
+.\.venv\Scripts\python.exe scripts\run_owasp_corpus.py --json report.json
+```
+
+The runner selects only the **deterministic lane**: the 23 rows whose
+`expect_status` is 400 or 413, all with `needs_guard_model: false`.  Its default
+**local** mode drives the real ASGI application
+(`nasi_lemak.server.make_app` -> real `Gateway`) in-process through
+`fastapi.testclient.TestClient`, with deterministic guard/generation doubles and
+the product token counter
+`nasi_lemak.generation.conservative_byte_budget`.  It contacts no socket, model,
+guard artifact or provider.
+
+Before it sends anything the runner prints and records the reference
+configuration it judged against, read from the live product configuration:
+`ChatLimits.defaults()` (context messages, context budget, default and maximum
+reply tokens), the policy file loaded through `load_policy` (policy token
+budget), and `DEFAULT_MAX_BODY_BYTES`.  It prints that alongside the older
+contract the corpus was authored against (16 messages, 4096 serialized
+characters, 256 reply tokens, 512-token policy budget) and alongside the map's
+own `reference_configuration`.  The token counter and its basis are always
+printed: two rows (`LLM01-019`, `LLM06-007`) reproduce only under the
+conservative counter and return 200 under a word counter.
+
+The runner also asserts, before sending, that the policy's deny phrase does not
+occur in any of the 81 corpus rows whose expectation is 200.  A short or common
+phrase would silently change an allowed row's outcome, so the self-check aborts
+the run instead of publishing a corrupted result.
+
+`--dry-run` prints the plan as JSON, including the selected row ids, the
+effective limits, the counter basis, the policy fixture, the expected HTTP
+request count and the expected provider-call count (0 in local mode).  It sends
+nothing and builds no client.
+
+Every row is classified by **one** function used unchanged by local and operator
+mode, as exactly one of `PASS`, `FAIL`, `NOT-APPLICABLE-CONFIG` or `ERROR`:
+
+| Observation | Outcome |
+| --- | --- |
+| Transport exception, timeout, uninterpretable request, HTTP 429, or any status outside `{200, 400, 403, 413}` | `ERROR` |
+| A raw request sentinel appears in the response body or the configured audit text | `FAIL` |
+| Observed status and code equal the corpus expectation, with an error envelope for a 400/413 row | `PASS` |
+| Mismatch where the map sets `holds_under_product_default: false`, records this exact `observed_status`/`observed_code`, and names it in `reason` | `NOT-APPLICABLE-CONFIG` |
+| Anything else, including a mismatch with no map entry | `FAIL` |
+
+Infrastructure observations take precedence: a 401, 404, 429 or 5xx, a transport
+failure or a timeout is `ERROR` even if the body would otherwise trip a sentinel
+or envelope assertion.  A configuration-dependent map entry never excuses a
+different observation: an injected 403 `POLICY_BLOCK` on `LLM06-002` is `FAIL`,
+because the map records a 200 for that row; only the genuine recorded 200 is
+`NOT-APPLICABLE-CONFIG`.  A map entry that permits that outcome but supplies no
+named `reason` is `ERROR`, never `N/A`.  `ERROR` is printed in its own column and
+excluded from both the numerator and the denominator; it never becomes `PASS` or
+`FAIL`.  The exit status is 0 only when there is no `FAIL`, no `ERROR` and the
+audit assertion did not fail; under the current limits the expected local result
+is 22 `PASS`, 1 `NOT-APPLICABLE-CONFIG` (`LLM06-002`, whose authored 16-message
+bound no longer exists) and 0 `ERROR`.
+
+`--json PATH` writes a metadata-only report: row id, outcome, expected and
+observed status/code, the reason for any non-`PASS`, the reference
+configuration, tallies, pass-rate accounting, the audit assertion state with its
+four execution counters and timings.  It contains no raw payload text, no corpus message content, no
+credential, no endpoint URL and no DSN.
+
+**Operator mode** is for an operator holding live credentials and is never run
+by the implementation worker or by the test suite:
+
+```text
+$env:NASI_LEMAK_OWASP_API_KEY = '<operator-supplied key>'
+.\.venv\Scripts\python.exe scripts\run_owasp_corpus.py --operator `
+    --base-url https://<operator endpoint> --json operator-report.json
+```
+
+The key is read from an environment variable (never from the report) and the
+endpoint is never recorded.  Operator mode uses the same row selection,
+classification and pass-rate accounting as local mode; only the sender differs.
+Its report still records the local reference configuration explicitly, because
+the runner cannot remotely inspect a deployed instance's limits or counter.
+
+The no-raw-sentinel-in-audit assertion requires an audit reader **and** a run in
+which the assertion actually executed.  Local mode always supplies a reader over
+the in-process audit store; operator mode accepts an optional reader from its
+caller because a remote deployment's audit store is not automatically readable.
+The state is derived in one place from four execution counters, which the report
+and the summary print as numbers: `audit_rows_sent` (requests actually sent and
+answered), `audit_checks_run` (rows where the reader ran), `audit_read_errors`
+(rows where it raised) and `audit_leaks_detected` (audit texts containing a raw
+request sentinel).  The states are:
+
+| Condition | `audit_leak_check` |
+| --- | --- |
+| No reader supplied, or no row reached the audit step (`audit_checks_run == 0`) | `unverified` — the assertion did **not** run |
+| The reader raised for any row (`audit_read_errors > 0`) | `failed` |
+| A sentinel was found in any audit row (`audit_leaks_detected > 0`) | `failed` |
+| The assertion ran for only some sent rows (`audit_checks_run < audit_rows_sent`) | `unverified` |
+| The assertion ran for every sent row, at least one row was sent, and every check was clean | `verified` |
+
+A reader that was configured but never ran yields `unverified`, never a pass: a
+run in which every send failed (for example 23 `ERROR`) makes no no-leak claim.
+**No no-leak claim may be made** from an `unverified` run, and the summary never
+implies the assertion passed.  When the reader raises, the affected rows are
+`ERROR`; a detected sentinel makes the affected row `FAIL`.  In both cases the
+report says `audit_leak_check: failed` and the process exits non-zero even if no
+row carries the `FAIL` outcome.  To verify a deployment's audit store, pass an
+`audit_text` reader bound to it; the CLI alone cannot do so.  Local mode is
+meaningful evidence that the committed deterministic rows reproduce against the
+committed product build; only operator mode can establish what a **deployed**
+instance with a different policy, counter, body limit or audit store returns.
+
+### Local capacity harness
+
+```text
+.\.venv\Scripts\python.exe scripts\load_gateway_local.py --json result.json
+```
+
+The harness drives the same real ASGI application with deterministic doubles at
+1, 2, 4 and 8 concurrent in-flight chat requests.  Each level reports the
+**configured admission cap** next to its admitted and overloaded counts, and the
+JSON result records `configured_admission_cap` alongside `max_concurrency`, so
+`admitted + overloaded = concurrency` is visible at every level.  It records
+admission, the 503 overload count, per-request latency, whether generated output
+leaked, and whether an admission slot was double-released.  It exercises the
+existing non-queuing admission semaphore, the separate control-plane admission
+cap and the chat work deadline; it adds no limit, knob or behaviour.
+
+Only **structural** invariants are asserted: admitted work never exceeds the
+cap, every acquired slot is released exactly once, a timed-out response
+releases no output and keeps its slot until the worker really finishes, excess
+control-plane work is rejected rather than queued, and admission returns to its
+limit.  Wall-clock timings and the overload count are recorded as data and are
+never asserted as throughput thresholds.  The result is metadata-only and says
+nothing about true throughput, provider quota or multi-user capacity.  It is
+evidence for concurrency framing item 2 only, not a substitute for item 3.
+
 ## Concurrency framing
 
 Three different questions are often conflated under "concurrency". They have

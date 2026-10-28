@@ -1,0 +1,14 @@
+# Canonical policy fixture for the deterministic OWASP corpus lane.
+#
+# Only the deterministic rows (expect_status 400 or 413) are exercised, so this
+# fixture never decides a pass or fail by itself.  It exists so the runner can
+# load its policy through the production loader instead of constructing a
+# Policy object in code.  The deny phrase is exactly the one the frozen corpus
+# documents; `scripts/run_owasp_corpus.py` refuses to run when it matches any
+# corpus row whose expectation is 200.
+app_id: owasp-corpus-runner
+version: corpus-conformance-1
+model: pilot-local
+token_budget: 512
+deny_phrases:
+  - synthetic denied phrase
