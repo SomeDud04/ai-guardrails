@@ -402,6 +402,78 @@ never asserted as throughput thresholds.  The result is metadata-only and says
 nothing about true throughput, provider quota or multi-user capacity.  It is
 evidence for concurrency framing item 2 only, not a substitute for item 3.
 
+## Guard-lane dataset
+
+The guard lane consumes a separate, input-only dataset derived from the frozen
+corpus:
+
+```text
+.\.venv\Scripts\python.exe -m nasi_lemak.guard_eval --dataset evals\guards\owasp-llm-top10-2026-v1.json
+```
+
+The command is a **dry run** by default: it parses and validates the whole
+dataset, prints the plan, sends no request and exits `0`.  Only an explicit live
+run against a guard endpoint sends the cases.  The dataset declares itself
+`agent-authored-synthetic-smoke-not-holdout`, and every case's `messages` is
+exactly equal to its corpus row's `messages`; no row is trimmed, split, reworded
+or reordered to fit a limit.
+
+The dataset holds **39 cases**:
+
+- **22 attack rows** with `expected: "block"`, all corpus `input_attack_guard`
+  rows.  The guard-lane detection rate is measured over these 22.
+- **17 benign controls** with `expected: "allow"`, corpus `false-positive-control`
+  rows.  The false-positive rate is measured over these 17.
+
+The exclusions ledger sits beside the dataset at
+`evals/guards/owasp-llm-top10-2026-v1.exclusions.json` and accounts for all
+**128** corpus rows exactly once, by corpus id:
+
+| Disposition | Rows |
+|---|---|
+| Kept in the dataset | 39 |
+| `harness-bound` (CTRL-007) | 1 |
+| `output-stage` | 23 |
+| `boundary` | 19 |
+| `known-gap` | 18 |
+| `not-guard-control` | 15 |
+| `not-applicable` | 11 |
+| `fixture-marker` | 2 |
+
+`39 + 1 + 23 + 19 + 18 + 15 + 11 + 2 = 128`.  The single `harness-bound` row is
+CTRL-007: its message is 1439 characters and 1449 conservative units, which
+exceeds the evaluation dataset's 1024-character per-message bound **and** the
+guard's single-call 512-unit input window.  That is a harness limit, not a guard
+decision and not a detection result.
+
+Language is assigned by the same deterministic rule used by the conformance
+runner: any Han character means `zh`, otherwise any fullwidth character means
+`mixed`, otherwise `en`.  The distribution is **36 `en`, 2 `zh`, 1 `mixed`** and
+no `bm`.
+
+### Honest limits of the guard-lane dataset
+
+- **The 17-case false-positive sample is by construction, not an observed
+  result.**  CTRL-007 is excluded because the harness cannot represent or screen
+  it, **not** because any guard judged it.  No guard decision produced the
+  denominator.
+- **17 benign controls is a thin false-positive sample.**  Its false-positive
+  rate carries a wide uncertainty and must never be quoted as a precise
+  population estimate.
+- **There is no output-stage measurement.**  No corpus row provides an output
+  fixture that this harness can screen, so the `output-stage` rows are excluded
+  and nothing about output guards is measured.
+- **There is no BM coverage in the corpus.**  This dataset therefore cannot
+  measure BM efficacy at all; the 2 `zh` rows are not BM coverage either.
+- **A pass on any row is one observation** against one classifier at one
+  threshold, not evidence of classifier quality, precision, recall or latency.
+- **Named follow-up, owned by the local-adapter work.**  If the on-premise guard
+  screens long inputs in deterministic overlapping windows rather than one call,
+  CTRL-007 becomes screenable.  It must then be re-added as a windowed fixture,
+  and both this harness's single-call window model and the dataset's
+  1024-character per-message bound have to be revisited.  This remains an open
+  item, not a resolved limitation.
+
 ## Concurrency framing
 
 Three different questions are often conflated under "concurrency". They have

@@ -1198,6 +1198,225 @@ class ConformanceRunnerTests(unittest.TestCase):
         )
 
 
+GUARD_DATASET = ROOT / "evals" / "guards" / "owasp-llm-top10-2026-v1.json"
+GUARD_LEDGER = ROOT / "evals" / "guards" / "owasp-llm-top10-2026-v1.exclusions.json"
+GUARD_DATASET_ID = "owasp-llm-top10-2026-guard-lane-v1"
+GUARD_EVIDENCE_LABEL = "agent-authored-synthetic-smoke-not-holdout"
+GUARD_CASE_FIELDS = {"id", "stage", "language", "expected", "messages"}
+GUARD_LEDGER_COUNTS = {
+    "output-stage": 23,
+    "boundary": 19,
+    "known-gap": 18,
+    "not-guard-control": 15,
+    "not-applicable": 11,
+    "fixture-marker": 2,
+    "harness-bound": 1,
+}
+HAN = re.compile(r"[\u4e00-\u9fff]")
+FULLWIDTH = re.compile(r"[\uff01-\uff5e]")
+
+
+def load_guard_dataset():
+    return json.loads(GUARD_DATASET.read_text(encoding="utf-8"))
+
+
+def load_guard_ledger():
+    return json.loads(GUARD_LEDGER.read_text(encoding="utf-8"))
+
+
+def guard_language(record):
+    """The documented deterministic rule: Han -> zh, fullwidth -> mixed, else en."""
+    text = "\n".join(message["content"] for message in record["messages"])
+    if HAN.search(text):
+        return "zh"
+    if FULLWIDTH.search(text):
+        return "mixed"
+    return "en"
+
+
+class GuardLaneDatasetTests(unittest.TestCase):
+    """Fidelity and accounting for the guard-lane dataset and its sidecar.
+
+    These tests deliberately never call ``nasi_lemak.guard_eval.load_dataset``:
+    the dataset must be checked against the frozen corpus first, independently of
+    loader acceptance. CTRL-007 is excluded: its one message is 1439 characters
+    and 1449 conservative units, over both the dataset's 1024-character
+    per-message bound and the guard's 512-unit single-call window. The exclusion
+    is recorded in the sidecar with both reasons; it is a harness bound, not a
+    guard decision or a detection result.
+    """
+
+    @classmethod
+    def setUpClass(cls):
+        cls.dataset = load_guard_dataset()
+        cls.ledger = load_guard_ledger()
+        cls.records = {record["id"]: record for record in load_records()}
+
+    def test_dataset_has_the_strict_version_1_shape(self):
+        self.assertEqual(
+            set(self.dataset), {"schema_version", "dataset_id", "evidence_label", "cases"}
+        )
+        self.assertEqual(self.dataset["schema_version"], 1)
+        self.assertIs(type(self.dataset["schema_version"]), int)
+        self.assertEqual(self.dataset["dataset_id"], GUARD_DATASET_ID)
+        self.assertEqual(self.dataset["evidence_label"], GUARD_EVIDENCE_LABEL)
+        self.assertIn("synthetic", self.dataset["evidence_label"])
+        self.assertIn("not-holdout", self.dataset["evidence_label"])
+
+        cases = self.dataset["cases"]
+        self.assertEqual(len(cases), 39)
+        ids = [case["id"] for case in cases]
+        self.assertEqual(len(ids), len(set(ids)), "duplicate case id")
+        self.assertTrue(set(ids) <= {identifier.lower() for identifier in self.records})
+        self.assertEqual(len(self.records), EXPECTED_TOTAL)
+        for case in cases:
+            with self.subTest(case=case.get("id")):
+                self.assertEqual(set(case), GUARD_CASE_FIELDS)
+                self.assertEqual(case["stage"], "input")
+                self.assertIn(case["expected"], {"allow", "block"})
+                self.assertIn(case["language"], {"en", "bm", "zh", "mixed"})
+                self.assertIsInstance(case["messages"], list)
+                self.assertTrue(case["messages"])
+                for message in case["messages"]:
+                    self.assertEqual(set(message), {"role", "content"})
+                    self.assertIn(message["role"], {"system", "user", "assistant"})
+                    self.assertIsInstance(message["content"], str)
+                    self.assertTrue(message["content"])
+
+    def test_every_case_messages_equal_the_frozen_corpus_row_exactly(self):
+        """Regression: roles, content, boundaries, order and Unicode are verbatim."""
+        for case in self.dataset["cases"]:
+            record = self.records[case["id"].upper()]
+            with self.subTest(case=case["id"]):
+                self.assertEqual(case["messages"], record["messages"])
+                self.assertEqual(len(case["messages"]), len(record["messages"]))
+                for observed, expected in zip(case["messages"], record["messages"]):
+                    self.assertEqual(observed["role"], expected["role"])
+                    self.assertEqual(observed["content"], expected["content"])
+
+    def test_composition_maps_attacks_and_benign_controls(self):
+        blocks = [case for case in self.dataset["cases"] if case["expected"] == "block"]
+        allows = [case for case in self.dataset["cases"] if case["expected"] == "allow"]
+        self.assertEqual(len(blocks), 22)
+        self.assertEqual(len(allows), 17)
+        for case in blocks:
+            record = self.records[case["id"].upper()]
+            with self.subTest(case=case["id"]):
+                self.assertEqual(record["guard_expect"], "should_block")
+                self.assertEqual(record["control"], "input_attack_guard")
+                self.assertEqual(record["coverage"], "direct")
+                self.assertEqual(record["expect_status"], 403)
+                self.assertEqual(record["expect_code"], "POLICY_BLOCK")
+        for case in allows:
+            record = self.records[case["id"].upper()]
+            with self.subTest(case=case["id"]):
+                self.assertEqual(record["guard_expect"], "should_allow")
+                self.assertEqual(record["control"], "false-positive-control")
+                self.assertEqual(record["coverage"], "benign-control")
+                self.assertEqual(record["expect_status"], 200)
+                self.assertIsNone(record["expect_code"])
+
+    def test_no_output_case_or_output_control_is_relabelled_as_input(self):
+        for case in self.dataset["cases"]:
+            record = self.records[case["id"].upper()]
+            with self.subTest(case=case["id"]):
+                self.assertNotIn("output", case)
+                self.assertFalse(record["control"].startswith("output_guard"))
+
+    def test_language_assignment_follows_the_documented_rule(self):
+        for case in self.dataset["cases"]:
+            record = self.records[case["id"].upper()]
+            with self.subTest(case=case["id"]):
+                self.assertEqual(case["language"], guard_language(record))
+        counts = Counter(case["language"] for case in self.dataset["cases"])
+        self.assertEqual(counts, {"en": 36, "zh": 2, "mixed": 1})
+        self.assertNotIn("bm", counts)
+        self.assertEqual(
+            {case["id"] for case in self.dataset["cases"] if case["language"] == "zh"},
+            {"ctrl-006", "llm01-008"},
+        )
+        self.assertEqual(
+            {case["id"] for case in self.dataset["cases"] if case["language"] == "mixed"},
+            {"llm01-006"},
+        )
+
+    def test_ctrl_007_is_excluded_from_the_dataset_with_both_bounds_recorded(self):
+        """Exclusion is a harness bound, not a guard decision or detection result.
+
+        The one corpus message is 1439 characters and 1449 conservative units: it
+        exceeds the dataset's 1024-character per-message bound *and* the guard's
+        512-unit single-call window. It must be absent from the cases and present
+        once in the ledger, in its own class, with both reasons.
+        """
+        record = self.records["CTRL-007"]
+        self.assertEqual(len(record["messages"]), 1)
+        self.assertEqual(len(record["messages"][0]["content"]), 1439)
+        self.assertNotIn("ctrl-007", {case["id"] for case in self.dataset["cases"]})
+        entries = [
+            entry
+            for entry in self.ledger["classes"]
+            if "CTRL-007" in entry["corpus_ids"]
+        ]
+        self.assertEqual(len(entries), 1)
+        entry = entries[0]
+        self.assertEqual(entry["class"], "harness-bound")
+        self.assertEqual(entry["count"], 1)
+        self.assertEqual(entry["corpus_ids"], ["CTRL-007"])
+        reason = entry["reason"]
+        self.assertIn("1024-character", reason)
+        self.assertIn("512-unit", reason)
+        self.assertIn("not a guard decision", reason)
+        self.assertIn("not a detection result", reason)
+
+    def test_exclusion_ledger_accounts_for_all_128_corpus_ids_once(self):
+        ledger = self.ledger
+        self.assertEqual(ledger["schema_version"], 1)
+        self.assertEqual(ledger["dataset_id"], GUARD_DATASET_ID)
+        self.assertEqual(ledger["corpus_rows"], 128)
+        self.assertEqual(ledger["kept"], 39)
+        self.assertEqual(ledger["excluded"], 89)
+        self.assertEqual(len(ledger["kept_ids"]), 39)
+        self.assertEqual(len(set(ledger["kept_ids"])), 39)
+
+        classes = {entry["class"]: entry for entry in ledger["classes"]}
+        self.assertEqual(set(classes), set(GUARD_LEDGER_COUNTS))
+        self.assertEqual(len(ledger["classes"]), len(classes))
+        seen = list(ledger["kept_ids"])
+        for name, expected in GUARD_LEDGER_COUNTS.items():
+            entry = classes[name]
+            with self.subTest(exclusion=name):
+                self.assertEqual(entry["count"], expected)
+                self.assertEqual(len(entry["corpus_ids"]), expected)
+                self.assertTrue(entry["label"].strip())
+                self.assertTrue(entry["reason"].strip())
+                seen.extend(entry["corpus_ids"])
+        self.assertEqual(len(seen), 128)
+        self.assertEqual(len(set(seen)), 128, "an id is accounted for twice")
+        self.assertEqual(set(seen), set(self.records))
+        self.assertEqual(sum(GUARD_LEDGER_COUNTS.values()), 89)
+        self.assertEqual(39 + sum(GUARD_LEDGER_COUNTS.values()), EXPECTED_TOTAL)
+
+    def test_dataset_ids_are_exactly_the_kept_ids_and_never_excluded(self):
+        case_ids = [case["id"].upper() for case in self.dataset["cases"]]
+        self.assertEqual(case_ids, self.ledger["kept_ids"])
+        excluded = {
+            identifier
+            for entry in self.ledger["classes"]
+            for identifier in entry["corpus_ids"]
+        }
+        self.assertFalse(set(case_ids) & excluded)
+        self.assertEqual(set(case_ids) | excluded, set(self.records))
+
+    def test_every_kept_row_is_an_input_guard_control_kept_for_a_reason(self):
+        for case in self.dataset["cases"]:
+            record = self.records[case["id"].upper()]
+            with self.subTest(case=case["id"]):
+                self.assertIn(
+                    record["control"],
+                    {"input_attack_guard", "false-positive-control"},
+                )
+
+
 class LocalCapacityHarnessTests(unittest.TestCase):
     @classmethod
     def setUpClass(cls):
