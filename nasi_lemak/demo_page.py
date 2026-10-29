@@ -1015,7 +1015,7 @@ DEMO_HTML = f"""<!doctype html>
 </div>
 <details class="disclosure">
 <summary>What is checked today?</summary>
-<p>Deterministic policy and PII masking run in the gateway where configured; a model guard is not active in this test deployment. Model-guard adapters and deployment settings are managed outside this console, and this page does not receive per-request verdicts, confidence or accuracy results. Treat answers as synthetic test output.</p>
+<p>When the gateway runs in guarded mode with configured guard adapters, model-based input and output checks run inside the gateway before anything is released; deterministic policy and PII masking run where configured. This console does not receive per-request guard verdicts, confidence or accuracy, so it cannot show them. Treat answers as synthetic test output.</p>
 </details>
 </div>
 <div class="exchange" id="exchange" hidden>

@@ -55,11 +55,18 @@ USER 10001:10001
 # only for the pip install; the final guard runtime stage drops to 10001 again.
 # No model is downloaded: these are Python packages only, and the offline flags
 # above keep Transformers/Hugging Face from resolving a Hub model.
+#
+# torch is installed FIRST from the official CPU-only wheel index.  The default
+# PyPI Linux wheel for the pinned version is the ~2.5 GB CUDA build, which is
+# useless on this CPU-only guard VM.  The extra is installed afterwards from
+# the default index so its exact pins (transformers, jinja2) are unchanged.
 FROM base AS guards-deps
 
 USER root
 
-RUN python -m pip install --no-cache-dir --no-compile ".[guards]"
+RUN python -m pip install --no-cache-dir --no-compile \
+        torch==2.14.1 --index-url https://download.pytorch.org/whl/cpu && \
+    python -m pip install --no-cache-dir --no-compile ".[guards]"
 
 FROM guards-deps AS guards
 

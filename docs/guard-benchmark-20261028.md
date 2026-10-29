@@ -416,3 +416,13 @@ detection quality, adversarial robustness, availability, throughput, memory
 safety under concurrency, or that a smaller local model can replace the deployed
 Llama Guard 3 8B. They establish one thing: how long one local CPU guard call
 takes, how much memory the artifact needs, and whether its verdict parses.
+
+## Deployment switch
+
+The operator runbook for moving the deployed gateway from the hosted API guard
+lane to the local `qwen3guard-gen-0.6b` bundle is
+[docs/local-guards-switch.md](local-guards-switch.md). It covers the VM checkout
+state, the archive-before-pull step, the exact Compose `-f`/env set, the
+verification ladder, the demo/admin notice and the rollback. A successful switch
+is composition and startup evidence only; the measurement above remains a
+separate operator result.

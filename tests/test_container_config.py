@@ -35,6 +35,7 @@ BASE_ENV_KEYS = {
     "NASI_LEMAK_GENERATION_MODEL",
     "NASI_LEMAK_GENERATION_AUTH",
     "NASI_LEMAK_GENERATION_ALLOW_INSECURE_HTTP",
+    "NASI_LEMAK_GENERATION_API_KEY",
     "NASI_LEMAK_CHAT_CONTEXT_MESSAGES",
     "NASI_LEMAK_CHAT_CONTEXT_BUDGET",
     "NASI_LEMAK_CHAT_DEFAULT_REPLY_TOKENS",
@@ -49,11 +50,16 @@ CHAT_LIMIT_ENV_KEYS = {
 }
 
 OVERLAY_ENV_KEYS = {
+    "NASI_LEMAK_MODE",
+    "NASI_LEMAK_ALLOW_UNGUARDED_TEST",
+    "NASI_LEMAK_GUARD_BACKEND",
     "NASI_LEMAK_POLICY_FILE",
-    "NASI_LEMAK_PROMPT_GUARD_MODEL_DIR",
-    "NASI_LEMAK_LLAMA_GUARD_MODEL_DIR",
-    "NASI_LEMAK_PROMPT_GUARD_THRESHOLD",
-    "NASI_LEMAK_LLAMA_GUARD_CONTEXT_LIMIT",
+    "NASI_LEMAK_QWEN3GUARD_MODEL_DIR",
+    "NASI_LEMAK_QWEN3GUARD_INPUT_THRESHOLD",
+    "NASI_LEMAK_QWEN3GUARD_OUTPUT_THRESHOLD",
+    "NASI_LEMAK_QWEN3GUARD_WORKERS",
+    "NASI_LEMAK_QWEN3GUARD_THREADS",
+    "NASI_LEMAK_QWEN3GUARD_LONG_INPUT",
     "NASI_LEMAK_OPERATOR_KEY_DIGEST_FILE",
     "NASI_LEMAK_OPERATOR_AUDIT_DSN_FILE",
     "HF_HUB_OFFLINE",
@@ -63,8 +69,7 @@ OVERLAY_ENV_KEYS = {
 
 EXPECTED_TARGETS = {
     "/run/pilot/policy/policy.yaml": "NASI_LEMAK_POLICY_FILE",
-    "/models/prompt-guard-2": "NASI_LEMAK_PROMPT_GUARD_MODEL_DIR",
-    "/models/llama-guard-3": "NASI_LEMAK_LLAMA_GUARD_MODEL_DIR",
+    "/models/qwen3guard-gen-0.6b": "NASI_LEMAK_QWEN3GUARD_MODEL_DIR",
 }
 
 _STAGE_RE = re.compile(r"^\s*FROM\s+(\S+)\s+AS\s+(\S+)\s*$", re.IGNORECASE)
@@ -166,6 +171,11 @@ class ComposeConfigTests(unittest.TestCase):
             gateway_env["NASI_LEMAK_GENERATION_URL"],
             "${NASI_LEMAK_GENERATION_URL:-}",
         )
+        # The bearer key is a bare pass-through: forwarded only when the
+        # operator defines it in the git-ignored base env file.
+        self.assertEqual(gateway_env["NASI_LEMAK_GENERATION_API_KEY"], "")
+        self.assertIn("- NASI_LEMAK_GENERATION_API_KEY\n", self.base_text)
+        self.assertNotIn("NASI_LEMAK_GENERATION_API_KEY=", self.base_text)
 
         db = self.base["services"]["db"]
         self.assertNotIn("ports", db)
@@ -203,8 +213,9 @@ class ComposeConfigTests(unittest.TestCase):
         gateway = self.pilot["services"]["gateway"]
         self.assertEqual(gateway["build"]["target"], "guards")
         self.assertNotEqual(gateway["image"], self.base["services"]["gateway"]["image"])
-        self.assertEqual(set(gateway["environment"]), OVERLAY_ENV_KEYS)
-        self.assertFalse(set(gateway["environment"]) & BASE_ENV_KEYS)
+        env = _environment_map(gateway["environment"])
+        self.assertEqual(set(env), OVERLAY_ENV_KEYS)
+        self.assertFalse(set(env) & BASE_ENV_KEYS)
         # The overlay must not reset the inherited non-root/read-only posture.
         for key in ("read_only", "user", "cap_drop", "security_opt", "ports", "networks"):
             with self.subTest(key=key):
@@ -212,6 +223,7 @@ class ComposeConfigTests(unittest.TestCase):
 
     def test_overlay_mount_targets_match_runtime_variables(self):
         gateway = self.pilot["services"]["gateway"]
+        env = _environment_map(gateway["environment"])
         volumes = gateway["volumes"]
         self.assertEqual(len(volumes), len(EXPECTED_TARGETS))
         by_target = {volume["target"]: volume for volume in volumes}
@@ -224,33 +236,61 @@ class ComposeConfigTests(unittest.TestCase):
                 self.assertIs(volume["bind"]["create_host_path"], False)
                 self.assertIn(":?", volume["source"])
                 self.assertTrue(volume["source"].startswith("${"))
-                self.assertEqual(gateway["environment"][env_name], target)
+                self.assertEqual(env[env_name], target)
 
     def test_overlay_guard_threshold_and_context_are_explicit(self):
-        env = self.pilot["services"]["gateway"]["environment"]
-        self.assertEqual(
-            env["NASI_LEMAK_PROMPT_GUARD_THRESHOLD"],
-            "${NASI_LEMAK_PROMPT_GUARD_THRESHOLD:-0.5}",
-        )
-        self.assertEqual(
-            env["NASI_LEMAK_LLAMA_GUARD_CONTEXT_LIMIT"],
-            "${NASI_LEMAK_LLAMA_GUARD_CONTEXT_LIMIT:-4096}",
-        )
+        env = _environment_map(self.pilot["services"]["gateway"]["environment"])
+        self.assertEqual(env["NASI_LEMAK_MODE"], "guarded")
+        self.assertEqual(env["NASI_LEMAK_ALLOW_UNGUARDED_TEST"], "false")
+        self.assertEqual(env["NASI_LEMAK_GUARD_BACKEND"], "qwen3guard-local")
+        # Optional local settings are bare pass-throughs; unset keeps the
+        # validated application defaults.  None is defaulted or invented here.
+        for name in (
+            "NASI_LEMAK_QWEN3GUARD_INPUT_THRESHOLD",
+            "NASI_LEMAK_QWEN3GUARD_OUTPUT_THRESHOLD",
+            "NASI_LEMAK_QWEN3GUARD_WORKERS",
+            "NASI_LEMAK_QWEN3GUARD_THREADS",
+            "NASI_LEMAK_QWEN3GUARD_LONG_INPUT",
+        ):
+            with self.subTest(name=name):
+                self.assertEqual(env[name], "")
+                self.assertIn(f"- {name}\n", self.pilot_text)
+                self.assertNotIn(f"{name}=", self.pilot_text)
         self.assertNotIn("NASI_LEMAK_GENERATION_MODEL", env)
         for flag in ("HF_HUB_OFFLINE", "TRANSFORMERS_OFFLINE", "HF_DATASETS_OFFLINE"):
             self.assertEqual(env[flag], "1")
 
+    def test_overlay_is_local_only_and_has_no_hosted_api_guard_entries(self):
+        env = _environment_map(self.pilot["services"]["gateway"]["environment"])
+        hosted_prefixes = (
+            "NASI_LEMAK_INPUT_GUARD_",
+            "NASI_LEMAK_OUTPUT_GUARD_",
+        )
+        for name in env:
+            with self.subTest(name=name):
+                self.assertFalse(name.startswith(hosted_prefixes))
+        gateway = self.pilot["services"]["gateway"]
+        self.assertFalse(
+            {name for name in gateway["secrets"] if name.endswith("_guard_key")}
+        )
+        # The rule itself must be stated in the file, not only enforced by the
+        # missing entries: the two verticals must never merge into one
+        # half-configured container.
+        self.assertIn("must be ABSENT", self.pilot_text)
+        self.assertIn("compose.api.yaml", self.pilot_text)
+
     def test_overlay_operator_secrets_are_distinct_and_file_backed(self):
         gateway = self.pilot["services"]["gateway"]
+        env = _environment_map(gateway["environment"])
         expected = {"operator_key_digest", "operator_audit_dsn"}
         self.assertEqual(set(gateway["secrets"]), expected)
         self.assertFalse(expected & set(self.base["secrets"]))
         self.assertEqual(
-            gateway["environment"]["NASI_LEMAK_OPERATOR_KEY_DIGEST_FILE"],
+            env["NASI_LEMAK_OPERATOR_KEY_DIGEST_FILE"],
             "/run/secrets/operator_key_digest",
         )
         self.assertEqual(
-            gateway["environment"]["NASI_LEMAK_OPERATOR_AUDIT_DSN_FILE"],
+            env["NASI_LEMAK_OPERATOR_AUDIT_DSN_FILE"],
             "/run/secrets/operator_audit_dsn",
         )
         self.assertEqual(set(self.pilot["secrets"]), expected)
@@ -312,9 +352,12 @@ class ComposeConfigTests(unittest.TestCase):
                     self.assertNotRegex(value, _HEX_DIGEST_RE)
                     self.assertNotIn("postgresql://", value)
                     self.assertNotIn("BEGIN PRIVATE KEY", value)
-        # Generation credentials stay file/secret-manager owned; only the
-        # non-secret transport settings appear in the base environment.
-        self.assertNotIn("NASI_LEMAK_GENERATION_API_KEY", self.base_text)
+        # Generation credentials stay file/secret-manager owned.  The base file
+        # carries only a bare pass-through name for the bearer key -- never a
+        # default, a value or a file path -- and the local overlay carries no
+        # generation credential at all.
+        self.assertIn("- NASI_LEMAK_GENERATION_API_KEY\n", self.base_text)
+        self.assertNotIn("NASI_LEMAK_GENERATION_API_KEY=", self.base_text)
         self.assertNotIn("NASI_LEMAK_GENERATION_API_KEY", self.pilot_text)
 
 

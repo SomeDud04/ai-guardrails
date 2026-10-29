@@ -1,10 +1,11 @@
-# Optional guard-enabled pilot overlay for compose.yaml.
+# Optional LOCAL guard overlay for compose.yaml (Qwen3Guard-Gen, in-process).
 #
 # This file is inert configuration scaffolding, not runtime proof.  It selects
-# the opt-in ``guards`` Dockerfile target and mounts one operator-approved
-# policy file plus two operator-supplied local model directories read-only.
-# No model ID is invented, no model or license is supplied, and no image is
-# built, started or benchmarked by this file.
+# the opt-in ``guards`` Dockerfile target, sets guarded mode explicitly, selects
+# ``NASI_LEMAK_GUARD_BACKEND=qwen3guard-local``, and mounts one operator-approved
+# policy file plus the local Qwen3Guard-Gen directory read-only.  No model ID is
+# invented, no model or license is supplied, and no image is built, started or
+# benchmarked by this file.
 #
 # Always apply it ON TOP of the default stack (never alone):
 #
@@ -13,8 +14,16 @@
 #     --env-file .secrets/compose.pilot.env \
 #     -f compose.yaml -f compose.pilot.yaml config
 #
-# See docs/compose.pilot.env.example.  Start the base PostgreSQL service first
-# (before any heavy guard build), bootstrap roles, then start this profile.
+# See docs/compose.pilot.env.example and docs/local-guards-switch.md.
+#
+# TWO VERTICALS, NEVER ONE MIXED CONTAINER.  In this local-guard composition the
+# hosted API guard settings from compose.api.yaml -- every
+# NASI_LEMAK_INPUT_GUARD_* and NASI_LEMAK_OUTPUT_GUARD_* entry, their
+# *_API_KEY_FILE secrets, and compose.api-ca.yaml -- must be ABSENT, not empty.
+# Do not combine this file with compose.api.yaml, compose.api-ca.yaml or the
+# hosted-guard env file.  An empty hosted URL/model is still a half-configured
+# hosted lane, and this backend never falls back to it.  Conversely, the hosted
+# composition must not carry the QWEN3GUARD_* entries below.
 #
 # Bind mounts use the long syntax with ``create_host_path: false``: a missing
 # host policy/model path aborts the start instead of silently creating an empty
@@ -25,7 +34,8 @@
 # filesystem, dropped capabilities, no-new-privileges, localhost-only published
 # port and private database network.  Local Compose file secrets are host files
 # and must be readable by UID 10001; this file does not claim that Compose
-# uid/gid/mode remapping works for them.
+# uid/gid/mode remapping works for them.  Nothing is downloaded at build or
+# start: the model bundle must already be complete on the host.
 
 services:
   gateway:
@@ -36,23 +46,35 @@ services:
       target: guards
     image: nasi-lemak-gateway:0.1.0-pilot
     environment:
+      # Explicit guarded mode.  The test acknowledgement must stay false: this
+      # is not test mode and there is no unguarded fallback.
+      - NASI_LEMAK_MODE=guarded
+      - NASI_LEMAK_ALLOW_UNGUARDED_TEST=false
+      # The local Qwen3Guard-Gen transport, selected explicitly.  The backend
+      # name is never inferred from a directory or URL.
+      - NASI_LEMAK_GUARD_BACKEND=qwen3guard-local
       # Container paths must match the read-only bind targets below.
-      NASI_LEMAK_POLICY_FILE: /run/pilot/policy/policy.yaml
-      NASI_LEMAK_PROMPT_GUARD_MODEL_DIR: /models/prompt-guard-2
-      NASI_LEMAK_LLAMA_GUARD_MODEL_DIR: /models/llama-guard-3
-      # Explicit provisional settings.  The threshold is uncalibrated and the
-      # context budget must be reviewed against the actual approved artifact;
-      # neither value is benchmark evidence.
-      NASI_LEMAK_PROMPT_GUARD_THRESHOLD: ${NASI_LEMAK_PROMPT_GUARD_THRESHOLD:-0.5}
-      NASI_LEMAK_LLAMA_GUARD_CONTEXT_LIMIT: ${NASI_LEMAK_LLAMA_GUARD_CONTEXT_LIMIT:-4096}
+      - NASI_LEMAK_POLICY_FILE=/run/pilot/policy/policy.yaml
+      - NASI_LEMAK_QWEN3GUARD_MODEL_DIR=/models/qwen3guard-gen-0.6b
+      # Optional, independent validated settings.  Bare pass-through entries:
+      # no default is hardcoded here, so an unset value keeps the documented
+      # application default from docs/guards.md.  The threshold range, worker
+      # and thread bounds (workers * threads <= cpu_count) and the long-input
+      # range are all validated before any loader runs.  A bad value leaves the
+      # app unready (generic 503) rather than selecting a laxer lane.
+      - NASI_LEMAK_QWEN3GUARD_INPUT_THRESHOLD
+      - NASI_LEMAK_QWEN3GUARD_OUTPUT_THRESHOLD
+      - NASI_LEMAK_QWEN3GUARD_WORKERS
+      - NASI_LEMAK_QWEN3GUARD_THREADS
+      - NASI_LEMAK_QWEN3GUARD_LONG_INPUT
       # Distinct operator credentials.  The runtime writer keeps the base
       # file's existing NASI_LEMAK_AUDIT_DSN_FILE/audit_dsn secret.
-      NASI_LEMAK_OPERATOR_KEY_DIGEST_FILE: /run/secrets/operator_key_digest
-      NASI_LEMAK_OPERATOR_AUDIT_DSN_FILE: /run/secrets/operator_audit_dsn
+      - NASI_LEMAK_OPERATOR_KEY_DIGEST_FILE=/run/secrets/operator_key_digest
+      - NASI_LEMAK_OPERATOR_AUDIT_DSN_FILE=/run/secrets/operator_audit_dsn
       # Never resolve or download model weights at runtime.
-      HF_HUB_OFFLINE: "1"
-      TRANSFORMERS_OFFLINE: "1"
-      HF_DATASETS_OFFLINE: "1"
+      - HF_HUB_OFFLINE=1
+      - TRANSFORMERS_OFFLINE=1
+      - HF_DATASETS_OFFLINE=1
     volumes:
       - type: bind
         source: ${PILOT_POLICY_FILE:?Set PILOT_POLICY_FILE to an approved policy-file path}
@@ -61,14 +83,8 @@ services:
         bind:
           create_host_path: false
       - type: bind
-        source: ${PILOT_PROMPT_GUARD_MODEL_DIR:?Set PILOT_PROMPT_GUARD_MODEL_DIR to a local Prompt Guard 2 directory}
-        target: /models/prompt-guard-2
-        read_only: true
-        bind:
-          create_host_path: false
-      - type: bind
-        source: ${PILOT_LLAMA_GUARD_MODEL_DIR:?Set PILOT_LLAMA_GUARD_MODEL_DIR to a local Llama Guard 3 directory}
-        target: /models/llama-guard-3
+        source: ${PILOT_QWEN_GUARD_MODEL_DIR:?Set PILOT_QWEN_GUARD_MODEL_DIR to a local Qwen3Guard-Gen directory}
+        target: /models/qwen3guard-gen-0.6b
         read_only: true
         bind:
           create_host_path: false

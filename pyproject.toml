@@ -29,14 +29,20 @@ test = [
     "pyyaml==6.0.3",
     "cryptography==50.0.2",
 ]
-# Optional local guard inference (Meta Prompt Guard 2 and Meta Llama Guard 3).
-# Both exact versions were verified as existing on the official PyPI metadata at
-# documentation time; they were NOT installed, downloaded or compatibility
-# tested in this workspace. The core package and the default test suite import
-# and run without this extra, and guards fail closed when it is absent.
+# Optional local guard inference (Meta Prompt Guard 2, Meta Llama Guard 3 and
+# local Qwen3Guard-Gen).  torch is installed from the CPU-only wheel index in
+# the Dockerfile's guards stage; the pin here is the same exact version.
+# transformers 5.x no longer pulls jinja2, and the local Meta adapters build
+# their prompts through apply_chat_template, so the template engine is part of
+# this extra rather than an image-only afterthought.  The exact versions were
+# verified as existing on the official PyPI metadata at documentation time;
+# they were NOT installed, downloaded or compatibility tested in this
+# workspace.  The core package and the default test suite import and run
+# without this extra, and guards fail closed when it is absent.
 guards = [
     "torch==2.14.1",
     "transformers==5.20.1",
+    "jinja2==3.1.6",
 ]
 
 # The repository is flat (docs, scripts, tests and the package share one root),
