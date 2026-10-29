@@ -392,6 +392,7 @@ class _FakeCausalTokenizer:
     def __init__(self) -> None:
         self.eos_token_id = 7
         self.pad_token_id = 7
+        self.template_calls: list[tuple[list[dict[str, str]], bool, bool]] = []
         self._vocab: dict[str, int] = {}
         self._reverse: dict[int, str] = {}
         self._outputs: dict[int, str] = {}
@@ -427,6 +428,13 @@ class _FakeCausalTokenizer:
         tokenize: bool = False,
         add_generation_prompt: bool = True,
     ) -> str:
+        self.template_calls.append(
+            (
+                [dict(message) for message in conversation],
+                tokenize,
+                add_generation_prompt,
+            )
+        )
         return "".join(
             f"{message['role']}: {message['content']}\n" for message in conversation
         )
@@ -543,6 +551,52 @@ class CausalRunnerLaneTests(unittest.TestCase):
         self.assertEqual(
             runner.model.calls, bench.CALLS_PER_BUCKET + bench.WARMUP_CALLS
         )
+
+    def test_benchmark_uses_the_same_template_helper_as_the_product(self) -> None:
+        # One delivery, both consumers: the benchmark must not carry a private
+        # copy that can drift from the deployed lane.
+        self.assertIs(bench.render_guard_prompt, qwen3guard.render_guard_prompt)
+
+    def test_input_bucket_builds_system_and_user_messages(self) -> None:
+        runner = causal_runner(self.TWO_LINE_INPUT)
+        bench._measure_bucket(runner, slot="input", language="en", characters=200)
+        serialized = bench.case_payload("input", "en", 200)[0]
+        shaped = [
+            call
+            for call in runner.tokenizer.template_calls
+            if len(call[0]) == 2 and call[0][1]["content"] == serialized
+        ]
+        self.assertEqual(len(shaped), 1)
+        messages, tokenize, add_generation_prompt = shaped[0]
+        self.assertEqual(
+            messages[0], {"role": "system", "content": bench.PROMPT_FRAMING}
+        )
+        self.assertEqual(messages[1], {"role": "user", "content": serialized})
+        self.assertFalse(tokenize)
+        self.assertTrue(add_generation_prompt)
+
+    def test_output_bucket_builds_system_user_and_assistant_messages(self) -> None:
+        runner = causal_runner(self.THREE_LINE_RESPONSE)
+        bench._measure_bucket(runner, slot="output", language="en", characters=200)
+        serialized = bench.case_payload("output", "en", 200)[0]
+        reply = serialized[len(bench.OUTPUT_PREFIX) :]
+        shaped = [
+            call
+            for call in runner.tokenizer.template_calls
+            if len(call[0]) == 3 and call[0][2]["content"] == reply
+        ]
+        self.assertEqual(len(shaped), 1)
+        messages, tokenize, add_generation_prompt = shaped[0]
+        self.assertEqual(
+            messages,
+            [
+                {"role": "system", "content": bench.PROMPT_FRAMING},
+                {"role": "user", "content": bench.OUTPUT_CONTEXT},
+                {"role": "assistant", "content": reply},
+            ],
+        )
+        self.assertFalse(tokenize)
+        self.assertTrue(add_generation_prompt)
 
     def test_output_slot_parses_the_three_line_response_verdict(self) -> None:
         # The bug this catches: passing slot="output" as the parser lane.

@@ -145,6 +145,15 @@ unknown label and fails closed. One adapter serves the tokenizer slot, the
 input attack slot and the output slot; `scan_attack` compares the verdict with
 the input threshold and `scan_response` with the output threshold.
 
+Prompts are delivered through the artifact's own chat template, not a plain
+framing concatenation: the input lane sends `system: GUARD_FRAMING` plus
+`user: <serialized>`, and the output lane appends the buffered reply as the
+`assistant` turn. One shared helper (`render_guard_prompt`) applies
+`tokenizer.apply_chat_template(tokenize=False, add_generation_prompt=True)` for
+both the product and the benchmark, so the measured delivery cannot drift from
+the deployed one. A missing or failing template is a `GuardError` (fail closed);
+there is no plain-text fallback.
+
 Select it explicitly with `NASI_LEMAK_GUARD_BACKEND=qwen3guard-local`. The
 backend name is never inferred from a URL, a model directory or the API
 selector. Every setting is independent and is validated **before** any loader
@@ -209,7 +218,8 @@ transport therefore fails closed at two independent points:
 Long input is screened in **one call**. There is no window split and no
 truncation, because the 432-unit fixed framing is paid on every call and
 splitting multiplies the dominant fixed cost. The budget is a payload budget;
-the complete framed prompt is checked separately against the model window:
+the complete template-delivered prompt (framing, template wrapper and payload)
+is checked separately against the model window:
 
 ```
 default: 8192 payload + 432 framing + 128 verdict reserve = 8752

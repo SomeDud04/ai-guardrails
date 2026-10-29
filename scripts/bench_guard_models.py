@@ -87,6 +87,7 @@ from nasi_lemak.qwen3guard import (  # noqa: E402
     VERDICT_MAX_TOKENS,
     parse_categories,
     parse_verdict_fields,
+    render_guard_prompt,
 )
 
 SCHEMA_VERSION = 1
@@ -971,17 +972,17 @@ class Runner:
             raise BenchmarkError("guard tokenization failed") from None
         return _flat_ids(encoded, "guard tokenization failed")
 
-    def chat_prompt(self, payload: str) -> str:
-        """Apply the artifact's own chat template to the fixed framing + payload."""
-        conversation = [
-            {"role": "system", "content": PROMPT_FRAMING},
-            {"role": "user", "content": payload},
-        ]
+    def chat_prompt(self, payload: str, *, reply: str | None = None) -> str:
+        """Apply the artifact's own chat template through the shared helper.
+
+        The product transport calls the same
+        :func:`nasi_lemak.qwen3guard.render_guard_prompt`, so the benchmark
+        measures exactly the delivery the product sends (one helper, two
+        consumers) instead of a private copy that could drift.
+        """
         try:
-            return self.tokenizer.apply_chat_template(
-                conversation, tokenize=False, add_generation_prompt=True
-            )
-        except Exception:
+            return render_guard_prompt(self.tokenizer, payload, reply=reply)
+        except GuardError:
             raise BenchmarkError("guard tokenization failed") from None
 
     def _tensors(self, ids: list[int]) -> dict[str, Any]:
@@ -1117,8 +1118,19 @@ def _measure_bucket(
         template_tokens: int | None = None
         template_units: int | None = None
     else:
-        template_prompt = runner.chat_prompt("")
-        prompt = runner.chat_prompt(payload)
+        # The same per-lane template delivery the product uses: the input
+        # bucket is system+user; the output bucket is system+user+assistant,
+        # with the buffered answer as the assistant turn.
+        if slot == "output":
+            if not serialized.startswith(OUTPUT_PREFIX):
+                raise BenchmarkError("benchmark input is invalid")
+            context = OUTPUT_CONTEXT
+            reply = serialized[len(OUTPUT_PREFIX) :]
+            template_prompt = runner.chat_prompt("", reply="")
+            prompt = runner.chat_prompt(context, reply=reply)
+        else:
+            template_prompt = runner.chat_prompt("")
+            prompt = runner.chat_prompt(serialized)
         template_tokens = len(runner.encode(template_prompt))
         template_units = conservative_units(template_prompt)
     prompt_ids = runner.encode(prompt)

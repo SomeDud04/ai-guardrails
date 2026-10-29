@@ -87,11 +87,17 @@ class _ToyTokenizer:
     """One token per whitespace word; output tokens decode to exact verdict text.
 
     Input tokenisation deliberately rejects any special-token or truncation
-    setting other than the shared contract's ``False``/``False``.
+    setting other than the shared contract's ``False``/``False``.  The chat
+    template records every delivery so tests can assert the per-lane message
+    shapes and ``add_generation_prompt=True``.
     """
 
     def __init__(self) -> None:
         self.calls: list[tuple[str, bool, bool]] = []
+        self.template_calls: list[
+            tuple[list[dict[str, str]], bool, bool, str]
+        ] = []
+        self.template_failure: Exception | None = None
         self.eos_token_id: int | None = EOS
         self.pad_token_id: int | None = EOS
         self._next_id = 100
@@ -117,6 +123,30 @@ class _ToyTokenizer:
         self._outputs[identifier] = text
         return [identifier]
 
+    def apply_chat_template(
+        self,
+        conversation: list[dict[str, str]],
+        tokenize: bool = False,
+        add_generation_prompt: bool = True,
+    ) -> str:
+        rendered = "".join(
+            f"<|im_start|>{message['role']}\n{message['content']}<|im_end|>\n"
+            for message in conversation
+        )
+        if add_generation_prompt:
+            rendered += "<|im_start|>assistant\n"
+        self.template_calls.append(
+            (
+                [dict(message) for message in conversation],
+                tokenize,
+                add_generation_prompt,
+                rendered,
+            )
+        )
+        if self.template_failure is not None:
+            raise self.template_failure
+        return rendered
+
     def __call__(
         self, text: str, add_special_tokens: bool = True, truncation: bool = False
     ) -> Any:
@@ -139,6 +169,21 @@ class _ToyTokenizer:
             else:
                 parts.append(self._reverse.get(identifier, ""))
         return "".join(parts)
+
+
+class _NoTemplateTokenizer:
+    """A delegating tokenizer with no chat template: the fail-closed case."""
+
+    def __init__(self, base: _ToyTokenizer) -> None:
+        self._base = base
+        self.eos_token_id = base.eos_token_id
+        self.pad_token_id = base.pad_token_id
+
+    def __call__(self, *args: Any, **kwargs: Any) -> Any:
+        return self._base(*args, **kwargs)
+
+    def decode(self, *args: Any, **kwargs: Any) -> str:
+        return self._base.decode(*args, **kwargs)
 
 
 class _ToyBackend:
@@ -424,6 +469,87 @@ class TransportParityTests(LocalTransportTestCase):
             guard.scan_response([{"role": "user", "content": "hello"}], "reply"),
             {"safe": False},
         )
+
+
+class TemplateDeliveryTests(LocalTransportTestCase):
+    """The artifact's chat template is the one delivery for both lanes."""
+
+    def test_input_lane_uses_system_and_user_with_generation_prompt(self) -> None:
+        tokenizer = _ToyTokenizer()
+        guard = self._guard(tokenizer=tokenizer)
+        self.assertEqual(guard.scan_attack("user: hello"), {"decision": "allow"})
+        self.assertEqual(len(tokenizer.template_calls), 1)
+        messages, tokenize, add_generation_prompt, _ = tokenizer.template_calls[0]
+        self.assertEqual(
+            messages,
+            [
+                {"role": "system", "content": GUARD_FRAMING},
+                {"role": "user", "content": "user: hello"},
+            ],
+        )
+        self.assertFalse(tokenize)
+        self.assertTrue(add_generation_prompt)
+
+    def test_output_lane_appends_the_reply_as_an_assistant_turn(self) -> None:
+        tokenizer = _ToyTokenizer()
+        guard = self._guard(tokenizer=tokenizer)
+        self.assertEqual(
+            guard.scan_response([{"role": "user", "content": "hello"}], "reply"),
+            {"safe": True},
+        )
+        self.assertEqual(len(tokenizer.template_calls), 1)
+        messages, tokenize, add_generation_prompt, _ = tokenizer.template_calls[0]
+        self.assertEqual(
+            messages,
+            [
+                {"role": "system", "content": GUARD_FRAMING},
+                {"role": "user", "content": "user: hello"},
+                {"role": "assistant", "content": "reply"},
+            ],
+        )
+        self.assertFalse(tokenize)
+        self.assertTrue(add_generation_prompt)
+
+    def test_payload_budget_is_checked_before_any_template_work(self) -> None:
+        tokenizer = _ToyTokenizer()
+        guard = self._guard(tokenizer=tokenizer)
+        over = LongInputTests._payload(DEFAULT_LONG_INPUT_TOKENS)
+        with self.assertRaises(GuardInputLimit):
+            guard.scan_attack(over)
+        self.assertEqual(tokenizer.template_calls, [])
+        self.assertEqual(guard._model.calls, 0)
+
+    def test_window_check_counts_the_template_delivered_text(self) -> None:
+        tokenizer = _ToyTokenizer()
+        guard = self._guard(tokenizer=tokenizer, model_kwargs={"window": 1024})
+        payload = LongInputTests._payload(1000)
+        payload_tokens = guard.count_tokens(payload)
+        self.assertLessEqual(payload_tokens, guard._long_input)
+        with self.assertRaises(GuardInputLimit):
+            guard.scan_attack(payload)
+        self.assertEqual(len(tokenizer.template_calls), 1)
+        rendered = tokenizer.template_calls[0][3]
+        self.assertGreater(
+            len(tokenizer.encode(rendered)), guard._window_limit
+        )
+        self.assertEqual(guard._model.calls, 0)
+
+    def test_missing_chat_template_fails_closed(self) -> None:
+        base = _ToyTokenizer()
+        guard = self._guard(
+            tokenizer=_NoTemplateTokenizer(base), model=_ToyModel(base)
+        )
+        with self.assertRaises(GuardError):
+            guard.scan_attack("hello")
+        self.assertEqual(guard._model.calls, 0)
+
+    def test_failing_chat_template_fails_closed(self) -> None:
+        tokenizer = _ToyTokenizer()
+        tokenizer.template_failure = RuntimeError("template boom")
+        guard = self._guard(tokenizer=tokenizer)
+        with self.assertRaises(GuardError):
+            guard.scan_attack("hello")
+        self.assertEqual(guard._model.calls, 0)
 
 
 class FailClosedTests(LocalTransportTestCase):

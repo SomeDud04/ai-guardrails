@@ -36,10 +36,13 @@ metadata and is not treated as evidence of a classifier; the classifier shape is
 rejected from the runtime class/head.  Any surprise is a ``GuardError``, never
 an allow.
 
-The prompt is the shared contract: ``build_prompt(serialize_messages(...))``, a
-plain string.  The product path never calls ``tokenizer.apply_chat_template``,
-so it does not need ``jinja2``.  Tokenization mirrors the contract exactly:
-``add_special_tokens=False`` and ``truncation=False``.
+The prompt delivery is the shared contract: ``render_guard_prompt`` applies the
+artifact's own chat template to ``guard_chat_messages`` (system framing plus the
+serialized text, plus the assistant reply on the output lane).  A missing or
+failing chat template is a ``GuardError``; there is no plain-text fallback.  The
+rendered prompt is tokenized with ``add_special_tokens=False`` and
+``truncation=False``, because the template's special tokens are literal text in
+the rendered string.
 
 Long input is one call, never a window split and never truncated.  The fixed
 framing is paid on every call, so splitting multiplies the dominant fixed cost.
@@ -90,8 +93,8 @@ from .qwen3guard import (
     MAX_LONG_INPUT_TOKENS,
     MIN_LONG_INPUT_TOKENS,
     VERDICT_MAX_TOKENS,
-    build_prompt,
     parse_verdict_fields,
+    render_guard_prompt,
     serialize_messages,
     validate_conversation,
     validate_threshold,
@@ -367,21 +370,31 @@ class Qwen3GuardLocal:
             raise GuardError("guard tokenization failed") from None
         return _ids_from_encoding(encoded)
 
-    def _verdict(self, serialized: str, *, lane: str) -> Any:
-        """Tokenise the complete framed prompt once and parse the verdict.
+    def _verdict(
+        self, serialized: str, *, lane: str, reply: str | None = None
+    ) -> Any:
+        """Deliver the complete framed prompt once and parse the verdict.
 
-        The verdict text is parsed by the one shared parser with the lane of the
-        slot that produced it: the input slot expects the artifact's official
-        Safety + Categories verdict, the output slot the strict three-line
-        product verdict.  No truncation and no window split: an over-budget
-        payload is rejected before any forward pass, and a framed prompt that
-        does not fit the model window plus verdict reserve is rejected as
-        unscreenable, not shortened.
+        The prompt is rendered through the artifact's own chat template, so the
+        chat-trained guard sees its trained boundaries instead of a plain
+        concatenation.  The verdict text is parsed by the one shared parser with
+        the lane of the slot that produced it: the input slot expects the
+        artifact's official Safety + Categories verdict, the output slot the
+        strict three-line product verdict.  The payload budget is measured on
+        the serialized text before any template work; the window budget is
+        measured on the template-delivered text.  No truncation and no window
+        split: an over-budget payload is rejected before any forward pass, and a
+        prompt that does not fit the model window plus verdict reserve is
+        rejected as unscreenable, not shortened.
         """
-        payload_ids = self._token_ids(serialized)
+        budget_text = (
+            serialized if reply is None else serialized + "\nassistant: " + reply
+        )
+        payload_ids = self._token_ids(budget_text)
         if len(payload_ids) > self._long_input:
             raise GuardInputLimit("guard input exceeds the configured limit")
-        prompt_ids = self._token_ids(build_prompt(serialized))
+        rendered = render_guard_prompt(self._tokenizer, serialized, reply=reply)
+        prompt_ids = self._token_ids(rendered)
         if len(prompt_ids) > self._window_limit:
             raise GuardInputLimit("guard input exceeds the configured model window")
         text = _generated_verdict_text(
@@ -423,9 +436,12 @@ class Qwen3GuardLocal:
     def scan_response(self, messages: Any, output: Any) -> dict[str, bool]:
         """Classify the complete masked context plus the buffered output."""
         conversation = validate_conversation(messages, output)
-        serialized = serialize_messages(conversation)
+        reply = conversation[-1]["content"]
+        serialized = serialize_messages(conversation[:-1])
         with self._pool.slot():
-            verdict = self._verdict(serialized, lane=LANE_RESPONSE)
+            verdict = self._verdict(
+                serialized, lane=LANE_RESPONSE, reply=reply
+            )
         return {"safe": not verdict_blocks(verdict, self._output_threshold)}
 
     def _run_scan(

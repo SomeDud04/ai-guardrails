@@ -15,6 +15,18 @@ Keeping one definition is the point: two copies of the taxonomy or of the
 verdict parser would drift, and a drifted parser is a detection change nobody
 reviewed.
 
+Prompt delivery is part of the same contract.  ``guard_chat_messages`` defines
+the one per-lane message shape (the fixed system framing plus the serialized
+text, with the buffered assistant reply on the response lane) and
+``render_guard_prompt`` applies the artifact's own
+``tokenizer.apply_chat_template`` with ``tokenize=False`` and
+``add_generation_prompt=True``.  The local transport and the benchmark both call
+that one helper, so the deployed delivery and the measured delivery cannot
+drift.  The rendered text is tokenized with ``add_special_tokens=False`` and
+``truncation=False``: the template's special tokens are literal text in the
+rendered string, exactly as the benchmark encodes template text.  A missing or
+failing template fails closed.
+
 Verdict shape -- the same parser serves two lanes, because the artifact itself
 uses two shapes:
 
@@ -182,10 +194,67 @@ def serialize_messages(messages: list[dict[str, str]]) -> str:
 
 
 def build_prompt(serialized: str) -> str:
-    """Fixed framing plus the **complete** screened text; never truncated."""
+    """Fixed framing plus the **complete** screened text; never truncated.
+
+    Historical plain-text shape.  The deployed Qwen3Guard-Gen lane delivers
+    prompts through the artifact's own chat template instead; see
+    :func:`render_guard_prompt`.
+    """
     if not isinstance(serialized, str) or not serialized:
         raise GuardError("guard input is invalid")
     return GUARD_FRAMING + serialized
+
+
+def guard_chat_messages(
+    serialized: Any, *, reply: Any = None
+) -> list[dict[str, str]]:
+    """The one per-lane message shape the artifact's chat template receives.
+
+    The input lane is ``[system: GUARD_FRAMING, user: serialized]``.  The output
+    lane appends ``[assistant: reply]`` so the artifact sees the buffered answer
+    it is asked to classify.  The framing bytes are unchanged: the same
+    :data:`GUARD_FRAMING` is the system message.
+    """
+    if not isinstance(serialized, str):
+        raise GuardError("guard input is invalid")
+    messages = [
+        {"role": "system", "content": GUARD_FRAMING},
+        {"role": "user", "content": serialized},
+    ]
+    if reply is not None:
+        if not isinstance(reply, str):
+            raise GuardError("guard input is invalid")
+        messages.append({"role": "assistant", "content": reply})
+    return messages
+
+
+def render_guard_prompt(
+    tokenizer: Any, serialized: Any, *, reply: Any = None
+) -> str:
+    """Deliver one lane's messages through the artifact's own chat template.
+
+    This is the **single** template-delivery helper: the product transport and
+    the benchmark both call it, so the two consumers cannot drift (D23).  The
+    template is the artifact's (``tokenizer.apply_chat_template``); a missing or
+    failing template fails closed with :class:`GuardError`.
+    """
+    messages = guard_chat_messages(serialized, reply=reply)
+    apply_chat_template = getattr(tokenizer, "apply_chat_template", None)
+    if not callable(apply_chat_template):
+        raise GuardError("guard chat template is unavailable")
+    try:
+        rendered = apply_chat_template(
+            messages,
+            tokenize=False,
+            add_generation_prompt=True,
+        )
+    except GuardError:
+        raise
+    except Exception:
+        raise GuardError("guard chat template could not be applied") from None
+    if not isinstance(rendered, str) or not rendered:
+        raise GuardError("guard chat template could not be applied")
+    return rendered
 
 
 def validate_conversation(messages: Any, output: Any) -> list[dict[str, str]]:

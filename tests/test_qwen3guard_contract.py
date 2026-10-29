@@ -69,6 +69,7 @@ BENCHMARK_SHARED_NAMES = frozenset(
         "FRAMING_VERSION",
         "parse_categories",
         "parse_verdict_fields",
+        "render_guard_prompt",
     }
 )
 
@@ -284,6 +285,45 @@ class BenchmarkSingleSourceTest(unittest.TestCase):
                     {"split", "splitlines"},
                     "the benchmark must not split verdict text",
                 )
+
+
+class TemplateDeliverySingleSourceTest(unittest.TestCase):
+    """One template-delivery helper; the product and the benchmark consume it."""
+
+    def test_helper_is_defined_once_and_consumed_by_both_paths(self) -> None:
+        definitions = []
+        for path in _package_modules():
+            tree = _parse(path)
+            for node in tree.body:
+                if (
+                    isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef))
+                    and node.name == "render_guard_prompt"
+                ):
+                    definitions.append(path.name)
+        self.assertEqual(definitions, ["qwen3guard.py"])
+
+        for path in (PACKAGE_ROOT / "qwen3_local.py", BENCHMARK_PATH):
+            with self.subTest(path=path.name):
+                tree = _parse(path)
+                imported = set()
+                for node in ast.walk(tree):
+                    if isinstance(node, ast.ImportFrom):
+                        imported.update(
+                            alias.asname or alias.name for alias in node.names
+                        )
+                self.assertIn(
+                    "render_guard_prompt",
+                    imported,
+                    "both consumers must import the shared delivery helper",
+                )
+                for node in ast.walk(tree):
+                    if isinstance(node, ast.Attribute):
+                        self.assertNotEqual(
+                            node.attr,
+                            "apply_chat_template",
+                            "template delivery must go through the one helper, "
+                            "not a private duplicate",
+                        )
 
 
 class HistoricalNameRegressionTest(unittest.TestCase):
