@@ -3,9 +3,18 @@
 # This file is inert configuration scaffolding, not runtime proof.  It selects
 # the opt-in ``guards`` Dockerfile target, sets guarded mode explicitly, selects
 # ``NASI_LEMAK_GUARD_BACKEND=qwen3guard-local``, and mounts one operator-approved
-# policy file plus the local Qwen3Guard-Gen directory read-only.  No model ID is
-# invented, no model or license is supplied, and no image is built, started or
-# benchmarked by this file.
+# policy file, the existing pilot Meta model directories and the local
+# Qwen3Guard-Gen directory read-only.  No model ID is invented, no model or
+# license is supplied, and no image is built, started or benchmarked by this
+# file.
+#
+# EXTENDS, DOES NOT REPLACE, THE META PILOT.  The baseline pilot already ran
+# with Meta Prompt Guard 2 and Llama Guard 3.  This overlay keeps those
+# environment settings and read-only bind mounts exactly as approved, with
+# their existing defaults, and adds the Qwen entries on top.  The Meta host
+# artifact paths therefore remain mandatory even though Qwen performs the
+# active scans: they are the already-approved operator paths, not new or
+# invented ones.
 #
 # Always apply it ON TOP of the default stack (never alone):
 #
@@ -28,14 +37,17 @@
 # Bind mounts use the long syntax with ``create_host_path: false``: a missing
 # host policy/model path aborts the start instead of silently creating an empty
 # directory that would look configured but fail later.  All host paths are
-# mandatory ``:?`` interpolation values; nothing is defaulted.
+# mandatory ``:?`` interpolation values; nothing is defaulted.  The Qwen
+# container directory is also a mandatory ``:?`` value, and the same expression
+# is used for the environment variable and the bind target so they cannot drift.
 #
 # The gateway keeps the base file's non-root UID/GID 10001, read-only root
 # filesystem, dropped capabilities, no-new-privileges, localhost-only published
 # port and private database network.  Local Compose file secrets are host files
 # and must be readable by UID 10001; this file does not claim that Compose
-# uid/gid/mode remapping works for them.  Nothing is downloaded at build or
-# start: the model bundle must already be complete on the host.
+# uid/gid/mode remapping works for them.  No model is downloaded at build or
+# start: the model bundles must already be complete on the host.  (The guard
+# Python packages are installed during the image build only.)
 
 services:
   gateway:
@@ -55,7 +67,18 @@ services:
       - NASI_LEMAK_GUARD_BACKEND=qwen3guard-local
       # Container paths must match the read-only bind targets below.
       - NASI_LEMAK_POLICY_FILE=/run/pilot/policy/policy.yaml
-      - NASI_LEMAK_QWEN3GUARD_MODEL_DIR=/models/qwen3guard-gen-0.6b
+      # Existing Meta pilot settings, restored unchanged from the approved
+      # baseline (including their defaults).  They remain part of the extended
+      # pilot even though Qwen performs the active scans.
+      - NASI_LEMAK_PROMPT_GUARD_MODEL_DIR=/models/prompt-guard-2
+      - NASI_LEMAK_LLAMA_GUARD_MODEL_DIR=/models/llama-guard-3
+      - NASI_LEMAK_PROMPT_GUARD_THRESHOLD=${NASI_LEMAK_PROMPT_GUARD_THRESHOLD:-0.5}
+      - NASI_LEMAK_LLAMA_GUARD_CONTEXT_LIMIT=${NASI_LEMAK_LLAMA_GUARD_CONTEXT_LIMIT:-4096}
+      # Required Qwen model directory.  The value is a mandatory ``:?``
+      # interpolation and the same expression is the bind target below, so the
+      # runtime variable and the mount cannot disagree.  A missing value aborts
+      # Compose instead of starting a backend without a model.
+      - NASI_LEMAK_QWEN3GUARD_MODEL_DIR=${PILOT_QWEN_GUARD_MODEL_CONTAINER_DIR:?Set PILOT_QWEN_GUARD_MODEL_CONTAINER_DIR to the Qwen3Guard-Gen container directory}
       # Optional, independent validated settings.  Bare pass-through entries:
       # no default is hardcoded here, so an unset value keeps the documented
       # application default from docs/guards.md.  The threshold range, worker
@@ -82,9 +105,24 @@ services:
         read_only: true
         bind:
           create_host_path: false
+      # Retained Meta pilot mounts: the approved host paths are still required.
+      - type: bind
+        source: ${PILOT_PROMPT_GUARD_MODEL_DIR:?Set PILOT_PROMPT_GUARD_MODEL_DIR to a local Prompt Guard 2 directory}
+        target: /models/prompt-guard-2
+        read_only: true
+        bind:
+          create_host_path: false
+      - type: bind
+        source: ${PILOT_LLAMA_GUARD_MODEL_DIR:?Set PILOT_LLAMA_GUARD_MODEL_DIR to a local Llama Guard 3 directory}
+        target: /models/llama-guard-3
+        read_only: true
+        bind:
+          create_host_path: false
+      # Qwen mount.  Target uses the same required interpolation as the
+      # environment entry above.
       - type: bind
         source: ${PILOT_QWEN_GUARD_MODEL_DIR:?Set PILOT_QWEN_GUARD_MODEL_DIR to a local Qwen3Guard-Gen directory}
-        target: /models/qwen3guard-gen-0.6b
+        target: ${PILOT_QWEN_GUARD_MODEL_CONTAINER_DIR:?Set PILOT_QWEN_GUARD_MODEL_CONTAINER_DIR to the Qwen3Guard-Gen container directory}
         read_only: true
         bind:
           create_host_path: false

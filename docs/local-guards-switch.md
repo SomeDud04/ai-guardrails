@@ -8,10 +8,13 @@ guard lane (Groq Prompt Guard + Cloudflare Llama Guard, configured through
 
 This runbook is configuration and operator procedure only. Nothing here was
 built, started, or measured in the development workspace: Docker is absent
-there and no model was downloaded or executed. **A pass proves composition and
-startup, not detection quality.** Latency, memory, false-positive/negative
-rates and multilingual coverage remain a separate benchmark activity; no
-number is claimed by the switch.
+there and no model was downloaded or executed. **No model weights are
+downloaded at image build or container start; the guard Python packages (torch
+from the CPU wheel index, transformers, jinja2) are downloaded during the image
+build only.** The Qwen and Meta model bundles must already be complete on the
+host. **A pass proves composition and startup, not detection quality.** Latency,
+memory, false-positive/negative rates and multilingual coverage remain a
+separate benchmark activity; no number is claimed by the switch.
 
 The adapter itself (`nasi_lemak/qwen3_local.py`, backend selector
 `NASI_LEMAK_GUARD_BACKEND=qwen3guard-local`) is implemented and covered by
@@ -39,8 +42,11 @@ scratch directory first; they are not needed and the tracked copies replace
 them.
 
 **Never run `git clean -x`.** It would delete `.secrets`, `compose.thinking.yaml`
-and the approved policy. **Never touch `.secrets`** except to edit the two
-non-secret files named in step 3.
+and the approved policy. **Preserve `.secrets`**: do not delete, overwrite or
+recreate it. The only permitted edits are the two explicit operator edits in
+section 3 (the D14 generation settings in `.secrets/compose.env` and the local
+paths in `.secrets/compose.pilot.env`); every other file in `.secrets` stays
+exactly as it is.
 
 ## 2. Pull the reviewed switch
 
@@ -67,8 +73,13 @@ runbook).
 
 ## 3. Prepare the local-guard env files
 
+This section is the complete list of operator configuration edits. Nothing else
+in `.secrets` changes.
+
 The base env file `.secrets/compose.env` keeps the audit/application secret
-paths and now also carries the D14 generation settings:
+paths and also carries the D14 generation settings. Because the bearer key lives
+here, treat this file as a secret: never echo it, copy it to chat or Git, or
+print it later.
 
 ```bash
 NASI_LEMAK_GENERATION_URL=https://ua73nd90j.flexinfra.com.my/v1
@@ -80,21 +91,35 @@ NASI_LEMAK_GENERATION_API_KEY=<the bearer key, on this VM only>
 Remove `NASI_LEMAK_GENERATION_ALLOW_INSECURE_HTTP` and any `AUTH=none` line: the
 new URL is HTTPS and certificate verification stays on. Do not echo the key,
 put it in shell history, chat or Git, or print the container environment later.
+The base `compose.yaml` forwards the key as a bare pass-through; it is never
+authored in a tracked file.
 
 Edit `.secrets/compose.pilot.env` (copy `docs/compose.pilot.env.example` only if
 the file is absent; never overwrite an existing operator file blindly):
 
 ```bash
-PILOT_POLICY_FILE=/absolute/path/to/policy.guarded.yaml
+PILOT_POLICY_FILE=<existing absolute path to policy.guarded.yaml>
+PILOT_PROMPT_GUARD_MODEL_DIR=<existing approved prompt-guard-2 host path>
+PILOT_LLAMA_GUARD_MODEL_DIR=<existing approved llama-guard-3 host path>
 PILOT_QWEN_GUARD_MODEL_DIR=/models/qwen3guard-gen-0.6b
-OPERATOR_KEY_DIGEST_FILE=/absolute/path/to/.secrets/operator_key_digest
-OPERATOR_AUDIT_DSN_FILE=/absolute/path/to/.secrets/operator_audit_dsn
+PILOT_QWEN_GUARD_MODEL_CONTAINER_DIR=/models/qwen3guard-gen-0.6b
+OPERATOR_KEY_DIGEST_FILE=<existing absolute path to .secrets/operator_key_digest>
+OPERATOR_AUDIT_DSN_FILE=<existing absolute path to .secrets/operator_audit_dsn>
 ```
 
-Both paths are mandatory interpolation values; Compose aborts if either is
-unset or missing, instead of creating an empty directory. The overlay sets
-guarded mode, `NASI_LEMAK_ALLOW_UNGUARDED_TEST=false`, and
-`NASI_LEMAK_GUARD_BACKEND=qwen3guard-local` itself. Optional tunables
+The pilot overlay **extends** the already-approved Meta pilot: keep the existing
+`PILOT_PROMPT_GUARD_MODEL_DIR` and `PILOT_LLAMA_GUARD_MODEL_DIR` operator paths
+and the Meta threshold/context settings. They remain required even though Qwen
+performs the active scans. Use the paths already approved on this VM; do not
+invent a new Meta model path.
+
+All paths are mandatory interpolation values; Compose aborts if any is unset or
+missing, instead of creating an empty directory. The Qwen host directory and its
+container directory are also mandatory, and the overlay uses the same
+`PILOT_QWEN_GUARD_MODEL_CONTAINER_DIR` interpolation for
+`NASI_LEMAK_QWEN3GUARD_MODEL_DIR` and the read-only mount target so they cannot
+disagree. The overlay sets guarded mode, `NASI_LEMAK_ALLOW_UNGUARDED_TEST=false`,
+and `NASI_LEMAK_GUARD_BACKEND=qwen3guard-local` itself. Optional tunables
 (`NASI_LEMAK_QWEN3GUARD_INPUT_THRESHOLD`, `..._OUTPUT_THRESHOLD`, `..._WORKERS`,
 `..._THREADS`, `..._LONG_INPUT`) are bare pass-throughs: omit them to keep the
 validated defaults; on the 4-vCPU box that is 2 workers x 2 threads. Thresholds
@@ -190,8 +215,10 @@ dc() {
    dc ps
    ```
 
-   Expect `gateway` (image `nasi-lemak-gateway:0.1.0-pilot`), `nginx` and `db`.
-   `db` must be healthy; `gateway` is healthy only when readiness returns 200.
+   Expect `gateway` (image `nasi-lemak-gateway:0.1.0-pilot`), `nginx` and `db`,
+   and **all three must report healthy**. `db` and `nginx` must be healthy; the
+   gateway is healthy only when `/health/ready` returns 200. If any service is
+   not healthy, stop here and inspect its logs before continuing.
 
 2. **Readiness.**
 
@@ -227,13 +254,16 @@ dc() {
      ls -la /models
      ls /models/qwen3guard-gen-0.6b | head
      test -r /models/qwen3guard-gen-0.6b/config.json && echo "config readable"
-     touch /models/qwen3guard-gen-0.6b/.write-probe 2>/dev/null \
-       && echo "ERROR: model mount is writable" \
-       || echo "model mount is read-only"
    '
+   sudo docker inspect --format \
+     '{{range .Mounts}}{{.Destination}} RW={{.RW}}{{"\n"}}{{end}}' \
+     "$(dc ps -q gateway)" | grep -F '/models/qwen3guard-gen-0.6b RW=false'
    ```
 
-   The directory must be visible, readable by UID 10001, and reject writes.
+   The directory must be visible and readable by UID 10001. Read-only is checked
+   through Docker's own mount metadata (`RW=false`), not by attempting a write:
+   a permission denial alone would not prove the mount is read-only. The final
+   `grep` must match; no output means the mount is missing or writable.
 
 5. **One real request through the demo ingress.** Open
    `http://<DEMO_BIND_IP>:8080/`, load the application chat key and send one

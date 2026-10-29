@@ -54,6 +54,11 @@ OVERLAY_ENV_KEYS = {
     "NASI_LEMAK_ALLOW_UNGUARDED_TEST",
     "NASI_LEMAK_GUARD_BACKEND",
     "NASI_LEMAK_POLICY_FILE",
+    # Restored Meta pilot settings: the overlay extends that pilot with Qwen.
+    "NASI_LEMAK_PROMPT_GUARD_MODEL_DIR",
+    "NASI_LEMAK_LLAMA_GUARD_MODEL_DIR",
+    "NASI_LEMAK_PROMPT_GUARD_THRESHOLD",
+    "NASI_LEMAK_LLAMA_GUARD_CONTEXT_LIMIT",
     "NASI_LEMAK_QWEN3GUARD_MODEL_DIR",
     "NASI_LEMAK_QWEN3GUARD_INPUT_THRESHOLD",
     "NASI_LEMAK_QWEN3GUARD_OUTPUT_THRESHOLD",
@@ -69,8 +74,12 @@ OVERLAY_ENV_KEYS = {
 
 EXPECTED_TARGETS = {
     "/run/pilot/policy/policy.yaml": "NASI_LEMAK_POLICY_FILE",
-    "/models/qwen3guard-gen-0.6b": "NASI_LEMAK_QWEN3GUARD_MODEL_DIR",
+    "/models/prompt-guard-2": "NASI_LEMAK_PROMPT_GUARD_MODEL_DIR",
+    "/models/llama-guard-3": "NASI_LEMAK_LLAMA_GUARD_MODEL_DIR",
 }
+
+QWEN_ENV_NAME = "NASI_LEMAK_QWEN3GUARD_MODEL_DIR"
+QWEN_CONTAINER_DIR_PREFIX = "${PILOT_QWEN_GUARD_MODEL_CONTAINER_DIR:?"
 
 _STAGE_RE = re.compile(r"^\s*FROM\s+(\S+)\s+AS\s+(\S+)\s*$", re.IGNORECASE)
 _HEX_DIGEST_RE = re.compile(r"^[0-9a-f]{64}$", re.IGNORECASE)
@@ -143,6 +152,9 @@ class ComposeConfigTests(unittest.TestCase):
         cls.pilot = _load("compose.pilot.yaml")
         cls.base_text = (ROOT / "compose.yaml").read_text(encoding="utf-8")
         cls.pilot_text = (ROOT / "compose.pilot.yaml").read_text(encoding="utf-8")
+        cls.pilot_example = (
+            ROOT / "docs" / "compose.pilot.env.example"
+        ).read_text(encoding="utf-8")
         cls.chat_limits_text = (
             ROOT / "docs" / "compose.chat-limits.env.example"
         ).read_text(encoding="utf-8")
@@ -182,6 +194,25 @@ class ComposeConfigTests(unittest.TestCase):
         self.assertEqual(db["networks"], ["db_internal"])
         self.assertTrue(self.base["networks"]["db_internal"]["internal"])
         self.assertEqual(set(gateway["networks"]), {"default", "db_internal"})
+
+    def test_base_forwards_the_bearer_key_as_a_bare_pass_through(self):
+        gateway_env = _environment_map(
+            self.base["services"]["gateway"]["environment"]
+        )
+        # The name is forwarded; the tracked file supplies no value.
+        self.assertEqual(gateway_env["NASI_LEMAK_GENERATION_API_KEY"], "")
+        # Exactly a bare list entry: no "=value", no ":value" and no default.
+        self.assertRegex(
+            self.base_text,
+            r"(?m)^\s*-\s*NASI_LEMAK_GENERATION_API_KEY\s*$",
+        )
+        self.assertIsNone(
+            re.search(r"NASI_LEMAK_GENERATION_API_KEY\s*[:=]", self.base_text)
+        )
+        # It is never set to a literal by interpolation in the tracked file;
+        # only the operator's git-ignored base env can supply the value.
+        self.assertNotIn("NASI_LEMAK_GENERATION_API_KEY=${", self.base_text)
+        self.assertNotIn("NASI_LEMAK_GENERATION_API_KEY=", self.base_text)
 
     def test_chat_limits_are_bare_pass_through_with_a_documented_example(self):
         gateway = self.base["services"]["gateway"]
@@ -225,24 +256,67 @@ class ComposeConfigTests(unittest.TestCase):
         gateway = self.pilot["services"]["gateway"]
         env = _environment_map(gateway["environment"])
         volumes = gateway["volumes"]
-        self.assertEqual(len(volumes), len(EXPECTED_TARGETS))
+        self.assertEqual(len(volumes), len(EXPECTED_TARGETS) + 1)
         by_target = {volume["target"]: volume for volume in volumes}
-        self.assertEqual(set(by_target), set(EXPECTED_TARGETS))
         for target, env_name in EXPECTED_TARGETS.items():
-            volume = by_target[target]
             with self.subTest(target=target):
+                self.assertIn(target, by_target)
+                volume = by_target[target]
                 self.assertEqual(volume["type"], "bind")
                 self.assertEqual(volume["read_only"], True)
                 self.assertIs(volume["bind"]["create_host_path"], False)
                 self.assertIn(":?", volume["source"])
                 self.assertTrue(volume["source"].startswith("${"))
                 self.assertEqual(env[env_name], target)
+        # The Qwen mount target and runtime directory are the SAME mandatory
+        # container-dir interpolation, so the two cannot drift apart.
+        qwen_targets = [
+            target
+            for target in by_target
+            if target.startswith(QWEN_CONTAINER_DIR_PREFIX)
+        ]
+        self.assertEqual(len(qwen_targets), 1)
+        qwen_target = qwen_targets[0]
+        self.assertIn(":?", qwen_target)
+        volume = by_target[qwen_target]
+        self.assertEqual(volume["type"], "bind")
+        self.assertIs(volume["read_only"], True)
+        self.assertIs(volume["bind"]["create_host_path"], False)
+        self.assertIn(":?", volume["source"])
+        self.assertTrue(
+            volume["source"].startswith("${PILOT_QWEN_GUARD_MODEL_DIR:?")
+        )
+        self.assertEqual(env[QWEN_ENV_NAME], qwen_target)
+        # The documented container directory is the fixed pilot path.
+        self.assertIn(
+            "PILOT_QWEN_GUARD_MODEL_CONTAINER_DIR=/models/qwen3guard-gen-0.6b",
+            self.pilot_example,
+        )
 
     def test_overlay_guard_threshold_and_context_are_explicit(self):
         env = _environment_map(self.pilot["services"]["gateway"]["environment"])
         self.assertEqual(env["NASI_LEMAK_MODE"], "guarded")
         self.assertEqual(env["NASI_LEMAK_ALLOW_UNGUARDED_TEST"], "false")
         self.assertEqual(env["NASI_LEMAK_GUARD_BACKEND"], "qwen3guard-local")
+        # Restored Meta pilot settings keep their baseline defaults.
+        self.assertEqual(
+            env["NASI_LEMAK_PROMPT_GUARD_THRESHOLD"],
+            "${NASI_LEMAK_PROMPT_GUARD_THRESHOLD:-0.5}",
+        )
+        self.assertEqual(
+            env["NASI_LEMAK_LLAMA_GUARD_CONTEXT_LIMIT"],
+            "${NASI_LEMAK_LLAMA_GUARD_CONTEXT_LIMIT:-4096}",
+        )
+        self.assertEqual(
+            env["NASI_LEMAK_PROMPT_GUARD_MODEL_DIR"], "/models/prompt-guard-2"
+        )
+        self.assertEqual(
+            env["NASI_LEMAK_LLAMA_GUARD_MODEL_DIR"], "/models/llama-guard-3"
+        )
+        # Required Qwen model directory: a mandatory interpolation, not a
+        # literal, and the same expression as the read-only mount target.
+        self.assertTrue(env[QWEN_ENV_NAME].startswith(QWEN_CONTAINER_DIR_PREFIX))
+        self.assertIn(":?", env[QWEN_ENV_NAME])
         # Optional local settings are bare pass-throughs; unset keeps the
         # validated application defaults.  None is defaulted or invented here.
         for name in (
