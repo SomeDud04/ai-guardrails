@@ -42,6 +42,7 @@ from .generation import (
 from .guard_errors import GuardError
 from .qwen3guard import (
     CATEGORY_VALUES,
+    LANE_RESPONSE,
     MAX_CONTEXT_MESSAGES,
     MAX_ENCODED_INPUT_BYTES,
     REFUSAL_VALUES,
@@ -260,4 +261,7 @@ class Qwen3GuardOutputAdapter:
             )
         except Exception:
             raise GuardError("guard output API request failed") from None
-        return {"safe": parse_verdict(verdict)}
+        # The HTTP wrapper is a response-lane transport: it keeps the strict
+        # three-line product verdict.  Pinning the lane here means a future
+        # input-lane widening cannot silently relax this path.
+        return {"safe": parse_verdict(verdict, lane=LANE_RESPONSE)}

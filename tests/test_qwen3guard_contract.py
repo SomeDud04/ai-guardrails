@@ -21,7 +21,9 @@ import ast
 import unittest
 from pathlib import Path
 
-PACKAGE_ROOT = Path(__file__).resolve().parents[1] / "nasi_lemak"
+PROJECT_ROOT = Path(__file__).resolve().parents[1]
+PACKAGE_ROOT = PROJECT_ROOT / "nasi_lemak"
+BENCHMARK_PATH = PROJECT_ROOT / "scripts" / "bench_guard_models.py"
 
 #: Contract slot -> every module-scope name that historically implemented it.
 CONTRACT_GROUPS: dict[str, tuple[str, ...]] = {
@@ -49,6 +51,33 @@ _REEXPORT_TARGETS = {
     "_parse_categories": "parse_categories",
 }
 
+#: The benchmark script is outside the package but is part of the contract's
+#: blast radius: it must import these names from the one canonical module, not
+#: restate the taxonomy, the framing or a text parser.
+SHARED_CONTRACT_SOURCE = "nasi_lemak.qwen3guard"
+BENCHMARK_SHARED_NAMES = frozenset(
+    {
+        "CATEGORY_VALUES",
+        "SAFETY_VALUES",
+        "REFUSAL_VALUES",
+        "INPUT_ONLY_CATEGORY_VALUES",
+        "INPUT_CATEGORY_VALUES",
+        "LANE_INPUT",
+        "LANE_RESPONSE",
+        "VERDICT_MAX_TOKENS",
+        "GUARD_FRAMING",
+        "FRAMING_VERSION",
+        "parse_categories",
+        "parse_verdict_fields",
+    }
+)
+
+#: The historical benchmark framing names are aliases of the shared objects.
+BENCHMARK_ALIASES = {
+    "PROMPT_FRAMING": "GUARD_FRAMING",
+    "PROMPT_FRAMING_VERSION": "FRAMING_VERSION",
+}
+
 
 def _package_modules() -> list[Path]:
     return sorted(PACKAGE_ROOT.rglob("*.py"))
@@ -60,6 +89,31 @@ def _parse(path: Path) -> ast.Module:
 
 def _package_asts() -> dict[str, ast.Module]:
     return {path.name: _parse(path) for path in _package_modules()}
+
+
+def _module_imports(module: ast.Module) -> dict[str, str]:
+    imports: dict[str, str] = {}
+    for node in module.body:
+        if isinstance(node, ast.ImportFrom) and node.level == 0 and node.module:
+            for alias in node.names:
+                imports[alias.asname or alias.name] = node.module
+    return imports
+
+
+def _module_assignments(module: ast.Module) -> dict[str, ast.expr]:
+    assignments: dict[str, ast.expr] = {}
+    for node in module.body:
+        if isinstance(node, ast.Assign):
+            for target in node.targets:
+                if isinstance(target, ast.Name):
+                    assignments[target.id] = node.value
+        elif (
+            isinstance(node, ast.AnnAssign)
+            and isinstance(node.target, ast.Name)
+            and node.value is not None
+        ):
+            assignments[node.target.id] = node.value
+    return assignments
 
 
 def _is_allowed_reexport(name: str, value: ast.expr | None) -> bool:
@@ -159,6 +213,76 @@ class SingleSourceOfTruthTest(unittest.TestCase):
                     len(owners),
                     1,
                     f"{group} must be defined once, found in {owners}",
+                )
+
+
+class BenchmarkSingleSourceTest(unittest.TestCase):
+    """The benchmark may convert the shared verdict, never re-implement it."""
+
+    def test_benchmark_imports_the_canonical_contract(self) -> None:
+        imports = _module_imports(_parse(BENCHMARK_PATH))
+        for name in BENCHMARK_SHARED_NAMES:
+            with self.subTest(name=name):
+                self.assertEqual(
+                    imports.get(name),
+                    SHARED_CONTRACT_SOURCE,
+                    f"{name} must be imported from {SHARED_CONTRACT_SOURCE}",
+                )
+
+    def test_benchmark_has_no_local_parser_or_taxonomy_copy(self) -> None:
+        tree = _parse(BENCHMARK_PATH)
+        functions = {
+            node.name
+            for node in tree.body
+            if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef))
+        }
+        for name in (
+            "_field",
+            "_lane_categories",
+            "parse_categories",
+            "parse_verdict_fields",
+        ):
+            with self.subTest(name=name):
+                self.assertNotIn(
+                    name,
+                    functions,
+                    f"{name} must not be re-implemented in the benchmark",
+                )
+        assignments = _module_assignments(tree)
+        for name in BENCHMARK_SHARED_NAMES:
+            with self.subTest(name=name):
+                self.assertNotIn(
+                    name,
+                    assignments,
+                    f"{name} must be imported, not restated as a local assignment",
+                )
+        for name, target in BENCHMARK_ALIASES.items():
+            with self.subTest(name=name):
+                value = assignments.get(name)
+                self.assertIsInstance(value, ast.Name)
+                self.assertEqual(value.id, target)
+
+    def test_benchmark_verdict_wrapper_only_converts_the_shared_verdict(self) -> None:
+        tree = _parse(BENCHMARK_PATH)
+        wrappers = [
+            node
+            for node in tree.body
+            if isinstance(node, ast.FunctionDef) and node.name == "parse_verdict"
+        ]
+        self.assertEqual(len(wrappers), 1)
+        called_names = {
+            node.func.id
+            for node in ast.walk(wrappers[0])
+            if isinstance(node, ast.Call) and isinstance(node.func, ast.Name)
+        }
+        self.assertIn("parse_verdict_fields", called_names)
+        self.assertIn("BenchmarkError", called_names)
+        for node in ast.walk(wrappers[0]):
+            if isinstance(node, ast.Call) and isinstance(node.func, ast.Attribute):
+                self.assertNotIn(
+                    node.func.attr,
+                    {"split", "splitlines"},
+                    "the benchmark must not split verdict text",
                 )
 
 

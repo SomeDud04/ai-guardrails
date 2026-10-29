@@ -149,7 +149,19 @@ def _load_classifier(model_dir: str) -> Any:
 
 
 def _load_causal_model(model_dir: str) -> Any:
+    """Load a local generative guard on CPU with an explicit float32 dtype.
+
+    This path is CPU-only (there is no device selection anywhere in the
+    product), and the Qwen3Guard checkpoint is stored as bf16.  Loading without
+    an explicit dtype therefore keeps bf16, and CPU bf16 matrix multiplication
+    is emulated: the measured same-shape matmul is ~330x slower than fp32
+    (57.7 s vs 0.175 s), which pushes every local scan past the chat deadline.
+    Loading the weights directly in float32 avoids both that cost and a
+    post-load cast.  Llama Guard 3 shares this CPU-only path, so it is loaded in
+    float32 too; the Meta sequence-classification loader above is untouched.
+    """
     transformers = _import_transformers()
+    torch = _import_torch()
     try:
         model = transformers.AutoModelForCausalLM.from_pretrained(
             model_dir,
@@ -157,6 +169,9 @@ def _load_causal_model(model_dir: str) -> Any:
             local_files_only=True,
             trust_remote_code=False,
             use_safetensors=True,
+            # transformers 5 names the load-time dtype ``dtype`` (``torch_dtype``
+            # is only the legacy config spelling).
+            dtype=torch.float32,
         )
     except Exception:
         raise GuardError("guard model could not be loaded") from None

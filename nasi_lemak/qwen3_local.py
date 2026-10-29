@@ -1,15 +1,19 @@
 """Local Qwen3Guard-Gen transport: one causal model for both guard slots.
 
-``Qwen3Guard-Gen-0.6B`` is a **generative** guard: it emits the three-line
-verdict text that :mod:`nasi_lemak.qwen3guard` parses.  It is therefore loaded as
-a causal language model (never as a sequence-classification head), from an
-existing local directory, with the same discipline as the Meta adapters in
-:mod:`nasi_lemak.guards`:
+``Qwen3Guard-Gen-0.6B`` is a **generative** guard: it emits the verdict text
+that :mod:`nasi_lemak.qwen3guard` parses.  The artifact defines two shapes, so
+the shared parser is used with a lane: the input slot's official moderation
+verdict is Safety + Categories (Refusal optional), while the output slot keeps
+the strict three-line product verdict.  It is loaded as a causal language model
+(never as a sequence-classification head), from an existing local directory,
+with the same discipline as the Meta adapters in :mod:`nasi_lemak.guards`:
 
 * ``local_files_only=True``, ``trust_remote_code=False``, ``token=False`` and
   safetensors only -- no Hub resolution, no download, no cache fallback, no
   remote code;
-* device CPU explicitly, an explicit torch intra-op thread count and a bounded
+* device CPU explicitly, weights loaded as ``float32`` (the checkpoint's bf16
+  storage is emulated on CPU and ~330x slower per measured matmul), an explicit
+  torch intra-op thread count and a bounded
   :class:`~nasi_lemak.guard_pool.GuardInferencePool` with one slot per scan;
 * every failure -- a missing directory or file, a load failure, an artifact
   carrying remote-code modules, a structurally invalid model, an unparseable
@@ -81,6 +85,8 @@ from .guards import (
 from .qwen3guard import (
     DEFAULT_LONG_INPUT_TOKENS,
     DEFAULT_THRESHOLD,
+    LANE_INPUT,
+    LANE_RESPONSE,
     MAX_LONG_INPUT_TOKENS,
     MIN_LONG_INPUT_TOKENS,
     VERDICT_MAX_TOKENS,
@@ -361,12 +367,16 @@ class Qwen3GuardLocal:
             raise GuardError("guard tokenization failed") from None
         return _ids_from_encoding(encoded)
 
-    def _verdict(self, serialized: str) -> Any:
+    def _verdict(self, serialized: str, *, lane: str) -> Any:
         """Tokenise the complete framed prompt once and parse the verdict.
 
-        No truncation and no window split: an over-budget payload is rejected
-        before any forward pass, and a framed prompt that does not fit the model
-        window plus verdict reserve is rejected as unscreenable, not shortened.
+        The verdict text is parsed by the one shared parser with the lane of the
+        slot that produced it: the input slot expects the artifact's official
+        Safety + Categories verdict, the output slot the strict three-line
+        product verdict.  No truncation and no window split: an over-budget
+        payload is rejected before any forward pass, and a framed prompt that
+        does not fit the model window plus verdict reserve is rejected as
+        unscreenable, not shortened.
         """
         payload_ids = self._token_ids(serialized)
         if len(payload_ids) > self._long_input:
@@ -384,7 +394,7 @@ class Qwen3GuardLocal:
             accepted_eos=self._accepted_eos,
             pad_token_id=self._pad_token_id,
         )
-        return parse_verdict_fields(text)
+        return parse_verdict_fields(text, lane=lane)
 
     def count_tokens(self, serialized: str) -> int:
         """Token count of the screened text, without the fixed framing."""
@@ -400,7 +410,7 @@ class Qwen3GuardLocal:
         """Classify one complete serialized input; fail closed on any error."""
 
         def _scan() -> Any:
-            return self._verdict(serialized)
+            return self._verdict(serialized, lane=LANE_INPUT)
 
         verdict = self._run_scan(serialized, _scan, scan_context)
         decision = (
@@ -415,7 +425,7 @@ class Qwen3GuardLocal:
         conversation = validate_conversation(messages, output)
         serialized = serialize_messages(conversation)
         with self._pool.slot():
-            verdict = self._verdict(serialized)
+            verdict = self._verdict(serialized, lane=LANE_RESPONSE)
         return {"safe": not verdict_blocks(verdict, self._output_threshold)}
 
     def _run_scan(

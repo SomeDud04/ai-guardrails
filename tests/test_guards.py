@@ -21,7 +21,7 @@ from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
 from unittest import mock
 
-from nasi_lemak.guards import GuardError, LlamaGuard3, PromptGuard2
+from nasi_lemak.guards import GuardError, LlamaGuard3, PromptGuard2, _load_causal_model
 
 EOS = 3
 _UNSET = object()
@@ -837,6 +837,8 @@ class LoaderTests(GuardTestBase):
     def test_llama_loader_uses_local_only_flags_and_cpu(self):
         captured = {}
         fake = types.ModuleType("transformers")
+        fake_torch = types.ModuleType("torch")
+        fake_torch.float32 = object()
 
         class AutoTokenizer:
             @staticmethod
@@ -852,7 +854,7 @@ class LoaderTests(GuardTestBase):
 
         fake.AutoTokenizer = AutoTokenizer
         fake.AutoModelForCausalLM = AutoModelForCausalLM
-        with mock.patch.dict(sys.modules, {"transformers": fake}):
+        with mock.patch.dict(sys.modules, {"transformers": fake, "torch": fake_torch}):
             adapter = LlamaGuard3(self.model_dir, context_limit=128, backend=FakeBackend())
         for kwargs in (captured["tokenizer"][1], captured["model"][1]):
             self.assertIs(kwargs["token"], False)
@@ -861,6 +863,27 @@ class LoaderTests(GuardTestBase):
         self.assertIs(captured["model"][1]["use_safetensors"], True)
         self.assertTrue(adapter._model.eval_called)
         self.assertEqual(adapter._model.device, "cpu")
+
+    def test_causal_loader_loads_explicit_float32(self):
+        """The CPU-only causal lane loads weights as float32 from the start."""
+        captured = {}
+        fake = types.ModuleType("transformers")
+        fake_torch = types.ModuleType("torch")
+        fake_torch.float32 = object()
+
+        class AutoModelForCausalLM:
+            @staticmethod
+            def from_pretrained(*args, **kwargs):
+                captured.update(kwargs)
+                model = FakeCausalModel()
+                model.dtype = kwargs.get("dtype")
+                return model
+
+        fake.AutoModelForCausalLM = AutoModelForCausalLM
+        with mock.patch.dict(sys.modules, {"transformers": fake, "torch": fake_torch}):
+            model = _load_causal_model(str(self.model_dir))
+        self.assertIs(model.dtype, fake_torch.float32)
+        self.assertEqual(model.device, "cpu")
 
     def test_missing_directory_or_hub_identifier_fails_without_leaks(self):
         missing = self.model_dir / "does-not-exist"

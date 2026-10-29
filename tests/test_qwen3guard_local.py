@@ -35,7 +35,7 @@ from nasi_lemak.generation import (
     GenerationConfig,
     RealGatewayAdapters,
 )
-from nasi_lemak.guard_api import Qwen3GuardOutputAdapter
+from nasi_lemak.guard_api import Qwen3GuardOutputAdapter, parse_verdict as http_parse_verdict
 from nasi_lemak.guard_errors import GuardError, GuardInputLimit
 from nasi_lemak.guard_pool import (
     GuardInferencePool,
@@ -53,6 +53,7 @@ from nasi_lemak.qwen3guard import (
     VERDICT_MAX_TOKENS,
     parse_verdict,
     parse_verdict_fields,
+    verdict_blocks,
 )
 from nasi_lemak.scan_context import ScanContext
 from nasi_lemak.server import (
@@ -77,6 +78,9 @@ UPSTREAM_MODEL = "upstream-model-1"
 SAFE = "Safety: Safe\nCategories: None\nRefusal: No"
 UNSAFE = "Safety: Unsafe\nCategories: PII\nRefusal: No"
 CONTROVERSIAL = "Safety: Controversial\nCategories: Unethical Acts\nRefusal: Yes"
+#: The artifact's official input-moderation shape: no Refusal line.
+SAFE_INPUT = "Safety: Safe\nCategories: None"
+UNSAFE_INPUT_JAILBREAK = "Safety: Unsafe\nCategories: Jailbreak"
 
 
 class _ToyTokenizer:
@@ -307,6 +311,60 @@ class LocalTransportTestCase(unittest.TestCase):
 
         client.generate = generate  # type: ignore[method-assign]
         return Qwen3GuardOutputAdapter(client)
+
+
+class VerdictLaneTests(LocalTransportTestCase):
+    """One parser, two lanes: the artifact shapes and the input-only category."""
+
+    def test_input_lane_accepts_two_line_and_three_line_verdicts(self) -> None:
+        two_line = parse_verdict_fields(SAFE_INPUT, lane="input")
+        self.assertEqual(two_line.safety, "Safe")
+        self.assertEqual(two_line.categories, ())
+        self.assertIsNone(two_line.refusal)
+        self.assertTrue(parse_verdict(SAFE_INPUT, lane="input"))
+
+        three_line = parse_verdict_fields(SAFE, lane="input")
+        self.assertEqual(three_line.refusal, "No")
+        self.assertEqual(
+            parse_verdict_fields(UNSAFE, lane="input"),
+            parse_verdict_fields(UNSAFE, lane="response"),
+        )
+
+    def test_response_lane_still_requires_all_three_lines(self) -> None:
+        for call in (
+            lambda: parse_verdict_fields(SAFE_INPUT, lane="response"),
+            lambda: parse_verdict(SAFE_INPUT),
+            lambda: http_parse_verdict(SAFE_INPUT),
+            lambda: parse_verdict_fields(SAFE_INPUT, lane="system"),
+        ):
+            with self.subTest(call=call):
+                with self.assertRaises(GuardError):
+                    call()
+
+    def test_jailbreak_is_input_only(self) -> None:
+        verdict = parse_verdict_fields(UNSAFE_INPUT_JAILBREAK, lane="input")
+        self.assertEqual(verdict.categories, ("Jailbreak",))
+        self.assertTrue(verdict_blocks(verdict, 0.5))
+        # The response lane must never refuse-scan the input-only label.
+        strict = "Safety: Unsafe\nCategories: Jailbreak\nRefusal: No"
+        with self.assertRaises(GuardError):
+            parse_verdict_fields(strict, lane="response")
+        with self.assertRaises(GuardError):
+            http_parse_verdict(strict)
+
+    def test_local_input_lane_uses_the_input_contract(self) -> None:
+        allowing = self._guard(model_kwargs={"output": SAFE_INPUT})
+        self.assertEqual(allowing.scan_attack("hello"), {"decision": "allow"})
+        blocking = self._guard(model_kwargs={"output": UNSAFE_INPUT_JAILBREAK})
+        self.assertEqual(blocking.scan_attack("hello"), {"decision": "block"})
+
+    def test_local_output_lane_uses_the_response_contract(self) -> None:
+        guard = self._guard(model_kwargs={"output": SAFE_INPUT})
+        with self.assertRaises(GuardError):
+            guard.scan_response([{"role": "user", "content": "hello"}], "reply")
+
+    def test_historical_guard_api_names_resolve_to_the_shared_parser(self) -> None:
+        self.assertIs(http_parse_verdict, parse_verdict)
 
 
 class TransportParityTests(LocalTransportTestCase):

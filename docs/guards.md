@@ -133,12 +133,17 @@ unavailable, the adapter fails closed rather than returning a verdict.
 ## Local Qwen3Guard-Gen transport
 
 `nasi_lemak.qwen3_local.Qwen3GuardLocal` runs `Qwen3Guard-Gen-0.6B` in-process on
-CPU for both guard slots. It is a **causal generative** guard: the model emits
-the same three-line verdict the HTTP transport returns, and both transports
-parse that text with the single parser in `nasi_lemak.qwen3guard` (no second
-taxonomy or parser exists). One adapter serves the tokenizer slot, the input
-attack slot and the output slot; `scan_attack` compares the verdict with the
-input threshold and `scan_response` with the output threshold.
+CPU for both guard slots. It is a **causal generative** guard, and both
+transports parse its text with the single parser in `nasi_lemak.qwen3guard` (no
+second taxonomy or parser exists). The parser is lane-aware because the
+artifact defines two verdict shapes: the input slot uses the artifact's official
+two-line `Safety`/`Categories` verdict (an emitted `Refusal` is parsed, an
+absent one is accepted), while the output slot and the HTTP wrapper keep the
+strict three-line `Safety`/`Categories`/`Refusal` product verdict. `Jailbreak`
+is a valid category in the input lane only; the response lane rejects it as an
+unknown label and fails closed. One adapter serves the tokenizer slot, the
+input attack slot and the output slot; `scan_attack` compares the verdict with
+the input threshold and `scan_response` with the output threshold.
 
 Select it explicitly with `NASI_LEMAK_GUARD_BACKEND=qwen3guard-local`. The
 backend name is never inferred from a URL, a model directory or the API
@@ -169,7 +174,12 @@ Loading uses the same discipline as the Meta adapters: an existing local
 directory only, `local_files_only=True`, `trust_remote_code=False`,
 `token=False`, safetensors weights only, device CPU explicitly, and an explicit
 intra-op thread count. There is no Hub resolution, download, cache fallback or
-retry.
+retry. The CPU-only causal loader also loads the weights explicitly as
+`float32`: the checkpoint is stored as bf16 and CPU bf16 matrix multiplication is
+emulated (~330x slower than fp32 in a measured same-shape matmul), so an
+implicit checkpoint dtype made every local scan miss the chat deadline. Llama
+Guard 3 shares that CPU-only causal path and is therefore loaded as `float32`
+too; the Meta sequence-classification loader is unchanged.
 
 `trust_remote_code=False` is not by itself sufficient. The proven D12 failure
 is that `transformers` may still map an unexpected artifact onto a built-in

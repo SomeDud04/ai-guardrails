@@ -15,11 +15,21 @@ Keeping one definition is the point: two copies of the taxonomy or of the
 verdict parser would drift, and a drifted parser is a detection change nobody
 reviewed.
 
-Verdict shape (exactly three lines, in this order)::
+Verdict shape -- the same parser serves two lanes, because the artifact itself
+uses two shapes:
 
-    Safety: Safe|Unsafe|Controversial
-    Categories: None|<comma-separated taxonomy labels>
-    Refusal: Yes|No
+* the **response** lane (the HTTP wrapper and the local output slot) emits the
+  product's three fixed lines::
+
+      Safety: Safe|Unsafe|Controversial
+      Categories: None|<comma-separated taxonomy labels>
+      Refusal: Yes|No
+
+* the **input** lane (the local input slot) emits the artifact's official
+  two-line shape, Safety + Categories, with no Refusal line.  A three-line
+  verdict is still accepted there and its Refusal is parsed, but an absent
+  Refusal is not an error.  ``Jailbreak`` is a valid category in this lane
+  only.
 
 Only a consistent ``Safety: Safe`` + ``Categories: None`` verdict is safe.
 ``Unsafe`` and ``Controversial`` are blocking and must name at least one known
@@ -91,7 +101,7 @@ MAX_LONG_INPUT_TOKENS = 32768
 ACCEPTED_ROLES = frozenset({"system", "user", "assistant"})
 
 #: Ordered so the framing text below is stable.  Order is not part of the
-#: verdict contract; membership is.
+#: verdict contract; membership is.  This is the **response-lane** set.
 CATEGORY_VALUES = (
     "Violent",
     "Non-violent Illegal Acts",
@@ -102,8 +112,21 @@ CATEGORY_VALUES = (
     "Politically Sensitive Topics",
     "Copyright Violation",
 )
+#: Category the Qwen3Guard-Gen artifact defines for input moderation only.  The
+#: response lane must never emit it, so the response parser rejects it as an
+#: unknown label (fail closed) rather than widening the refusal taxonomy.
+INPUT_ONLY_CATEGORY_VALUES = ("Jailbreak",)
+#: Membership the single parser consumes for the input lane.
+INPUT_CATEGORY_VALUES = CATEGORY_VALUES + INPUT_ONLY_CATEGORY_VALUES
 SAFETY_VALUES = ("Safe", "Unsafe", "Controversial")
 REFUSAL_VALUES = ("Yes", "No")
+
+#: Verdict lanes the one parser understands.  ``response`` is the historical
+#: strict three-line product shape and the default; ``input`` is the artifact's
+#: official input-moderation shape.
+LANE_INPUT = "input"
+LANE_RESPONSE = "response"
+VERDICT_LANES = (LANE_INPUT, LANE_RESPONSE)
 
 #: Versioned fixed framing sent with every local guard call.  It carries the
 #: taxonomy and the verdict shape, so its cost is paid on every call and is
@@ -135,11 +158,16 @@ DEFAULT_THRESHOLD = MAX_THRESHOLD
 
 @dataclass(frozen=True)
 class GuardVerdict:
-    """One strictly parsed verdict: the categorical label plus its categories."""
+    """One strictly parsed verdict: the categorical label plus its categories.
+
+    ``refusal`` is ``None`` only for the input lane's official two-line shape,
+    where the artifact emits no Refusal line.  Every response-lane verdict and
+    any three-line input verdict carries the validated ``Yes``/``No`` value.
+    """
 
     safety: str
     categories: tuple[str, ...]
-    refusal: str
+    refusal: str | None
 
     @property
     def safe(self) -> bool:
@@ -195,8 +223,18 @@ def _field(line: str, label: str) -> str:
     return line[len(prefix) :]
 
 
-def parse_categories(value: Any) -> tuple[str, ...] | None:
+def _lane_categories(lane: Any) -> tuple[str, ...]:
+    """Taxonomy membership for one verdict lane; unknown lanes fail closed."""
+    if lane == LANE_RESPONSE:
+        return CATEGORY_VALUES
+    if lane == LANE_INPUT:
+        return INPUT_CATEGORY_VALUES
+    raise GuardError("guard verdict lane is invalid")
+
+
+def parse_categories(value: Any, *, lane: str = LANE_RESPONSE) -> tuple[str, ...] | None:
     """Parse the Categories line: ``None`` or a unique list of known labels."""
+    allowed = _lane_categories(lane)
     if not isinstance(value, str):
         raise GuardError("guard output was not a recognized verdict")
     if value == "None":
@@ -206,24 +244,37 @@ def parse_categories(value: Any) -> tuple[str, ...] | None:
         raise GuardError("guard output was not a recognized verdict")
     if len(set(parts)) != len(parts):
         raise GuardError("guard output was not a recognized verdict")
-    if any(part not in CATEGORY_VALUES for part in parts):
+    if any(part not in allowed for part in parts):
         raise GuardError("guard output was not a recognized verdict")
     return tuple(parts)
 
 
-def parse_verdict_fields(text: Any) -> GuardVerdict:
-    """Parse the complete three-line verdict; only consistent Safe+None allows."""
+def parse_verdict_fields(text: Any, *, lane: str = LANE_RESPONSE) -> GuardVerdict:
+    """Parse the complete verdict for one lane; only consistent Safe+None allows.
+
+    The response lane keeps the historical strict three-line contract.  The
+    input lane accepts the artifact's two-line shape (Safety + Categories) and
+    tolerates an absent Refusal, parsing it strictly when present.
+    """
+    _lane_categories(lane)  # validate the lane before interpreting the text
     if not isinstance(text, str):
         raise GuardError("guard output was not a recognized verdict")
     lines = text.strip().splitlines()
-    if len(lines) != 3:
-        raise GuardError("guard output was not a recognized verdict")
+    if lane == LANE_RESPONSE:
+        if len(lines) != 3:
+            raise GuardError("guard output was not a recognized verdict")
+        refusal: str | None = _field(lines[2], "Refusal")
+    else:
+        if len(lines) not in (2, 3):
+            raise GuardError("guard output was not a recognized verdict")
+        refusal = _field(lines[2], "Refusal") if len(lines) == 3 else None
     safety = _field(lines[0], "Safety")
     categories_text = _field(lines[1], "Categories")
-    refusal = _field(lines[2], "Refusal")
-    if safety not in SAFETY_VALUES or refusal not in REFUSAL_VALUES:
+    if safety not in SAFETY_VALUES or (
+        refusal is not None and refusal not in REFUSAL_VALUES
+    ):
         raise GuardError("guard output was not a recognized verdict")
-    categories = parse_categories(categories_text)
+    categories = parse_categories(categories_text, lane=lane)
     if safety == "Safe":
         if categories is not None:
             raise GuardError("guard output was not a recognized verdict")
@@ -235,9 +286,9 @@ def parse_verdict_fields(text: Any) -> GuardVerdict:
     return GuardVerdict(safety, categories, refusal)
 
 
-def parse_verdict(text: Any) -> bool:
+def parse_verdict(text: Any, *, lane: str = LANE_RESPONSE) -> bool:
     """Return ``True`` only for a consistent ``Safe`` + ``None`` verdict."""
-    return parse_verdict_fields(text).safe
+    return parse_verdict_fields(text, lane=lane).safe
 
 
 def validate_threshold(value: Any) -> float:

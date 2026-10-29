@@ -7,20 +7,26 @@ exercised by the operator on the guardrail VM; its JSON report is the evidence.
 
 from __future__ import annotations
 
+import contextlib
 import json
 import subprocess
 import sys
 import tempfile
+import types
 import unittest
-from contextlib import redirect_stdout
+from contextlib import redirect_stderr, redirect_stdout
 from io import StringIO
 from pathlib import Path
+from unittest import mock
 
 from scripts import bench_guard_models as bench
-from nasi_lemak import generation, guard_api
+from nasi_lemak import generation, guard_api, qwen3guard
 
 REPO_ROOT = Path(__file__).resolve().parents[1]
 SCRIPT = REPO_ROOT / "scripts" / "bench_guard_models.py"
+#: Keep the real class available even while ``measure`` is patched to use a
+#: factory, so the causal double exercises the actual Runner methods.
+REAL_RUNNER = bench.Runner
 
 
 def run_plan() -> tuple[int, str]:
@@ -290,6 +296,63 @@ class ContractTests(unittest.TestCase):
         self.assertEqual(len(bench.CATEGORY_VALUES), len(guard_api._CATEGORY_VALUES))
         self.assertEqual(bench.SAFETY_VALUES, guard_api._SAFETY_VALUES)
         self.assertEqual(bench.REFUSAL_VALUES, guard_api._REFUSAL_VALUES)
+        self.assertEqual(
+            bench.INPUT_ONLY_CATEGORY_VALUES,
+            qwen3guard.INPUT_ONLY_CATEGORY_VALUES,
+        )
+
+    def test_benchmark_reuses_the_canonical_contract_objects(self) -> None:
+        # Import/alias, not mirrored copies: identity is the strongest proof
+        # that there is one taxonomy, one framing and one parser definition.
+        self.assertIs(bench.CATEGORY_VALUES, qwen3guard.CATEGORY_VALUES)
+        self.assertIs(bench.SAFETY_VALUES, qwen3guard.SAFETY_VALUES)
+        self.assertIs(bench.REFUSAL_VALUES, qwen3guard.REFUSAL_VALUES)
+        self.assertIs(
+            bench.INPUT_ONLY_CATEGORY_VALUES,
+            qwen3guard.INPUT_ONLY_CATEGORY_VALUES,
+        )
+        self.assertIs(
+            bench.INPUT_CATEGORY_VALUES, qwen3guard.INPUT_CATEGORY_VALUES
+        )
+        self.assertIs(bench.LANE_INPUT, qwen3guard.LANE_INPUT)
+        self.assertIs(bench.LANE_RESPONSE, qwen3guard.LANE_RESPONSE)
+        self.assertIs(bench.VERDICT_MAX_TOKENS, qwen3guard.VERDICT_MAX_TOKENS)
+        self.assertIs(bench.parse_categories, qwen3guard.parse_categories)
+        self.assertIs(bench.parse_verdict_fields, qwen3guard.parse_verdict_fields)
+        self.assertEqual(bench.PROMPT_FRAMING, qwen3guard.GUARD_FRAMING)
+        self.assertEqual(bench.PROMPT_FRAMING_VERSION, qwen3guard.FRAMING_VERSION)
+
+    def test_slot_lanes_map_output_to_response(self) -> None:
+        self.assertEqual(bench.SLOT_LANES, {"input": "input", "output": "response"})
+        self.assertEqual(bench._slot_lane("input"), qwen3guard.LANE_INPUT)
+        self.assertEqual(bench._slot_lane("output"), qwen3guard.LANE_RESPONSE)
+        with self.assertRaises(bench.BenchmarkError):
+            bench._slot_lane("system")
+
+    def test_input_lane_accepts_the_artifact_two_line_verdict(self) -> None:
+        for sample in (
+            "Safety: Safe\nCategories: None",
+            "Safety: Unsafe\nCategories: Jailbreak",
+            "Safety: Unsafe\nCategories: Violent, PII",
+        ):
+            with self.subTest(sample=sample):
+                result = bench.parse_verdict(sample, lane="input")
+                expected = qwen3guard.parse_verdict_fields(sample, lane="input")
+                self.assertEqual(result["safety"], expected.safety)
+                self.assertEqual(tuple(result["categories"]), expected.categories)
+                self.assertEqual(result["refusal"], expected.refusal)
+                self.assertEqual(result["allow"], expected.safe)
+
+    def test_response_lane_rejects_the_input_shape_and_jailbreak(self) -> None:
+        for sample in (
+            "Safety: Safe\nCategories: None",
+            "Safety: Unsafe\nCategories: Jailbreak\nRefusal: No",
+        ):
+            with self.subTest(sample=sample):
+                with self.assertRaises(bench.BenchmarkError):
+                    bench.parse_verdict(sample)
+                with self.assertRaises(Exception):
+                    guard_api.parse_verdict(sample, lane="response")
 
     def test_parse_verdict_matches_the_product_parser(self) -> None:
         samples = (
@@ -321,6 +384,267 @@ class ContractTests(unittest.TestCase):
         for label in ("LABEL_0", "", None, "Other"):
             with self.assertRaises(bench.BenchmarkError):
                 bench.parse_safety_label(label)
+
+
+class _FakeCausalTokenizer:
+    """Deterministic word tokenizer and chat template; no model files."""
+
+    def __init__(self) -> None:
+        self.eos_token_id = 7
+        self.pad_token_id = 7
+        self._vocab: dict[str, int] = {}
+        self._reverse: dict[int, str] = {}
+        self._outputs: dict[int, str] = {}
+        self._next_token = 100
+        self._next_output = 50_000
+
+    def _word_id(self, word: str) -> int:
+        if word not in self._vocab:
+            self._vocab[word] = self._next_token
+            self._reverse[self._next_token] = word
+            self._next_token += 1
+        return self._vocab[word]
+
+    def __call__(
+        self,
+        text: str,
+        add_special_tokens: bool = False,
+        truncation: bool = False,
+    ) -> dict[str, list[int]]:
+        self.assert_contract(add_special_tokens, truncation)
+        return {"input_ids": [self._word_id(word) for word in text.split()]}
+
+    @staticmethod
+    def assert_contract(add_special_tokens: bool, truncation: bool) -> None:
+        if add_special_tokens is not False or truncation is not False:
+            raise AssertionError(
+                "causal benchmark tokenization must not add specials or truncate"
+            )
+
+    def apply_chat_template(
+        self,
+        conversation: list[dict[str, str]],
+        tokenize: bool = False,
+        add_generation_prompt: bool = True,
+    ) -> str:
+        return "".join(
+            f"{message['role']}: {message['content']}\n" for message in conversation
+        )
+
+    def output_ids(self, text: str) -> list[int]:
+        identifier = self._next_output
+        self._next_output += 1
+        self._outputs[identifier] = text
+        return [identifier]
+
+    def decode(self, ids: list[int], skip_special_tokens: bool = True) -> str:
+        parts: list[str] = []
+        for identifier in ids:
+            if skip_special_tokens and identifier == self.eos_token_id:
+                continue
+            if identifier in self._outputs:
+                parts.append(self._outputs[identifier])
+            else:
+                parts.append(self._reverse.get(identifier, ""))
+        return "".join(parts)
+
+
+class _FakeTorch:
+    """Minimal tensor/thread seam for the real Runner causal path."""
+
+    def __init__(self) -> None:
+        self.threads: list[int] = []
+
+    def tensor(self, values):
+        return values
+
+    def inference_mode(self):
+        return contextlib.nullcontext()
+
+    def set_num_threads(self, value: int) -> None:
+        self.threads.append(value)
+
+
+class _FakeCausalModel:
+    def __init__(self, tokenizer: _FakeCausalTokenizer, output: str) -> None:
+        self.tokenizer = tokenizer
+        self.output = output
+        self.calls = 0
+        self.config = types.SimpleNamespace(
+            max_position_embeddings=32768,
+            eos_token_id=7,
+            architectures=["Qwen3ForCausalLM"],
+            model_type="qwen3",
+        )
+        self.generation_config = None
+
+    def generate(self, **inputs):
+        self.calls += 1
+        prompt = list(inputs["input_ids"][0])
+        return types.SimpleNamespace(
+            sequences=[
+                prompt + self.tokenizer.output_ids(self.output) + [self.tokenizer.eos_token_id]
+            ]
+        )
+
+
+def causal_runner(output: str) -> bench.Runner:
+    """A real Runner with an inference double, so its causal parse path runs."""
+    tokenizer = _FakeCausalTokenizer()
+    model = _FakeCausalModel(tokenizer, output)
+    runner = REAL_RUNNER.__new__(REAL_RUNNER)
+    runner.name = "qwen3guard-gen"
+    runner.kind = "causal"
+    runner.threshold = 0.5
+    runner._torch = _FakeTorch()
+    runner.tokenizer = tokenizer
+    runner.model = model
+    runner._context_window = 32768
+    runner._mapping = {}
+    runner._eos = tokenizer.eos_token_id
+    runner._pad = tokenizer.pad_token_id
+    return runner
+
+
+class _RunnerFactory:
+    """Replace ``bench.Runner`` during ``measure`` with a causal double."""
+
+    def __init__(self, output: str) -> None:
+        self.output = output
+        self.calls = 0
+
+    def __call__(self, model_name, directory, *, threads, threshold):
+        self.calls += 1
+        return causal_runner(self.output)
+
+
+class CausalRunnerLaneTests(unittest.TestCase):
+    """Exercise the real Runner causal parsing, not parse_verdict in isolation."""
+
+    TWO_LINE_INPUT = "Safety: Safe\nCategories: None"
+    THREE_LINE_RESPONSE = "Safety: Safe\nCategories: None\nRefusal: No"
+    JAILBREAK_RESPONSE = "Safety: Unsafe\nCategories: Jailbreak\nRefusal: No"
+
+    def test_input_slot_parses_the_official_two_line_verdict(self) -> None:
+        runner = causal_runner(self.TWO_LINE_INPUT)
+        bucket = bench._measure_bucket(
+            runner, slot="input", language="en", characters=200
+        )
+        self.assertEqual(bucket["errors"], 0)
+        self.assertEqual(
+            bucket["parse_outcomes"],
+            {
+                "parsed_allow": bench.CALLS_PER_BUCKET,
+                "parsed_block": 0,
+                "parse_error": 0,
+                "inference_error": 0,
+            },
+        )
+        self.assertEqual(
+            runner.model.calls, bench.CALLS_PER_BUCKET + bench.WARMUP_CALLS
+        )
+
+    def test_output_slot_parses_the_three_line_response_verdict(self) -> None:
+        # The bug this catches: passing slot="output" as the parser lane.
+        runner = causal_runner(self.THREE_LINE_RESPONSE)
+        bucket = bench._measure_bucket(
+            runner, slot="output", language="en", characters=200
+        )
+        self.assertEqual(bucket["errors"], 0)
+        self.assertEqual(
+            bucket["parse_outcomes"],
+            {
+                "parsed_allow": bench.CALLS_PER_BUCKET,
+                "parsed_block": 0,
+                "parse_error": 0,
+                "inference_error": 0,
+            },
+        )
+        self.assertEqual(
+            runner.model.calls, bench.CALLS_PER_BUCKET + bench.WARMUP_CALLS
+        )
+
+    def test_output_slot_fails_closed_on_two_line_and_jailbreak(self) -> None:
+        for output in (self.TWO_LINE_INPUT, self.JAILBREAK_RESPONSE):
+            with self.subTest(output=output):
+                runner = causal_runner(output)
+                bucket = bench._measure_bucket(
+                    runner, slot="output", language="en", characters=200
+                )
+                self.assertEqual(
+                    bucket["parse_outcomes"]["parsed_allow"], 0
+                )
+                self.assertEqual(
+                    bucket["parse_outcomes"]["parsed_block"], 0
+                )
+                self.assertEqual(
+                    bucket["parse_outcomes"]["inference_error"],
+                    bench.CALLS_PER_BUCKET,
+                )
+                self.assertEqual(bucket["errors"], bench.CALLS_PER_BUCKET)
+                self.assertEqual(
+                    runner.model.calls,
+                    bench.CALLS_PER_BUCKET + bench.WARMUP_CALLS,
+                )
+
+
+class MeasurementReportTests(unittest.TestCase):
+    """The report is evidence for a successful run; a failure writes none."""
+
+    def _run_measurement(self, output: str, *, slot: str = "input"):
+        tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(tmp.cleanup)
+        root = Path(tmp.name)
+        model_dir = root / "artifact"
+        model_dir.mkdir()
+        (model_dir / "model.safetensors").write_bytes(b"\x00" * 8)
+        target = root / "report.json"
+        factory = _RunnerFactory(output)
+        with mock.patch.object(bench, "Runner", factory), mock.patch.object(
+            bench, "thread_settings", return_value=[1]
+        ), redirect_stdout(StringIO()), redirect_stderr(StringIO()):
+            status = bench.measure(
+                model_name="qwen3guard-gen",
+                slot=slot,
+                model_dir=str(model_dir),
+                report_path=str(target),
+                digest=None,
+                cap=2,
+                threshold=0.5,
+            )
+        return status, target, factory
+
+    def test_two_line_input_measurement_writes_the_report(self) -> None:
+        status, target, factory = self._run_measurement(
+            "Safety: Safe\nCategories: None"
+        )
+        self.assertEqual(status, 0)
+        self.assertTrue(target.exists())
+        report = json.loads(target.read_text(encoding="utf-8"))
+        self.assertEqual(bench.validate_report(report), [])
+        self.assertEqual(report["totals"]["errors"], 0)
+        self.assertEqual(report["candidate"]["slot"], "input")
+        self.assertEqual(factory.calls, 1)
+
+    def test_malformed_measurement_returns_failure_and_writes_no_report(self) -> None:
+        status, target, factory = self._run_measurement(
+            "Safety: Safe\nCategories: Violent"
+        )
+        self.assertEqual(status, 1)
+        self.assertFalse(target.exists())
+        self.assertEqual(factory.calls, 1)
+
+    def test_output_slot_measurement_uses_the_response_lane(self) -> None:
+        status, target, factory = self._run_measurement(
+            "Safety: Safe\nCategories: None\nRefusal: No", slot="output"
+        )
+        self.assertEqual(status, 0)
+        self.assertTrue(target.exists())
+        report = json.loads(target.read_text(encoding="utf-8"))
+        self.assertEqual(bench.validate_report(report), [])
+        self.assertEqual(report["totals"]["errors"], 0)
+        self.assertEqual(report["candidate"]["slot"], "output")
+        self.assertEqual(factory.calls, 1)
 
 
 class ReportSchemaTests(unittest.TestCase):
