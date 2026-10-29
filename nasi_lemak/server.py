@@ -122,13 +122,30 @@ ENV_PROMPT_GUARD_THRESHOLD = "NASI_LEMAK_PROMPT_GUARD_THRESHOLD"
 ENV_LLAMA_GUARD_CONTEXT_LIMIT = "NASI_LEMAK_LLAMA_GUARD_CONTEXT_LIMIT"
 
 # Explicit guard backend selection.  ``local`` preserves the existing native
-# artifacts; ``api`` uses the versioned input contract plus the Qwen3Guard
-# output adapter over dedicated guard clients.  No mixed backend and no silent
+# Meta artifacts; ``api`` uses the versioned input contract plus the Qwen3Guard
+# output adapter over dedicated guard clients; ``qwen3guard-local`` runs
+# Qwen3Guard-Gen in-process for both slots.  No mixed backend and no silent
 # fallback between them is supported.
 ENV_GUARD_BACKEND = "NASI_LEMAK_GUARD_BACKEND"
 GUARD_BACKEND_LOCAL = "local"
 GUARD_BACKEND_API = "api"
-GUARD_BACKENDS = (GUARD_BACKEND_LOCAL, GUARD_BACKEND_API)
+GUARD_BACKEND_QWEN3GUARD = "qwen3guard-local"
+GUARD_BACKENDS = (
+    GUARD_BACKEND_LOCAL,
+    GUARD_BACKEND_API,
+    GUARD_BACKEND_QWEN3GUARD,
+)
+
+# Local Qwen3Guard-Gen contract.  Every setting is independent: no directory,
+# threshold, URL or budget is inferred from another backend's value.  The
+# thresholds default to the categorical severity floor (0.5) and can only
+# tighten, never relax it.  Worker/thread defaults come from guard_pool.
+ENV_QWEN3GUARD_MODEL_DIR = "NASI_LEMAK_QWEN3GUARD_MODEL_DIR"
+ENV_QWEN3GUARD_INPUT_THRESHOLD = "NASI_LEMAK_QWEN3GUARD_INPUT_THRESHOLD"
+ENV_QWEN3GUARD_OUTPUT_THRESHOLD = "NASI_LEMAK_QWEN3GUARD_OUTPUT_THRESHOLD"
+ENV_QWEN3GUARD_WORKERS = "NASI_LEMAK_QWEN3GUARD_WORKERS"
+ENV_QWEN3GUARD_THREADS = "NASI_LEMAK_QWEN3GUARD_THREADS"
+ENV_QWEN3GUARD_LONG_INPUT = "NASI_LEMAK_QWEN3GUARD_LONG_INPUT"
 
 INPUT_GUARD_ENV_PREFIX = "NASI_LEMAK_INPUT_GUARD"
 OUTPUT_GUARD_ENV_PREFIX = "NASI_LEMAK_OUTPUT_GUARD"
@@ -367,6 +384,99 @@ def _guard_context_limit(value: str) -> int:
     return limit
 
 
+def _qwen3guard_threshold(
+    environ: dict[str, str], name: str, default: float
+) -> float:
+    """Validate one independent categorical severity floor (ceiling 0.5)."""
+    raw = environ.get(name)
+    if raw is None:
+        return default
+    if not isinstance(raw, str):
+        raise ValueError("guard threshold is invalid")
+    try:
+        parsed = float(raw)
+    except (TypeError, ValueError):
+        raise ValueError("guard threshold is invalid") from None
+    from .qwen3guard import validate_threshold
+
+    try:
+        return validate_threshold(parsed)
+    except Exception:
+        # A value above the controversial severity is invalid configuration,
+        # not a laxer knob, and produces no adapter.
+        raise ValueError("guard threshold is invalid") from None
+
+
+def _qwen3guard_optional_int(environ: dict[str, str], name: str) -> int | None:
+    """Parse an optional integer without inferring a default here."""
+    raw = environ.get(name)
+    if raw is None:
+        return None
+    if not isinstance(raw, str):
+        raise ValueError("guard worker budget is invalid")
+    try:
+        return int(raw, 10)
+    except (TypeError, ValueError):
+        raise ValueError("guard worker budget is invalid") from None
+
+
+def _qwen3guard_long_input(environ: dict[str, str]) -> int:
+    from .qwen3guard import (
+        DEFAULT_LONG_INPUT_TOKENS,
+        MAX_LONG_INPUT_TOKENS,
+        MIN_LONG_INPUT_TOKENS,
+    )
+
+    raw = environ.get(ENV_QWEN3GUARD_LONG_INPUT)
+    if raw is None:
+        return DEFAULT_LONG_INPUT_TOKENS
+    if not isinstance(raw, str):
+        raise ValueError("guard input budget is invalid")
+    try:
+        value = int(raw, 10)
+    except (TypeError, ValueError):
+        raise ValueError("guard input budget is invalid") from None
+    if not MIN_LONG_INPUT_TOKENS <= value <= MAX_LONG_INPUT_TOKENS:
+        raise ValueError("guard input budget is invalid")
+    return value
+
+
+def _qwen3guard_config(
+    environ: dict[str, str],
+) -> tuple[str, float, float, int, int, int]:
+    """Validate every local Qwen3Guard setting before any loader runs.
+
+    The directory, both thresholds, the explicit worker/thread budget and the
+    long-input budget are all independent.  Nothing is inferred from a Meta
+    guard directory, the API backend or another Qwen3Guard setting.  Any
+    failure propagates to the caller, which returns no adapter.
+    """
+    from .guard_pool import resolve_inference_budget
+    from .qwen3guard import DEFAULT_THRESHOLD
+
+    directory = _existing_guard_directory(
+        _required_guard_setting(environ, ENV_QWEN3GUARD_MODEL_DIR)
+    )
+    input_threshold = _qwen3guard_threshold(
+        environ, ENV_QWEN3GUARD_INPUT_THRESHOLD, DEFAULT_THRESHOLD
+    )
+    output_threshold = _qwen3guard_threshold(
+        environ, ENV_QWEN3GUARD_OUTPUT_THRESHOLD, DEFAULT_THRESHOLD
+    )
+    workers, threads = resolve_inference_budget(
+        _qwen3guard_optional_int(environ, ENV_QWEN3GUARD_WORKERS),
+        _qwen3guard_optional_int(environ, ENV_QWEN3GUARD_THREADS),
+    )
+    return (
+        directory,
+        input_threshold,
+        output_threshold,
+        workers,
+        threads,
+        _qwen3guard_long_input(environ),
+    )
+
+
 def _load_prompt_guard(directory: str, *, threshold: float) -> Any:
     from .guards import PromptGuard2
 
@@ -377,6 +487,27 @@ def _load_llama_guard(directory: str, *, context_limit: int) -> Any:
     from .guards import LlamaGuard3
 
     return LlamaGuard3(directory, context_limit=context_limit)
+
+
+def _load_qwen3guard_local(
+    directory: str,
+    *,
+    input_threshold: float,
+    output_threshold: float,
+    workers: int,
+    threads: int,
+    long_input: int,
+) -> Any:
+    from .qwen3_local import Qwen3GuardLocal
+
+    return Qwen3GuardLocal(
+        directory,
+        input_threshold=input_threshold,
+        output_threshold=output_threshold,
+        workers=workers,
+        threads=threads,
+        long_input=long_input,
+    )
 
 
 def _load_generation_client(config: Any) -> Any:
@@ -462,6 +593,7 @@ def make_adapters_from_env(
     *,
     prompt_guard_loader: Any = None,
     llama_guard_loader: Any = None,
+    qwen3guard_loader: Any = None,
     client_loader: Any = None,
 ) -> Any:
     """Build real local guard/generation adapters from server-side settings.
@@ -479,13 +611,22 @@ def make_adapters_from_env(
     * ``NASI_LEMAK_MODE``: ``guarded`` (default) or ``test``.
     * For ``test``: explicit ``NASI_LEMAK_ALLOW_UNGUARDED_TEST=true`` plus a
       valid generation configuration.
-    * ``NASI_LEMAK_GUARD_BACKEND``: ``local`` (default) or ``api``. Unknown or
-      partial values return ``None``; there is no fallback between backends.
+    * ``NASI_LEMAK_GUARD_BACKEND``: ``local`` (default), ``api`` or
+      ``qwen3guard-local``. Unknown or partial values return ``None``; there is
+      no fallback between backends.
     * For ``guarded`` + ``local``: ``NASI_LEMAK_GENERATION_URL`` and
       ``NASI_LEMAK_GENERATION_MODEL`` (plus the existing auth settings),
       ``NASI_LEMAK_PROMPT_GUARD_MODEL_DIR``, ``NASI_LEMAK_LLAMA_GUARD_MODEL_DIR``,
       ``NASI_LEMAK_PROMPT_GUARD_THRESHOLD`` and
       ``NASI_LEMAK_LLAMA_GUARD_CONTEXT_LIMIT``.
+    * For ``guarded`` + ``qwen3guard-local``: the same generation settings plus
+      ``NASI_LEMAK_QWEN3GUARD_MODEL_DIR`` (required). Optional, independent
+      settings are ``NASI_LEMAK_QWEN3GUARD_INPUT_THRESHOLD`` and
+      ``..._OUTPUT_THRESHOLD`` (default 0.5, valid range 0.0..0.5),
+      ``..._WORKERS`` and ``..._THREADS`` (defaults derived from the CPU count
+      by :mod:`nasi_lemak.guard_pool`) and ``..._LONG_INPUT`` (default 8192,
+      minimum 512, maximum 32768). No Meta guard directory, URL or threshold is
+      read on this path, and every value is validated before the loader runs.
     * For ``guarded`` + ``api``: the same generation settings plus explicit
       ``NASI_LEMAK_INPUT_GUARD_{URL,MODEL,AUTH,THRESHOLD,CONTRACT}`` and
       ``NASI_LEMAK_OUTPUT_GUARD_{URL,MODEL,AUTH}``, each with exactly one of
@@ -556,6 +697,45 @@ def make_adapters_from_env(
                 tokenizer=input_guard,
                 attack_guard=input_guard,
                 output_guard=output_guard,
+            )
+        except Exception:
+            return None
+
+    if mode == MODE_GUARDED and backend == GUARD_BACKEND_QWEN3GUARD:
+        # Local Qwen3Guard-Gen: validate every dedicated setting before any
+        # loader, then build one causal guard shared by the tokenizer, attack
+        # and output slots.  A failure at any stage yields no adapter; the Meta
+        # directories and the API settings are never consulted.
+        try:
+            (
+                qwen_directory,
+                qwen_input_threshold,
+                qwen_output_threshold,
+                qwen_workers,
+                qwen_threads,
+                qwen_long_input,
+            ) = _qwen3guard_config(env)
+        except Exception:
+            return None
+        try:
+            client = generation_loader(config)
+        except Exception:
+            return None
+        try:
+            guard_loader = qwen3guard_loader or _load_qwen3guard_local
+            guard = guard_loader(
+                qwen_directory,
+                input_threshold=qwen_input_threshold,
+                output_threshold=qwen_output_threshold,
+                workers=qwen_workers,
+                threads=qwen_threads,
+                long_input=qwen_long_input,
+            )
+            return RealGatewayAdapters(
+                client,
+                tokenizer=guard,
+                attack_guard=guard,
+                output_guard=guard,
             )
         except Exception:
             return None

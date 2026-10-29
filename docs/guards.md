@@ -130,6 +130,110 @@ unavailable, the adapter fails closed rather than returning a verdict.
   weights here, and the default Docker image does not install the `guards` extra
   or mount model directories.
 
+## Local Qwen3Guard-Gen transport
+
+`nasi_lemak.qwen3_local.Qwen3GuardLocal` runs `Qwen3Guard-Gen-0.6B` in-process on
+CPU for both guard slots. It is a **causal generative** guard: the model emits
+the same three-line verdict the HTTP transport returns, and both transports
+parse that text with the single parser in `nasi_lemak.qwen3guard` (no second
+taxonomy or parser exists). One adapter serves the tokenizer slot, the input
+attack slot and the output slot; `scan_attack` compares the verdict with the
+input threshold and `scan_response` with the output threshold.
+
+Select it explicitly with `NASI_LEMAK_GUARD_BACKEND=qwen3guard-local`. The
+backend name is never inferred from a URL, a model directory or the API
+selector. Every setting is independent and is validated **before** any loader
+runs; a failure produces no adapter and the app stays unready:
+
+| Environment variable | Required | Default | Notes |
+| --- | --- | --- | --- |
+| `NASI_LEMAK_QWEN3GUARD_MODEL_DIR` | yes | none | Existing local directory only; no Hub ID, URL or download |
+| `NASI_LEMAK_QWEN3GUARD_INPUT_THRESHOLD` | no | `0.5` | Categorical severity floor; valid range `0.0..0.5` |
+| `NASI_LEMAK_QWEN3GUARD_OUTPUT_THRESHOLD` | no | `0.5` | Independent; same range |
+| `NASI_LEMAK_QWEN3GUARD_WORKERS` | no | from CPU count | `1..8`; `workers * threads <= cpu_count` |
+| `NASI_LEMAK_QWEN3GUARD_THREADS` | no | from CPU count | `1..8`; explicit intra-op torch threads |
+| `NASI_LEMAK_QWEN3GUARD_LONG_INPUT` | no | `8192` | Single-call payload budget; `512..32768` |
+
+The defaults are derived by `nasi_lemak.guard_pool`: `workers =
+clamp(cpu // 2, 1, 4)` and `threads = clamp(cpu // workers, 1, 2)`. On the
+4-vCPU guard box that is **`(2, 2)`**: two concurrent guard inferences, two
+torch intra-op threads each. An explicit pair is rejected if either value is
+outside `1..8` or if `workers * threads` exceeds the CPU count; nothing is
+silently clamped. The pool admits at most `workers` scans, runs each request at
+most once, honours a per-request deadline/cancellation before a slot reaches
+the model, and propagates every failure as `GuardError` (never an allow).
+
+### Local-only loading and structural validation
+
+Loading uses the same discipline as the Meta adapters: an existing local
+directory only, `local_files_only=True`, `trust_remote_code=False`,
+`token=False`, safetensors weights only, device CPU explicitly, and an explicit
+intra-op thread count. There is no Hub resolution, download, cache fallback or
+retry.
+
+`trust_remote_code=False` is not by itself sufficient. The proven D12 failure
+is that `transformers` may still map an unexpected artifact onto a built-in
+class and silently initialise a **random** model, including a classifier. The
+transport therefore fails closed at two independent points:
+
+1. **Before loading**, by filename and artifact layout: reject
+   `modeling_qwen3_guard.py` or `configuration_qwen3.py`, reject any
+   `auto_map`, require a readable `config.json` declaring a `qwen3` model type
+   and an explicit causal-LM architecture (missing or malformed declarations
+   fail closed), and require at least one local `.safetensors` weight file.
+   `Qwen3Guard-Stream` is excluded by design because it needs the rejected
+   remote-code modules.
+2. **After loading**, on the actual object: require a callable `generate`,
+   require a valid causal architecture declaration, reject an actual classifier
+   class or head, and require a positive context window plus a valid EOS
+   configuration. For a checkpoint loaded from disk the runtime class must
+   additionally be the supported Qwen3 causal class, so a
+   sequence-classification object cannot pass merely by copying a causal
+   declaration into its config. A generic `id2label` map (`LABEL_0`,
+   `LABEL_1`, ...) is ordinary `PretrainedConfig` metadata and is **not**
+   treated as proof of a classifier; nor is its presence used to accept one.
+   Any structural surprise is a `GuardError`, never a default allow.
+
+### One-call long input
+
+Long input is screened in **one call**. There is no window split and no
+truncation, because the 432-unit fixed framing is paid on every call and
+splitting multiplies the dominant fixed cost. The budget is a payload budget;
+the complete framed prompt is checked separately against the model window:
+
+```
+default: 8192 payload + 432 framing + 128 verdict reserve = 8752
+         inside the 32768-position window
+maximum: 32768 payload; the framing and 128-token reserve cannot also fit,
+         so the very longest inputs are unscreenable
+```
+
+An input above the configured payload budget fails closed as `INPUT_LIMIT`. At
+the `32768` ceiling a payload whose framed prompt would exceed
+`32768 - 128 = 32640` positions fails closed the same way. It is never
+truncated and never silently passed.
+
+### Categorical verdict and threshold
+
+The verdict is categorical (`Safety: Safe|Controversial|Unsafe` plus validated
+categories and refusal), not a calibrated probability. A threshold is a
+**severity floor** over `Safe=0.0`, `Controversial=0.5`, `Unsafe=1.0`, and the
+decision is `severity >= threshold`. `0.5` is the maximum accepted value: above
+it a `Controversial` verdict would stop blocking, which would relax the
+contract rather than tighten it. A value above `0.5` is invalid configuration,
+not a laxer knob.
+
+### Honest limits
+
+No Qwen3Guard checkpoint has been executed in this workspace or in the test
+suite: there is no weight load, tokenizer execution, generation or network
+access in these tests. All transport, pool, long-input and wiring tests use
+explicit inference doubles. The benchmark measurement (latency, memory,
+throughput) is a separate operator activity on the VM, and nothing here is
+detection-quality, false-positive/negative or multilingual-coverage evidence.
+Stream is not supported under this loader discipline; it would require remote
+code, which the product forbids.
+
 ## References
 
 - Meta Prompt Guard 2 86M model card:
