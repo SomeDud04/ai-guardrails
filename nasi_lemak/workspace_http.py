@@ -436,6 +436,7 @@ def load_workspace_runtime(
             policy=gateway.policy,
             app_id=gateway.app_id,
             limits=getattr(gateway, "limits", None),
+            diagnostics=runtime.diagnostics,
         )
     except Exception:
         runtime.error = "workspace safety gateway is unavailable"

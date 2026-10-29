@@ -1315,6 +1315,11 @@ def make_app(
         # limits close it as well, before any provider work can be dispatched.
         workspace_runtime.ready = False
         workspace_runtime.error = "chat limits configuration is invalid"
+    if workspace_runtime.enabled:
+        # Public ``/v1`` and ``/chat`` use the app gateway, not the workspace's
+        # internal gateway.  Share the one fixed-code counter store so their
+        # generation failures appear in the same ``/health/ready`` diagnostics.
+        runtime_gateway.diagnostics = workspace_runtime.diagnostics
 
     @asynccontextmanager
     async def lifespan(_app: FastAPI):

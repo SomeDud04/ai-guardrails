@@ -64,6 +64,11 @@ services:
       - NASI_LEMAK_GENERATION_MODEL=${NASI_LEMAK_GENERATION_MODEL:-}
       - NASI_LEMAK_GENERATION_AUTH=${NASI_LEMAK_GENERATION_AUTH:-}
       - NASI_LEMAK_GENERATION_ALLOW_INSECURE_HTTP=${NASI_LEMAK_GENERATION_ALLOW_INSECURE_HTTP:-}
+      # Optional non-secret generation tunables.  Bare pass-through entries keep
+      # the validated application behavior when unset, including the exact
+      # existing upstream request body.
+      - NASI_LEMAK_GENERATION_ENABLE_THINKING=${NASI_LEMAK_GENERATION_ENABLE_THINKING:-}
+      - NASI_LEMAK_GENERATION_SYSTEM_PROMPT=${NASI_LEMAK_GENERATION_SYSTEM_PROMPT:-}
       # Optional bearer generation key.  Bare pass-through entry: no default
       # and no value is embedded here.  The operator sets it in the git-ignored
       # .secrets/compose.env only; when auth is bearer the gateway fails closed

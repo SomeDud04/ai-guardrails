@@ -5,6 +5,7 @@ from __future__ import annotations
 import hashlib
 import hmac
 import json
+import logging
 import re
 import secrets
 import threading
@@ -17,11 +18,19 @@ from typing import Any
 
 from .audit import AuditStore, SqliteAuditStore
 from .controls import GatewayControl, block_detail
+from .diagnostics import SIGNAL_CODES, record_signal
 from .generation import GenerationError, conservative_byte_budget
 from .guards import GuardInputLimit
 from .limits import ChatLimits
 from .pii import mask_text
 from .scan_context import ScanContext
+
+
+LOGGER = logging.getLogger(__name__)
+# Fixed stage vocabulary for the one content-free failure log line.
+FAILURE_STAGES = frozenset(
+    {"input_guard", "generation", "output_guard", "audit", "other"}
+)
 
 
 MAX_TOKEN_BUDGET = 32768
@@ -258,6 +267,7 @@ class Gateway:
         audit_store: AuditStore | None = None,
         app_id: str | None = None,
         limits: ChatLimits | None = None,
+        diagnostics: Any = None,
     ):
         if key_digest is not None:
             if not isinstance(key_digest, str) or len(key_digest) != 64:
@@ -297,6 +307,9 @@ class Gateway:
         self.policy = policy
         self._audit_lock = threading.Lock()
         self.fail_audit_stage: str | None = None
+        # Optional fixed-code diagnostic sink (for example ``SafeDiagnostics``).
+        # It is best-effort and never changes fail-closed ordering.
+        self.diagnostics = diagnostics
         self.app_id = app_id
 
     def _audit(self, request_id: str, event_type: str, decision: str, code: str | None = None) -> None:
@@ -425,7 +438,9 @@ class Gateway:
                 return self._error(503, "UNAVAILABLE", request_id)
             return self._error(413, "INPUT_LIMIT", request_id)
         except Exception:
-            self._terminal_best_effort(request_id, "failed", "UNAVAILABLE")
+            self._terminal_best_effort(
+                request_id, "failed", "UNAVAILABLE", stage="input_guard"
+            )
             return self._error(503, "UNAVAILABLE", request_id)
         if count > self.policy.token_budget:
             try:
@@ -433,9 +448,13 @@ class Gateway:
             except Exception:
                 return self._error(503, "UNAVAILABLE", request_id)
             return self._error(413, "INPUT_LIMIT", request_id)
+        # Track the current pipeline stage so a generic failure is labelled with
+        # the step that raised it.  Only fixed vocabulary values are stored.
+        stage = "other"
         try:
             if scan_context is not None and scan_context.cancelled():
                 raise _ScanCancelled()
+            stage = "input_guard"
             if control.input_check_enabled:
                 if scan_context is not None and getattr(
                     self.adapters, "supports_scan_context", False
@@ -452,6 +471,7 @@ class Gateway:
                     self._audit(request_id, "request_blocked", "blocked", "POLICY_BLOCK")
                     return self._blocked(request_id, "INPUT_GUARD_BLOCK")
                 _sink("input_decision", "allow")
+            stage = "other"
             # Deny phrases are literal policy text, checked across every accepted
             # input turn before generation.  Disabling the model classifier never
             # disables this server-side policy control.
@@ -470,6 +490,7 @@ class Gateway:
                 for message in messages
             ]
             _sink("sanitized_messages", [dict(message) for message in safe_messages])
+            stage = "generation"
             output = self.adapters.generate(safe_messages, self.policy.model, max_tokens)
             if not isinstance(output, str):
                 raise ValueError("invalid generation result")
@@ -478,9 +499,14 @@ class Gateway:
             # generation, not a policy block, and no alert is written.  Only a
             # fixed internal code crosses the boundary.
             if exc.diagnostic_code:
-                if scan_context is not None:
-                    scan_context.note(exc.diagnostic_code)
-            self._terminal_best_effort(request_id, "failed", "UNAVAILABLE")
+                self._note_diagnostic(scan_context, exc.diagnostic_code)
+            self._terminal_best_effort(
+                request_id,
+                "failed",
+                "UNAVAILABLE",
+                stage="generation",
+                diagnostic_code=exc.diagnostic_code,
+            )
             return self._error(503, "UNAVAILABLE", request_id)
         except GuardInputLimit:
             try:
@@ -489,7 +515,9 @@ class Gateway:
                 return self._error(503, "UNAVAILABLE", request_id)
             return self._error(413, "INPUT_LIMIT", request_id)
         except Exception:
-            self._terminal_best_effort(request_id, "failed", "UNAVAILABLE")
+            self._terminal_best_effort(
+                request_id, "failed", "UNAVAILABLE", stage=stage
+            )
             return self._error(503, "UNAVAILABLE", request_id)
         try:
             if scan_context is not None and scan_context.cancelled():
@@ -518,17 +546,58 @@ class Gateway:
                 self._audit(request_id, "request_blocked", "blocked", "POLICY_BLOCK")
                 return self._blocked(request_id, "OUTPUT_POLICY_BLOCK")
             masked_output = mask_pii(output, control.output_masks)
+        except Exception:
+            self._terminal_best_effort(
+                request_id, "failed", "UNAVAILABLE", stage="output_guard"
+            )
+            return self._error(503, "UNAVAILABLE", request_id)
+        try:
             self._audit(request_id, "request_completed", "allowed")
         except Exception:
-            self._terminal_best_effort(request_id, "failed", "UNAVAILABLE")
+            self._terminal_best_effort(
+                request_id, "failed", "UNAVAILABLE", stage="audit"
+            )
             return self._error(503, "UNAVAILABLE", request_id)
         return 200, {"id": request_id, "object": "chat.completion", "model": self.policy.model, "choices": [{"index": 0, "message": {"role": "assistant", "content": masked_output}, "finish_reason": "stop"}]}
 
-    def _terminal_best_effort(self, request_id: str, decision: str, code: str):
+    def _note_diagnostic(self, scan_context: ScanContext | None, code: str) -> None:
+        """Record one fixed code on the per-request and/or gateway sink once."""
+        if scan_context is not None:
+            scan_context.note(code)
+            if self.diagnostics is not None and scan_context.diagnostic is self.diagnostics:
+                return
+        record_signal(self.diagnostics, code)
+
+    def _terminal_best_effort(
+        self,
+        request_id: str,
+        decision: str,
+        code: str,
+        *,
+        stage: str = "other",
+        diagnostic_code: str | None = None,
+    ):
+        self._log_failure(request_id, stage, diagnostic_code)
         try:
             self._audit(request_id, "request_failed", decision, code)
         except Exception:
             pass
+
+    @staticmethod
+    def _log_failure(
+        request_id: str, stage: str, diagnostic_code: str | None
+    ) -> None:
+        """Emit exactly one content-free failure stage line.
+
+        Only the server-generated request id and fixed vocabulary values are
+        rendered.  Prompts, replies, provider bodies, exception text and keys
+        are never passed here.
+        """
+        safe_stage = stage if stage in FAILURE_STAGES else "other"
+        fields = [f"request_failed request_id={request_id}", f"stage={safe_stage}"]
+        if diagnostic_code in SIGNAL_CODES:
+            fields.append(f"diagnostic={diagnostic_code}")
+        LOGGER.warning(" ".join(fields))
 
     def _validate(self, body: Any):
         if not isinstance(body, dict) or set(body) - {"model", "messages", "stream", "max_tokens"}:

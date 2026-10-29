@@ -25,12 +25,14 @@ from nasi_lemak.generation import (
     ENV_ENABLE_THINKING,
     ENV_MAX_RESPONSE_BYTES,
     ENV_MODEL,
+    ENV_SYSTEM_PROMPT,
     ENV_TIMEOUT,
     ENV_URL,
     GenerationClient,
     GenerationConfig,
     GenerationConfigError,
     GenerationError,
+    MAX_SYSTEM_PROMPT_CHARS,
     RealGatewayAdapters,
     make_real_gateway,
 )
@@ -308,6 +310,42 @@ class ConfigTests(FixtureMixin):
             with self.assertRaises(GenerationConfigError):
                 GenerationClient(config)
 
+    def test_system_prompt_is_validated_and_never_exposed_by_safe_summary(self):
+        base = {ENV_URL: "https://host/v1", ENV_MODEL: "m", ENV_API_KEY: KEY}
+        prompt = "Answer concisely, in at most about 200 words."
+        env = dict(base)
+        env[ENV_SYSTEM_PROMPT] = prompt
+        config = GenerationConfig.from_env(env)
+        self.assertEqual(config.system_prompt, prompt)
+        summary = config.safe_summary()
+        self.assertTrue(summary["system_prompt_configured"])
+        self.assertEqual(summary["system_prompt_chars"], len(prompt))
+        self.assertNotIn(prompt, json.dumps(summary))
+        self.assertNotIn(prompt, repr(config))
+        self.assertNotIn(prompt, str(config))
+
+        # Blank values are the documented way to keep the prompt unset.
+        for blank in ("", "   ", "\t"):
+            with self.subTest(blank=repr(blank)):
+                env = dict(base)
+                env[ENV_SYSTEM_PROMPT] = blank
+                self.assertIsNone(GenerationConfig.from_env(env).system_prompt)
+
+        unset = GenerationConfig.from_env(base).safe_summary()
+        self.assertFalse(unset["system_prompt_configured"])
+        self.assertEqual(unset["system_prompt_chars"], 0)
+
+        for invalid in (
+            "x" * (MAX_SYSTEM_PROMPT_CHARS + 1),
+            "line\r\nX-System: injected",
+            "nul\x00byte",
+        ):
+            with self.subTest(value=invalid[:24]):
+                env = dict(base)
+                env[ENV_SYSTEM_PROMPT] = invalid
+                with self.assertRaises(GenerationConfigError):
+                    GenerationConfig.from_env(env)
+
 
 class TransportTests(FixtureMixin):
     def test_request_uses_prefix_headers_and_exact_payload(self):
@@ -423,6 +461,49 @@ class TransportTests(FixtureMixin):
                 if name != "chat_template_kwargs"
             },
             json.loads(httpd.requests[0]["body"]),
+        )
+
+    def test_system_prompt_prepends_one_message_and_unset_payload_is_unchanged(self):
+        httpd = self.start_server()
+        messages = [{"role": "user", "content": "hello"}]
+        prompt = "Answer concisely, in at most about 200 words."
+
+        unset_client = GenerationClient(
+            self.config(httpd, system_prompt=None)
+        )
+        self.assertEqual(unset_client.generate(messages, 8), "safe answer")
+        unset_payload = json.loads(httpd.requests[0]["body"])
+        self.assertEqual(unset_payload["messages"], messages)
+
+        prompt_client = GenerationClient(self.config(httpd, system_prompt=prompt))
+        self.assertEqual(prompt_client.generate(messages, 8), "safe answer")
+        prompt_payload = json.loads(httpd.requests[1]["body"])
+        self.assertEqual(
+            prompt_payload["messages"][0],
+            {"role": "system", "content": prompt},
+        )
+        self.assertEqual(
+            sum(
+                1
+                for message in prompt_payload["messages"]
+                if message["role"] == "system"
+            ),
+            1,
+        )
+        # Only the leading message differs; the caller conversation, model,
+        # budget and stream flag stay exactly as they are when unset.
+        self.assertEqual(prompt_payload["messages"][1:], unset_payload["messages"])
+        self.assertEqual(
+            {
+                name: value
+                for name, value in prompt_payload.items()
+                if name != "messages"
+            },
+            {
+                name: value
+                for name, value in unset_payload.items()
+                if name != "messages"
+            },
         )
 
     def test_finish_reason_diagnostics_are_specific_and_never_expose_reasoning(self):

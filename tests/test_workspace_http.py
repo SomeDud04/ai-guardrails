@@ -714,6 +714,27 @@ class TurnFlowTests(WorkspaceHTTPBase):
         self.assertEqual(counters[BLOCK_PAYLOAD_REJECTED], 0)
         self.assertNotIn("truncated generation prompt", health.text)
 
+    def test_v1_generation_failure_increments_the_shared_health_counter(self) -> None:
+        self.adapters.generate_error = GenerationError(
+            "synthetic truncated response",
+            diagnostic_code=GENERATION_TRUNCATED,
+        )
+        response = self.client.post(
+            "/v1/chat/completions",
+            json={
+                "model": "pilot-local",
+                "messages": [{"role": "user", "content": "truncated v1 prompt"}],
+            },
+            headers={"Authorization": f"Bearer {LEGACY_KEY}"},
+        )
+        self.assert_error(response, 503, "UNAVAILABLE")
+        self.assertNotIn("choices", response.text)
+
+        health = self.client.get("/health/ready")
+        self.assertEqual(health.status_code, 200, health.text)
+        self.assertEqual(health.json()["diagnostics"][GENERATION_TRUNCATED], 1)
+        self.assertNotIn("truncated v1 prompt", health.text)
+
     def test_malformed_policy_block_records_counter_without_alert(self) -> None:
         class MalformedBlockGateway:
             def __init__(self, gateway: Gateway) -> None:

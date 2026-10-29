@@ -3,13 +3,29 @@ import tempfile
 import unittest
 from pathlib import Path
 
+from nasi_lemak.diagnostics import GENERATION_TRUNCATED, SafeDiagnostics
 from nasi_lemak.gateway import Gateway, MemoryAdapters, Policy, make_demo_gateway
+from nasi_lemak.generation import GenerationError, RealGatewayAdapters
+from nasi_lemak.scan_context import ScanContext
 
 
 def request(messages=None, **extra):
     body = {"model": "pilot-local", "messages": messages or [{"role": "user", "content": "Hello"}]}
     body.update(extra)
     return body
+
+
+class RaisingGenerationAdapters(MemoryAdapters):
+    """Synthetic adapters whose generation raises a fixed error."""
+
+    def __init__(self, error):
+        super().__init__()
+        self.generation_error = error
+
+    def generate(self, messages, model, max_tokens):
+        self.generation_inputs.append([dict(message) for message in messages])
+        self.generate_options.append((model, max_tokens))
+        raise self.generation_error
 
 
 class GatewayTests(unittest.TestCase):
@@ -244,6 +260,158 @@ class GatewayTests(unittest.TestCase):
         self.assertEqual(response[0], 200)
         self.assertLess(order.index("request_started"), order.index("generation"))
         self.assertLess(order.index("generation"), order.index("request_completed"))
+
+    def _gateway(self, adapters, *, diagnostics=None, name="failure.sqlite3"):
+        return Gateway(
+            self.key,
+            Path(self.tmp.name) / name,
+            adapters,
+            diagnostics=diagnostics,
+        )
+
+    def _call(self, gateway, body=None):
+        return gateway.handle(
+            "POST",
+            "/v1/chat/completions",
+            {"Authorization": "Bearer " + self.key},
+            request() if body is None else body,
+        )
+
+    def test_generation_diagnostic_is_counted_once_without_scan_context(self):
+        sink = SafeDiagnostics()
+        adapters = RaisingGenerationAdapters(
+            GenerationError("truncated", diagnostic_code=GENERATION_TRUNCATED)
+        )
+        gateway = self._gateway(adapters, diagnostics=sink)
+        status, body = self._call(gateway)
+        self.assertEqual(status, 503)
+        # The response body is exactly the pre-existing generic error shape.
+        self.assertEqual(
+            body,
+            Gateway._error(503, "UNAVAILABLE", body["error"]["request_id"])[1],
+        )
+        self.assertEqual(sink.snapshot()[GENERATION_TRUNCATED], 1)
+        self.assertEqual(
+            [event["event_type"] for event in gateway.audit_events()],
+            ["request_started", "request_failed"],
+        )
+
+    def test_shared_scan_context_and_gateway_sink_count_the_failure_once(self):
+        sink = SafeDiagnostics()
+        adapters = RaisingGenerationAdapters(
+            GenerationError("truncated", diagnostic_code=GENERATION_TRUNCATED)
+        )
+        gateway = self._gateway(adapters, diagnostics=sink, name="shared.sqlite3")
+        status, _ = gateway.handle(
+            "POST",
+            "/v1/chat/completions",
+            {"Authorization": "Bearer " + self.key},
+            request(),
+            scan_context=ScanContext(diagnostic=sink),
+        )
+        self.assertEqual(status, 503)
+        self.assertEqual(sink.snapshot()[GENERATION_TRUNCATED], 1)
+
+    def test_each_failed_request_logs_one_content_free_stage_line(self):
+        prompt = "PROMPT-CONTENT-MUST-NOT-BE-LOGGED"
+        reply = "REPLY-CONTENT-MUST-NOT-BE-LOGGED"
+
+        input_adapters = MemoryAdapters()
+        input_adapters.attack_error = RuntimeError("guard failed: " + prompt)
+
+        truncation = RaisingGenerationAdapters(
+            GenerationError(prompt, diagnostic_code=GENERATION_TRUNCATED)
+        )
+
+        non_string = MemoryAdapters()
+        non_string.generated = 42
+
+        output_adapters = MemoryAdapters()
+        output_adapters.generated = reply
+        output_adapters.output_error = RuntimeError("output failed: " + reply)
+
+        cases = (
+            ("input_guard", input_adapters, None),
+            ("generation", truncation, "diagnostic=generation_truncated"),
+            ("generation", non_string, None),
+            ("output_guard", output_adapters, None),
+        )
+        for index, (stage, adapters, diagnostic) in enumerate(cases):
+            with self.subTest(stage=stage, index=index):
+                gateway = self._gateway(adapters, name=f"log-{index}.sqlite3")
+                with self.assertLogs(
+                    "nasi_lemak.gateway", level="WARNING"
+                ) as captured:
+                    status, _ = self._call(
+                        gateway, request([{"role": "user", "content": prompt}])
+                    )
+                self.assertEqual(status, 503)
+                self.assertEqual(len(captured.output), 1, captured.output)
+                line = captured.output[0]
+                self.assertIn("request_failed request_id=req_", line)
+                self.assertIn(f"stage={stage}", line)
+                if diagnostic is None:
+                    self.assertNotIn("diagnostic=", line)
+                else:
+                    self.assertIn(diagnostic, line)
+                self.assertNotIn(prompt, line)
+                self.assertNotIn(reply, line)
+
+    def test_configured_system_prompt_never_reaches_guards_or_audit(self):
+        prompt = "SYSTEM-PROMPT-MUST-STAY-INSIDE-GENERATION"
+
+        class Client:
+            def generate(self, messages, max_tokens):
+                # Stands in for GenerationClient: the prompt is added to the
+                # upstream payload only.
+                upstream.append([{"role": "system", "content": prompt}, *messages])
+                return "safe reply"
+
+        class Tokenizer:
+            def count_tokens(self, serialized):
+                return 1
+
+        class AttackGuard:
+            def __init__(self):
+                self.inputs = []
+
+            def scan_attack(self, text):
+                self.inputs.append(text)
+                return {"decision": "allow"}
+
+        class OutputGuard:
+            def __init__(self):
+                self.messages = []
+                self.outputs = []
+
+            def scan_response(self, messages, output):
+                self.messages.append([dict(message) for message in messages])
+                self.outputs.append(output)
+                return {"safe": True}
+
+        upstream = []
+        attack = AttackGuard()
+        output = OutputGuard()
+        adapters = RealGatewayAdapters(
+            Client(),
+            tokenizer=Tokenizer(),
+            attack_guard=attack,
+            output_guard=output,
+        )
+        gateway = self._gateway(adapters, name="prompt.sqlite3")
+        status, _ = self._call(
+            gateway, request([{"role": "user", "content": "hello"}])
+        )
+        self.assertEqual(status, 200)
+        self.assertEqual(upstream[0][0], {"role": "system", "content": prompt})
+        for label, value in (
+            ("attack", attack.inputs),
+            ("scan_context", output.messages),
+            ("scan_output", output.outputs),
+            ("audit", gateway.audit_events()),
+        ):
+            with self.subTest(label=label):
+                self.assertNotIn(prompt, json.dumps(value))
 
 
 if __name__ == "__main__":

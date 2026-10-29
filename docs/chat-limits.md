@@ -24,6 +24,12 @@ value is omitted or blank, the reply default is clamped down to that maximum
 rather than failing; an explicitly set default above the maximum is invalid.
 These are gateway bounds, not claims about a provider's context window.
 
+Pilot note: the CPU output scan takes roughly 10 s for a short reply and about
+31 s for a ~1,000-token reply, so the pilot recommends
+`NASI_LEMAK_CHAT_DEFAULT_REPLY_TOKENS=384` together with the concise-generation
+instruction in `NASI_LEMAK_GENERATION_SYSTEM_PROMPT`. Both are optional; the
+code defaults remain 1024 and no prompt.
+
 The context budget and the operator policy `token_budget` both apply separately.
 They are not reduced to a numeric minimum because they use different units:
 `token_budget` is the adapter/tokenizer counter budget (default 512, ceiling

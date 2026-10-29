@@ -26,6 +26,10 @@ Configuration is read only from server-side environment variables:
   the served model honours that provider-specific argument must be verified by
   the operator; this client makes no such claim and never adds arbitrary
   ``extra_body`` fields.
+* ``NASI_LEMAK_GENERATION_SYSTEM_PROMPT``: optional server-side concise-reply
+  instruction.  Unset preserves the existing request body exactly.  When set it
+  is prepended as exactly one ``system`` message to the upstream payload only;
+  guard scans, audit rows and the output-scan context never receive it.
 
 Plain HTTP is accepted for loopback hosts by default. A non-loopback plain-HTTP
 endpoint additionally requires the explicit insecure-HTTP opt-in; TLS
@@ -56,6 +60,7 @@ ENV_CA_FILE = "NASI_LEMAK_GENERATION_CA_FILE"
 ENV_MAX_RESPONSE_BYTES = "NASI_LEMAK_GENERATION_MAX_RESPONSE_BYTES"
 ENV_ALLOW_INSECURE_HTTP = "NASI_LEMAK_GENERATION_ALLOW_INSECURE_HTTP"
 ENV_ENABLE_THINKING = "NASI_LEMAK_GENERATION_ENABLE_THINKING"
+ENV_SYSTEM_PROMPT = "NASI_LEMAK_GENERATION_SYSTEM_PROMPT"
 
 AUTH_BEARER = "bearer"
 AUTH_NONE = "none"
@@ -76,6 +81,7 @@ MAX_MAX_RESPONSE_BYTES = 4 * 1024 * 1024
 MAX_OUTPUT_TOKENS = 8192
 MAX_MESSAGES = 32
 MAX_MESSAGE_CHARS = 64 * 1024
+MAX_SYSTEM_PROMPT_CHARS = 1000
 
 
 class GenerationConfigError(ValueError):
@@ -200,6 +206,7 @@ class GenerationConfig:
     auth_mode: str = AUTH_BEARER
     allow_insecure_http: bool = False
     enable_thinking: bool | None = None
+    system_prompt: str | None = field(default=None, repr=False)
 
     def __post_init__(self) -> None:
         if self.auth_mode not in AUTH_MODES:
@@ -210,6 +217,22 @@ class GenerationConfig:
             raise GenerationConfigError(
                 "generation thinking opt-in must be true, false or unset"
             )
+        if self.system_prompt is not None:
+            if (
+                not isinstance(self.system_prompt, str)
+                or not self.system_prompt.strip()
+            ):
+                raise GenerationConfigError(
+                    "generation system prompt must be non-empty text"
+                )
+            if len(self.system_prompt) > MAX_SYSTEM_PROMPT_CHARS:
+                raise GenerationConfigError(
+                    "generation system prompt exceeds the supported length"
+                )
+            if _has_control_characters(self.system_prompt):
+                raise GenerationConfigError(
+                    "generation system prompt contains forbidden characters"
+                )
         _validate_url(self.url, allow_insecure_http=self.allow_insecure_http)
         if self.model is None:
             object.__setattr__(self, "model", "")
@@ -289,6 +312,13 @@ class GenerationConfig:
             raise GenerationConfigError(
                 "generation thinking opt-in must be true/false or unset"
             )
+        system_prompt_raw = env.get(ENV_SYSTEM_PROMPT)
+        if system_prompt_raw is None or (
+            isinstance(system_prompt_raw, str) and system_prompt_raw.strip() == ""
+        ):
+            system_prompt = None
+        else:
+            system_prompt = system_prompt_raw
         api_key = None if auth_mode == AUTH_NONE else (
             env[ENV_API_KEY] if api_key_override is None else api_key_override
         )
@@ -302,6 +332,7 @@ class GenerationConfig:
             auth_mode=auth_mode,
             allow_insecure_http=allow_insecure_http,
             enable_thinking=enable_thinking,
+            system_prompt=system_prompt,
         )
 
     @property
@@ -332,6 +363,10 @@ class GenerationConfig:
             "max_response_bytes": self.max_response_bytes,
             "ca_file_configured": self.ca_file is not None,
             "enable_thinking": self.enable_thinking,
+            "system_prompt_configured": self.system_prompt is not None,
+            "system_prompt_chars": (
+                len(self.system_prompt) if self.system_prompt is not None else 0
+            ),
         }
 
 
@@ -547,9 +582,18 @@ class GenerationClient:
         clean = _validate_messages(messages)
         if isinstance(max_tokens, bool) or not isinstance(max_tokens, int) or not 1 <= max_tokens <= MAX_OUTPUT_TOKENS:
             raise ValueError("generation max_tokens is invalid")
+        upstream_messages = clean
+        if self.config.system_prompt is not None:
+            # The server-side concise-reply instruction belongs only to the
+            # upstream payload; guard scans, audit and the output scan context
+            # keep the caller's sanitized conversation unchanged.
+            upstream_messages = [
+                {"role": "system", "content": self.config.system_prompt},
+                *clean,
+            ]
         payload = {
             "model": self.config.model,
-            "messages": clean,
+            "messages": upstream_messages,
             "max_tokens": max_tokens,
             "stream": False,
         }
