@@ -330,7 +330,97 @@ exactly as it was. **Never run `docker compose down -v`**: it removes the audit
 database volume. Do not delete `.secrets`, the model directory or the archived
 copies.
 
-## 8. What this switch does not prove
+## 8. Testing interfaces
+
+The blueprint's CLI testing surface is a **convenience shim** at
+`POST /chat`. It accepts exactly one JSON key and then dispatches the same
+internal chat-completions request through `Gateway.handle`:
+
+```bash
+curl -i http://<guardrail-vm>:8080/chat \
+  -H 'Authorization: Bearer YOUR_TOKEN' \
+  -H 'Content-type: application/json' \
+  -d '{"prompt": "..."}'
+```
+
+It uses the same single bearer check, the same bounded body read and the same
+bounded admission semaphore as `POST /v1/chat/completions`. Audit writes stay
+inside the gateway, so a `/chat` request produces the same initial/terminal audit
+rows as `/v1` (including a blocked request). There is no second pipeline, no
+alternate masking step and no weaker failure mode.
+
+### `/chat` contract
+
+Request body: `{"prompt": "<non-empty string>"}`. Missing, extra or non-string
+top-level keys return `400`. The existing chat context/reply limits apply
+unchanged.
+
+| Field | When | Meaning |
+| --- | --- | --- |
+| `decision` | always | `ALLOW` or `BLOCK` |
+| `sanitized_prompt` | `ALLOW`, or `BLOCK` after masking ran | The masked user text exactly as this request passed it to generation; absent for an input-stage block because masking never ran |
+| `input_safety_label` | `ALLOW` and `BLOCK` | Coarse mapping of the request's validated input verdict: `safe` (allow), `blocked` (block) or `unknown` (no verdict) |
+| `output_safety_label` | `ALLOW` only | Coarse mapping of the request's validated output verdict: `safe`, `blocked` or `unknown`; omitted from every block body |
+| `response` | `ALLOW` | Sanitized assistant text released by the pipeline |
+| `reason` | `BLOCK` | Fixed client-safe block message; no guard verdict or raw model text |
+| `category` | `BLOCK` when produced | Pipeline reason code, e.g. `INPUT_GUARD_BLOCK`, `OUTPUT_GUARD_BLOCK` |
+
+Status codes are the existing ones: `200` allow; `400` invalid shape or JSON;
+`401` missing, wrong or duplicate bearer; `403` blocked (`POLICY_BLOCK`);
+`413` input limit (`INPUT_LIMIT`); `503` guard/control failure, an exhausted
+admission slot or a read/dispatch deadline (`UNAVAILABLE`).
+
+These values are **request-local, in-memory metadata only**. They are produced by
+the same dispatch that serves the request and are not audit columns: the existing
+initial/terminal audit rows are unchanged and contain no guard label, sanitized
+text, timer or latency field. `/chat` does not re-run guards, re-mask text, read
+model state or time the dispatch.
+
+The pipeline exposes only the validated input `allow`/`block` verdict and the
+validated output `safe` boolean. A raw categorical classifier severity (for
+example Qwen's Safe/Unsafe/Controversial) has already been discarded by the
+adapters, so the coarse `safe`/`blocked` mapping above is the honest maximum and
+`unknown` is used when a stage did not run (for example a policy-only block or a
+disabled output check). There is no elapsed-time measurement in the gateway or
+audit path, so no `latency_ms` field is fabricated: it is not part of this
+contract.
+
+### CLI test script
+
+`scripts/test_gateway.py` is standard-library only. `--base-url` is mandatory
+and there is deliberately no default localhost. The token comes only from
+`--token` or `TEST_GATEWAY_TOKEN`; it is never stored or printed.
+
+```bash
+# All three blueprint builds: normal, PII and injection.
+python scripts/test_gateway.py --base-url http://<guardrail-vm>:8080
+
+# PII case: expects 200/ALLOW and a sanitized_prompt with masked values.
+python scripts/test_gateway.py --base-url http://<guardrail-vm>:8080 --case pii
+
+# Injection case: expects 403/BLOCK with a fixed reason and a category.
+python scripts/test_gateway.py --base-url http://<guardrail-vm>:8080 --case injection
+```
+
+The script prints the parsed result JSON for every response, honours
+`--timeout`, and exits `0` only when every expected outcome was observed
+(the injection case is successful when it is blocked). A connection error,
+timeout, non-JSON body, unexpected status or unexpected decision exits `2`
+(fail closed).
+
+### `/chat` versus `/v1/chat/completions`
+
+`/chat` is the blueprint's convenience surface for manual CLI checks.
+`POST /v1/chat/completions` remains the real OpenAI-compatible integration
+surface (model alias, message turns, optional reply budget). Both accept one
+bearer credential, are bounded by the same body/read limits, share one
+`gateway.handle` pipeline and compete for the same admission lane. The `/v1`
+request and response schema is exactly unchanged. There is no latent difference
+in enforcement, masking, audit content or failure handling; only the extended
+`/chat` response view differs, and that view adds request-local metadata without
+altering the audit rows.
+
+## 9. What this switch does not prove
 
 - No guard model was executed in the development workspace; all transport and
   wiring tests use inference doubles.

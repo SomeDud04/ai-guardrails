@@ -204,17 +204,65 @@ class _DuplicateKeys(Exception):
     pass
 
 
+class _ChatBodyError(Exception):
+    """The /chat testing shape is not the accepted ``{"prompt": str}`` form."""
+
+
+def _error_payload(request_id: str, code: str) -> dict[str, Any]:
+    return {
+        "error": {
+            "code": code,
+            "message": _ERROR_MESSAGES.get(code, _ERROR_MESSAGES["UNAVAILABLE"]),
+            "request_id": request_id,
+        }
+    }
+
+
+def _input_safety_label(result_sink: dict[str, Any]) -> str:
+    """Coarse label for the validated input verdict; ``unknown`` if it did not run.
+
+    The gateways expose only ``allow``/``block``; the categorical classifier
+    severity is discarded by the adapters and is deliberately not invented.
+    """
+    decision = result_sink.get("input_decision")
+    if decision == "allow":
+        return "safe"
+    if decision == "block":
+        return "blocked"
+    return "unknown"
+
+
+def _output_safety_label(result_sink: dict[str, Any]) -> str:
+    """Coarse label for the validated output verdict; ``unknown`` if it did not run."""
+    value = result_sink.get("output_safe")
+    if value is True:
+        return "safe"
+    if value is False:
+        return "blocked"
+    return "unknown"
+
+
+def _sanitized_prompt(result_sink: dict[str, Any]) -> str | None:
+    """Masked user text this request actually passed to generation.
+
+    No masking is recomputed here: the value is read from the same request's
+    pipeline sink, which is only populated once masking has already run.
+    """
+    messages = result_sink.get("sanitized_messages")
+    if not isinstance(messages, list):
+        return None
+    parts = [
+        message["content"]
+        for message in messages
+        if isinstance(message, dict)
+        and message.get("role") == "user"
+        and isinstance(message.get("content"), str)
+    ]
+    return "\n".join(parts) if parts else None
+
+
 def _error_response(request_id: str, code: str, status_code: int) -> JSONResponse:
-    return JSONResponse(
-        {
-            "error": {
-                "code": code,
-                "message": _ERROR_MESSAGES.get(code, _ERROR_MESSAGES["UNAVAILABLE"]),
-                "request_id": request_id,
-            }
-        },
-        status_code=status_code,
-    )
+    return JSONResponse(_error_payload(request_id, code), status_code=status_code)
 
 
 def _reject_duplicate_keys(pairs: list[tuple[str, Any]]) -> dict[str, Any]:
@@ -1629,31 +1677,59 @@ def make_app(
         headers["X-Export-Sha256"] = entry.sha256
         return Response(content=csv_bytes, headers=headers)
 
-    @app.post("/v1/chat/completions")
-    async def chat_completions(request: Request):
+    def _chat_completions_body(
+        request: Request, body: dict[str, Any]
+    ) -> dict[str, Any]:
+        """Validate the ``/chat`` convenience shape and map it to the pipeline."""
+        if set(body) != {"prompt"}:
+            raise _ChatBodyError()
+        prompt = body["prompt"]
+        if not isinstance(prompt, str) or not prompt:
+            raise _ChatBodyError()
+        # The role/content framing is the same internal request a client would
+        # send to the OpenAI-compatible route.  Limits, auth, audit and masking
+        # remain owned by the gateway below; this is only a shape translation.
+        return {
+            "model": request.app.state.gateway.policy.model,
+            "messages": [{"role": "user", "content": prompt}],
+        }
+
+    async def _serve_chat(
+        request: Request,
+        *,
+        body_builder: Any,
+        result_sink: dict[str, Any] | None = None,
+    ) -> tuple[int, dict[str, Any]]:
+        """Shared preflight, bounded read and single admission lane.
+
+        Both public chat routes call ``gateway.handle("POST",
+        "/v1/chat/completions")`` exactly once through this function.  There is
+        no second pipeline, separate semaphore, alternate audit path or weaker
+        error mapping for the ``/chat`` testing surface.
+        """
         request_id = request.state.request_id
 
         content_type = request.headers.get("content-type", "")
         media_type = content_type.split(";", 1)[0].strip().lower()
         if media_type != "application/json":
-            return _error_response(request_id, "INVALID_REQUEST", 400)
+            return 400, _error_payload(request_id, "INVALID_REQUEST")
 
         auth_headers = request.headers.getlist("authorization")
         if len(auth_headers) != 1:
-            return _error_response(request_id, "UNAUTHORIZED", 401)
+            return 401, _error_payload(request_id, "UNAUTHORIZED")
 
         if not request.app.state.config_ready:
-            return _error_response(request_id, "UNAVAILABLE", 503)
+            return 503, _error_payload(request_id, "UNAVAILABLE")
 
         gateway = request.app.state.gateway
         if not _gateway_static_ready(gateway):
-            return _error_response(request_id, "UNAVAILABLE", 503)
+            return 503, _error_payload(request_id, "UNAVAILABLE")
 
         sem = request.app.state.sem
         # Admission is checked without queueing.  ``acquire`` cannot yield when a
         # slot is free, so this check and acquisition are atomic on the loop.
         if sem.locked():
-            return _error_response(request_id, "UNAVAILABLE", 503)
+            return 503, _error_payload(request_id, "UNAVAILABLE")
         await sem.acquire()
 
         dispatched = False
@@ -1686,17 +1762,22 @@ def make_app(
                     request.app.state.body_read_timeout,
                 )
             except _BodyTimeout:
-                return _error_response(request_id, "UNAVAILABLE", 503)
+                return 503, _error_payload(request_id, "UNAVAILABLE")
             except _BodyTooLarge:
-                return _error_response(request_id, "INPUT_LIMIT", 413)
+                return 413, _error_payload(request_id, "INPUT_LIMIT")
             except asyncio.CancelledError:
                 raise
             except Exception:
-                return _error_response(request_id, "INVALID_REQUEST", 400)
+                return 400, _error_payload(request_id, "INVALID_REQUEST")
 
             body = _parse_json_object(body_bytes)
             if body is None:
-                return _error_response(request_id, "INVALID_REQUEST", 400)
+                return 400, _error_payload(request_id, "INVALID_REQUEST")
+
+            try:
+                chat_body = body_builder(body)
+            except _ChatBodyError:
+                return 400, _error_payload(request_id, "INVALID_REQUEST")
 
             headers = {"Authorization": auth_headers[0]}
             task = asyncio.create_task(
@@ -1705,7 +1786,8 @@ def make_app(
                     "POST",
                     "/v1/chat/completions",
                     headers,
-                    body,
+                    chat_body,
+                    result_sink=result_sink,
                 )
             )
             dispatched = True
@@ -1720,12 +1802,78 @@ def make_app(
                 # The HTTP deadline expired, but the shielded worker keeps its
                 # admission slot until the native call really returns.  Any late
                 # success/error is consumed and never becomes a response.
-                return _error_response(request_id, "UNAVAILABLE", 503)
-            status, payload = result
-            return JSONResponse(payload, status_code=status)
+                return 503, _error_payload(request_id, "UNAVAILABLE")
+            return result
         finally:
             if not dispatched:
                 release_once()
+
+    @app.post("/v1/chat/completions")
+    async def chat_completions(request: Request):
+        status, payload = await _serve_chat(
+            request,
+            body_builder=lambda body: body,
+        )
+        return JSONResponse(payload, status_code=status)
+
+    @app.post("/chat")
+    async def chat_testing(request: Request):
+        """Blueprint testing surface: a thin map over the real pipeline.
+
+        The optional result sink is created once per HTTP call and filled by the
+        same ``gateway.handle`` dispatch as ``/v1``.  It is request-local memory
+        only: audit rows, masking, admission and error mapping are unchanged.
+        """
+        result_sink: dict[str, Any] = {}
+        status, payload = await _serve_chat(
+            request,
+            body_builder=lambda body: _chat_completions_body(request, body),
+            result_sink=result_sink,
+        )
+
+        if status == 200:
+            content: Any = None
+            choices = payload.get("choices")
+            if isinstance(choices, list) and choices:
+                first = choices[0]
+                if isinstance(first, dict):
+                    message = first.get("message")
+                    if isinstance(message, dict):
+                        content = message.get("content")
+            reply: dict[str, Any] = {
+                "decision": "ALLOW",
+                "input_safety_label": _input_safety_label(result_sink),
+                "output_safety_label": _output_safety_label(result_sink),
+                "response": content,
+            }
+            sanitized_prompt = _sanitized_prompt(result_sink)
+            if sanitized_prompt is not None:
+                reply["sanitized_prompt"] = sanitized_prompt
+            return JSONResponse(reply, status_code=200)
+
+        if status == 403:
+            block = payload.get("error", {}).get("block", {})
+            if not isinstance(block, dict):
+                block = {}
+            reason_code = block.get("reason_code")
+            reply = {
+                "decision": "BLOCK",
+                "reason": block.get("reason", _ERROR_MESSAGES["POLICY_BLOCK"]),
+                "input_safety_label": _input_safety_label(result_sink),
+            }
+            if isinstance(reason_code, str) and reason_code:
+                reply["category"] = reason_code
+            # Output-stage blocks already ran masking before withholding the
+            # output, so this request's sanitized text is available.  Input
+            # blocks never masked and the field is simply absent.  No block
+            # response carries output_safety_label.
+            sanitized_prompt = _sanitized_prompt(result_sink)
+            if sanitized_prompt is not None:
+                reply["sanitized_prompt"] = sanitized_prompt
+            return JSONResponse(reply, status_code=403)
+
+        # 400/401/413/503 stay the standard generic envelope, exactly as /v1.
+        return JSONResponse(payload, status_code=status)
 
     if workspace_runtime.enabled:
         # The same static shell serves the legacy entry and the three explicit
@@ -1757,6 +1905,7 @@ def make_app(
         if path in (
             "",
             "v1/chat/completions",
+            "chat",
             "health/live",
             "health/ready",
             "admin",

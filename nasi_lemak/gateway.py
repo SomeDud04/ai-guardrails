@@ -365,7 +365,19 @@ class Gateway:
         *,
         scan_context: ScanContext | None = None,
         control: GatewayControl | None = None,
+        result_sink: dict[str, Any] | None = None,
     ):
+        """Run the one guarded pipeline for one request.
+
+        ``result_sink`` is an optional, request-local, in-memory mapping that is
+        filled alongside the existing successful stages.  It never changes
+        control ordering, audit rows, releases or return values.  Keys are
+        bounded pipeline facts only: ``input_decision`` (the validated adapter
+        verdict ``allow``/``block``), ``output_safe`` (the validated output
+        verdict boolean) and ``sanitized_messages`` (the exact masked messages
+        passed to generation).  Raw withheld output and classifier text are
+        never written.  Fields for stages that did not run stay absent.
+        """
         request_id = "req_" + uuid.uuid4().hex
         if method != "POST" or path != "/v1/chat/completions":
             return self._error(404, "INVALID_REQUEST", request_id)
@@ -390,6 +402,11 @@ class Gateway:
             control = self._resolve_control(control)
         except ValueError:
             return self._error(503, "UNAVAILABLE", request_id)
+
+        def _sink(name: str, value: Any) -> None:
+            if result_sink is not None:
+                result_sink[name] = value
+
         try:
             self._audit(request_id, "request_started", "pending")
         except Exception:
@@ -431,8 +448,10 @@ class Gateway:
                 if not isinstance(result, dict) or result.get("decision") not in ("allow", "block"):
                     raise ValueError("invalid attack result")
                 if result["decision"] == "block":
+                    _sink("input_decision", "block")
                     self._audit(request_id, "request_blocked", "blocked", "POLICY_BLOCK")
                     return self._blocked(request_id, "INPUT_GUARD_BLOCK")
+                _sink("input_decision", "allow")
             # Deny phrases are literal policy text, checked across every accepted
             # input turn before generation.  Disabling the model classifier never
             # disables this server-side policy control.
@@ -450,6 +469,7 @@ class Gateway:
                 }
                 for message in messages
             ]
+            _sink("sanitized_messages", [dict(message) for message in safe_messages])
             output = self.adapters.generate(safe_messages, self.policy.model, max_tokens)
             if not isinstance(output, str):
                 raise ValueError("invalid generation result")
@@ -487,6 +507,7 @@ class Gateway:
                     result = self.adapters.scan_output(output)
                 if not isinstance(result, dict) or not isinstance(result.get("safe"), bool):
                     raise ValueError("invalid output result")
+                _sink("output_safe", result["safe"])
                 if not result["safe"]:
                     self._audit(request_id, "request_blocked", "blocked", "POLICY_BLOCK")
                     return self._blocked(request_id, "OUTPUT_GUARD_BLOCK")
