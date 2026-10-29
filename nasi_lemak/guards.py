@@ -30,9 +30,21 @@ from __future__ import annotations
 
 import math
 import re
-import threading
 from pathlib import Path
 from typing import Any
+
+from .guard_errors import GuardError, GuardInputLimit
+from .guard_pool import GuardInferencePool
+
+__all__ = [
+    "GuardError",
+    "GuardInputLimit",
+    "GuardInferencePool",
+    "LlamaGuard3",
+    "LLAMA_GUARD_VERDICT_TOKENS",
+    "PROMPT_GUARD_MAX_TOKENS",
+    "PromptGuard2",
+]
 
 # Meta Prompt Guard 2 is specified with a 512-token window. The count includes
 # special tokens because ``add_special_tokens=True`` is used consistently.
@@ -48,18 +60,10 @@ _CATEGORY = re.compile(r"S(?:[1-9]|1[0-3])\Z")
 _BENIGN = "benign"
 _MALICIOUS = "malicious"
 
-
-class GuardError(RuntimeError):
-    """Fail-closed guard failure carrying no request text, path or token data."""
-
-
-class GuardInputLimit(GuardError):
-    """Known oversize input rejected before any provider request.
-
-    The gateway maps this to the stable ``INPUT_LIMIT`` error instead of a
-    generic unavailable-guard ``503``; callers must not include raw input,
-    provider data or paths in its message.
-    """
+# ``GuardError``/``GuardInputLimit`` are defined in ``guard_errors`` so the
+# shared Qwen3Guard contract and the inference pool can use the same failure
+# vocabulary without an import cycle.  They are re-exported above, so every
+# existing ``from nasi_lemak.guards import GuardError`` keeps working.
 
 
 def _local_directory(model_dir: Any) -> str:
@@ -336,13 +340,17 @@ class PromptGuard2:
         model_dir: Any,
         *,
         threshold: float = 0.5,
+        workers: int = 1,
         tokenizer: Any = None,
         model: Any = None,
         backend: Any = None,
     ) -> None:
         self._threshold = _validate_threshold(threshold)
         directory = _local_directory(model_dir)
-        self._lock = threading.Lock()
+        # A bounded pool with a derived/validated thread budget replaced the one
+        # process-wide lock.  Prompt Guard 2 is a single 512-token forward pass
+        # per scan, so its default stays one slot; the budget is still validated.
+        self._pool = GuardInferencePool(workers)
         self._backend = backend
         self._tokenizer = tokenizer if tokenizer is not None else _load_tokenizer(directory)
         self._model = _prepare_model(model) if model is not None else _load_classifier(directory)
@@ -379,12 +387,12 @@ class PromptGuard2:
 
     def count_tokens(self, serialized: str) -> int:
         """Exact token count of the serialized conversation, specials included."""
-        with self._lock:
+        with self._pool.slot():
             return len(self._token_ids(serialized))
 
     def scan_attack(self, serialized: str) -> dict[str, str]:
         """Return ``{"decision": "allow"|"block"}`` for the serialized input."""
-        with self._lock:
+        with self._pool.slot():
             ids = self._token_ids(serialized)
             if len(ids) > PROMPT_GUARD_MAX_TOKENS:
                 return {"decision": "block"}
@@ -484,6 +492,72 @@ def _parse_verdict(text: Any) -> bool:
     return False
 
 
+def _generated_verdict_text(
+    model: Any,
+    tokenizer: Any,
+    prompt_ids: list[int],
+    *,
+    backend: Any,
+    max_new_tokens: int,
+    eos_ids: int | list[int],
+    accepted_eos: frozenset[int],
+    pad_token_id: int,
+) -> str:
+    """Run one deterministic generation and return only the new verdict text.
+
+    Shared by every local causal guard transport so generation plumbing is not
+    copied per model: greedy decoding, a hard new-token ceiling, EOS supplied by
+    the caller, the prompt sequence checked as a prefix, no truncation and no
+    retry.  A non-EOS-terminated, over-long or undecodable sequence fails closed.
+    """
+    inputs = {
+        "input_ids": _as_tensor([prompt_ids], backend),
+        "attention_mask": _as_tensor([[1] * len(prompt_ids)], backend),
+    }
+    try:
+        with _inference_context(backend):
+            generated = model.generate(
+                max_new_tokens=max_new_tokens,
+                do_sample=False,
+                eos_token_id=eos_ids,
+                pad_token_id=pad_token_id,
+                **inputs,
+            )
+    except GuardError:
+        raise
+    except Exception:
+        raise GuardError("guard inference failed") from None
+    if hasattr(generated, "sequences"):
+        generated = generated.sequences
+    ids = _flat_ids(generated, "guard model returned an invalid sequence")
+    if len(ids) <= len(prompt_ids) or ids[: len(prompt_ids)] != list(prompt_ids):
+        raise GuardError("guard model returned an invalid sequence")
+    new_ids = ids[len(prompt_ids) :]
+    if len(new_ids) > max_new_tokens:
+        raise GuardError("guard model exceeded the verdict window")
+    if not new_ids or new_ids[-1] not in accepted_eos:
+        raise GuardError("guard model output was truncated")
+    if any(token in accepted_eos for token in new_ids[:-1]):
+        raise GuardError("guard model returned an invalid sequence")
+    try:
+        text = tokenizer.decode(new_ids[:-1], skip_special_tokens=True)
+    except GuardError:
+        raise
+    except Exception:
+        raise GuardError("guard output could not be decoded") from None
+    if not isinstance(text, str):
+        raise GuardError("guard output could not be decoded")
+    return text
+
+
+def _pad_token_id(tokenizer: Any, eos_ids: int | list[int]) -> int:
+    """Return the tokenizer's pad id, or the first EOS id when it has none."""
+    pad = getattr(tokenizer, "pad_token_id", None)
+    if isinstance(pad, bool) or not isinstance(pad, int) or pad < 0:
+        return eos_ids if isinstance(eos_ids, int) else eos_ids[0]
+    return pad
+
+
 class LlamaGuard3:
     """Meta Llama Guard 3 contextual output guard (local, CPU, fail-closed).
 
@@ -509,13 +583,17 @@ class LlamaGuard3:
         model_dir: Any,
         *,
         context_limit: int,
+        workers: int = 1,
         tokenizer: Any = None,
         model: Any = None,
         backend: Any = None,
     ) -> None:
         limit = _validate_context_limit(context_limit)
         directory = _local_directory(model_dir)
-        self._lock = threading.Lock()
+        # Bounded pool instead of one process-wide lock.  A Llama Guard scan is
+        # one short generation, so one slot is the default; the budget is still
+        # validated and the pool fails closed exactly like the lock did.
+        self._pool = GuardInferencePool(workers)
         self._backend = backend
         self._tokenizer = tokenizer if tokenizer is not None else _load_tokenizer(directory)
         self._model = _prepare_model(model) if model is not None else _load_causal_model(directory)
@@ -524,10 +602,7 @@ class LlamaGuard3:
         if self._prompt_limit < 1:
             raise GuardError("guard context configuration is invalid")
         self._eos_ids, self._accepted_eos = _generation_eos(self._model, self._tokenizer)
-        pad = getattr(self._tokenizer, "pad_token_id", None)
-        if isinstance(pad, bool) or not isinstance(pad, int) or pad < 0:
-            pad = self._eos_ids if isinstance(self._eos_ids, int) else self._eos_ids[0]
-        self._pad_token_id = pad
+        self._pad_token_id = _pad_token_id(self._tokenizer, self._eos_ids)
 
     def _template_ids(self, conversation: list[dict[str, str]]) -> list[int]:
         try:
@@ -543,44 +618,16 @@ class LlamaGuard3:
         return _flat_ids(encoded, "guard tokenization failed")
 
     def _verdict(self, prompt_ids: list[int]) -> str:
-        inputs = {
-            "input_ids": _as_tensor([prompt_ids], self._backend),
-            "attention_mask": _as_tensor([[1] * len(prompt_ids)], self._backend),
-        }
-        try:
-            with _inference_context(self._backend):
-                generated = self._model.generate(
-                    max_new_tokens=LLAMA_GUARD_VERDICT_TOKENS,
-                    do_sample=False,
-                    eos_token_id=self._eos_ids,
-                    pad_token_id=self._pad_token_id,
-                    **inputs,
-                )
-        except GuardError:
-            raise
-        except Exception:
-            raise GuardError("guard inference failed") from None
-        if hasattr(generated, "sequences"):
-            generated = generated.sequences
-        ids = _flat_ids(generated, "guard model returned an invalid sequence")
-        if len(ids) <= len(prompt_ids) or ids[: len(prompt_ids)] != list(prompt_ids):
-            raise GuardError("guard model returned an invalid sequence")
-        new_ids = ids[len(prompt_ids) :]
-        if len(new_ids) > LLAMA_GUARD_VERDICT_TOKENS:
-            raise GuardError("guard model exceeded the verdict window")
-        if not new_ids or new_ids[-1] not in self._accepted_eos:
-            raise GuardError("guard model output was truncated")
-        if any(token in self._accepted_eos for token in new_ids[:-1]):
-            raise GuardError("guard model returned an invalid sequence")
-        try:
-            text = self._tokenizer.decode(new_ids[:-1], skip_special_tokens=True)
-        except GuardError:
-            raise
-        except Exception:
-            raise GuardError("guard output could not be decoded") from None
-        if not isinstance(text, str):
-            raise GuardError("guard output could not be decoded")
-        return text
+        return _generated_verdict_text(
+            self._model,
+            self._tokenizer,
+            prompt_ids,
+            backend=self._backend,
+            max_new_tokens=LLAMA_GUARD_VERDICT_TOKENS,
+            eos_ids=self._eos_ids,
+            accepted_eos=self._accepted_eos,
+            pad_token_id=self._pad_token_id,
+        )
 
     def scan_response(self, messages: list[dict[str, str]], output: str) -> dict[str, bool]:
         """Return ``{"safe": bool}`` for the complete context plus buffered output."""
@@ -598,7 +645,7 @@ class LlamaGuard3:
             {"role": "user", "content": _serialize_context(messages)},
             {"role": "assistant", "content": output},
         ]
-        with self._lock:
+        with self._pool.slot():
             prompt_ids = self._template_ids(conversation)
             if len(prompt_ids) > self._prompt_limit:
                 raise GuardError("guard context exceeds the configured window")
