@@ -4,11 +4,18 @@
 # default. Copy an operator-approved version to a separate preserved path and
 # point NASI_LEMAK_POLICY_FILE at it before a controlled restart.
 #
-# The loader accepts exactly these five keys, one YAML document, no anchors,
-# aliases or custom tags, at most 8 nested collections and at most 32 KiB.
-# deny_phrases are literal case-insensitive substrings matched across every
-# accepted input turn and the buffered output; they are not a semantic topic
-# filter and cannot disable PII masks or guard verdicts.
+# The loader accepts exactly these five required keys plus an optional `limits`
+# mapping, one YAML document, no anchors, aliases or custom tags, at most 8
+# nested collections and at most 32 KiB. deny_phrases are literal
+# case-insensitive substrings matched across every accepted input turn and the
+# buffered output; they are not a semantic topic filter and cannot disable PII
+# masks or guard verdicts.
+#
+# Optional limits may only tighten the environment/default chat ceilings; a
+# larger value is clamped. Each supplied field is a positive integer and the
+# mapping is included in the policy digest. Example pilot setting:
+# limits:
+#   default_reply_tokens: 384
 
 app_id: nasi-lemak
 version: "2026-10-20.1"

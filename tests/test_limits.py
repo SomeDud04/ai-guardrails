@@ -18,6 +18,7 @@ from nasi_lemak.limits import (
     ChatLimits,
     ChatLimitsError,
     has_explicit_env,
+    tighten,
 )
 from nasi_lemak.server import make_app
 
@@ -122,6 +123,74 @@ class ChatLimitsConfigTests(unittest.TestCase):
         self.assertEqual(app.state.gateway.limits.context_messages, 8)
         self.assertEqual(app.state.gateway.limits.context_budget, 4096)
         self.assertEqual(client.get("/health/ready").status_code, 200)
+
+
+class PolicyTighteningTests(unittest.TestCase):
+    def setUp(self) -> None:
+        self.env_limits = ChatLimits.from_env(
+            {
+                ENV_CONTEXT_MESSAGES: "16",
+                ENV_CONTEXT_BUDGET: "8192",
+                ENV_DEFAULT_REPLY_TOKENS: "1024",
+                ENV_MAX_REPLY_TOKENS: "2048",
+            }
+        )
+
+    def test_absent_or_empty_policy_keeps_the_env_limits(self) -> None:
+        self.assertIs(tighten(self.env_limits, None), self.env_limits)
+        self.assertIs(tighten(self.env_limits, {}), self.env_limits)
+
+    def test_policy_may_only_tighten_and_above_ceiling_is_clamped(self) -> None:
+        effective = tighten(
+            self.env_limits,
+            {
+                "context_messages": 8,
+                "context_budget": 4096,
+                "default_reply_tokens": 384,
+                "max_reply_tokens": 1024,
+            },
+        )
+        self.assertEqual(
+            effective.public(),
+            {
+                "context_messages": 8,
+                "context_budget": 4096,
+                "default_reply_tokens": 384,
+                "max_reply_tokens": 1024,
+            },
+        )
+        clamped = tighten(
+            self.env_limits,
+            {
+                "context_messages": 32,
+                "context_budget": 32768,
+                "default_reply_tokens": 4096,
+                "max_reply_tokens": 8192,
+            },
+        )
+        self.assertEqual(clamped, self.env_limits)
+
+    def test_lowered_maximum_alone_lowers_the_default(self) -> None:
+        effective = tighten(self.env_limits, {"max_reply_tokens": 512})
+        self.assertEqual(effective.default_reply_tokens, 512)
+        self.assertEqual(effective.max_reply_tokens, 512)
+
+    def test_invalid_policy_values_are_rejected(self) -> None:
+        cases = [
+            {"unknown": 1},
+            {"context_messages": 0},
+            {"context_budget": -1},
+            {"context_budget": True},
+            {"context_budget": "1024"},
+            {"context_budget": 1.5},
+            {"default_reply_tokens": 700, "max_reply_tokens": 600},
+            ["not-a-mapping"],
+            "not-a-mapping",
+        ]
+        for case in cases:
+            with self.subTest(case=case):
+                with self.assertRaises(ChatLimitsError):
+                    tighten(self.env_limits, case)  # type: ignore[arg-type]
 
 
 class GatewayLimitTests(unittest.TestCase):

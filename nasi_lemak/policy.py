@@ -22,9 +22,11 @@ MAX_POLICY_FILE_BYTES = 32 * 1024
 # recursive composer/constructor and raising RecursionError.
 MAX_COLLECTION_DEPTH = 8
 
-_ALLOWED_KEYS = frozenset(
+_REQUIRED_KEYS = frozenset(
     {"app_id", "version", "model", "token_budget", "deny_phrases"}
 )
+_OPTIONAL_KEYS = frozenset({"limits"})
+_ALLOWED_KEYS = _REQUIRED_KEYS | _OPTIONAL_KEYS
 
 
 class PolicyError(ValueError):
@@ -111,8 +113,9 @@ def load_policy(path: str | Path | None) -> Policy:
     """Read and validate one complete policy file.
 
     The returned object is immutable and its digest covers the app identity,
-    version, public model alias, token budget and literal deny phrases.  Any
-    failure raises :class:`PolicyError` with a fixed generic message; file
+    version, public model alias, token budget, literal deny phrases and, when
+    the optional ``limits`` mapping is present, that mapping in canonical order.
+    Any failure raises :class:`PolicyError` with a fixed generic message; file
     contents and paths are never echoed.
     """
     text = _read_policy_text(path)
@@ -120,10 +123,17 @@ def load_policy(path: str | Path | None) -> Policy:
     _reject_unsafe_yaml_events(yaml, text)
     loaded = _strict_load(yaml, text)
 
-    if not isinstance(loaded, dict) or set(loaded) != _ALLOWED_KEYS:
+    if (
+        not isinstance(loaded, dict)
+        or not _REQUIRED_KEYS <= set(loaded)
+        or not set(loaded) <= _ALLOWED_KEYS
+    ):
         raise PolicyError("policy keys are invalid")
     if not isinstance(loaded["deny_phrases"], list):
         raise PolicyError("policy deny phrases are invalid")
+    if "limits" in loaded and not isinstance(loaded["limits"], dict):
+        # ``limits:`` with a null or sequence value is not a flat mapping.
+        raise PolicyError("policy limits are invalid")
 
     try:
         return Policy(
@@ -132,6 +142,7 @@ def load_policy(path: str | Path | None) -> Policy:
             token_budget=loaded["token_budget"],
             app_id=loaded["app_id"],
             deny_phrases=loaded["deny_phrases"],
+            limits=loaded["limits"] if "limits" in loaded else None,
         )
     except (TypeError, ValueError):
         raise PolicyError("policy configuration is invalid") from None

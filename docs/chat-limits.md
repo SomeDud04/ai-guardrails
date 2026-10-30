@@ -30,6 +30,23 @@ Pilot note: the CPU output scan takes roughly 10 s for a short reply and about
 instruction in `NASI_LEMAK_GENERATION_SYSTEM_PROMPT`. Both are optional; the
 code defaults remain 1024 and no prompt.
 
+## Precedence: env ceiling, then policy
+
+The environment values (or their built-in defaults) are hard ceilings. The
+optional top-level `limits` mapping in the startup policy may contain any subset
+of `context_messages`, `context_budget`, `default_reply_tokens` and
+`max_reply_tokens`; the effective value is `min(env value, policy value)` per
+field. A policy value above the ceiling is clamped rather than rejected. A
+malformed policy value (non-integer, boolean, zero/negative, unknown key or a
+policy `default_reply_tokens` above its own `max_reply_tokens`) is a policy
+error, so the server stays live but not ready. When `limits` is absent the
+policy digest is unchanged; when present it is included canonically.
+
+The same effective limits are used by `/v1`, `/chat` and `/workspace` turns.
+Any later workspace profile layer, when configured, applies after this shared
+tightening step and cannot widen it. `/admin` shows the effective value, the env
+ceiling and the winning source (`env` or `policy`) read-only.
+
 The context budget and the operator policy `token_budget` both apply separately.
 They are not reduced to a numeric minimum because they use different units:
 `token_budget` is the adapter/tokenizer counter budget (default 512, ceiling

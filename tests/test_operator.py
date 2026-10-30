@@ -175,6 +175,51 @@ class OperatorTestBase(unittest.TestCase):
         return {"Authorization": "Bearer " + OPERATOR_KEY}
 
 
+class EffectiveLimitsAdminTests(OperatorTestBase):
+    def test_admin_shows_effective_ceiling_and_source_read_only(self) -> None:
+        policy = Policy(
+            app_id=POLICY.app_id,
+            version=POLICY.version,
+            model=POLICY.model,
+            token_budget=POLICY.token_budget,
+            limits={"default_reply_tokens": 384, "max_reply_tokens": 512},
+        )
+        gateway = Gateway(
+            app_key=APP_KEY,
+            audit_store=SqliteAuditStore(self.db_path),
+            adapters=_Adapters(),
+            policy=policy,
+            app_id=policy.app_id,
+        )
+        app = make_app(
+            gateway=gateway,
+            operator_key_digest=OPERATOR_DIGEST,
+            operator_reader=self.reader,
+        )
+        with TestClient(app) as client:
+            response = client.get("/admin/events", headers=self.auth())
+            self.assertEqual(response.status_code, 200, response.text)
+            self.assertEqual(
+                response.json()["limits"]["default_reply_tokens"],
+                {"effective": 384, "ceiling": 1024, "source": "policy"},
+            )
+            self.assertEqual(
+                response.json()["limits"]["max_reply_tokens"],
+                {"effective": 512, "ceiling": 4096, "source": "policy"},
+            )
+            self.assertEqual(
+                response.json()["limits"]["context_budget"],
+                {"effective": 8192, "ceiling": 8192, "source": "env"},
+            )
+
+            page = client.get("/admin")
+            self.assertEqual(page.status_code, 200)
+            self.assertIn("Effective limits", page.text)
+            self.assertIn('id="limits-panel"', page.text)
+            self.assertIn('id="effective-limits"', page.text)
+            self.assertNotIn('id="limit-editor"', page.text)
+
+
 class ConfigurationTests(OperatorTestBase):
     def test_absent_configuration_disables_admin_routes_with_404(self):
         app = make_app(gateway=self.gateway, environ={})

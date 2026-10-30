@@ -439,6 +439,8 @@ _ADMIN_JS = """
   var eventsStateText = document.getElementById("events-state-text");
   var policyVersion = document.getElementById("policy-version");
   var policyDigest = document.getElementById("policy-digest");
+  var effectiveLimits = document.getElementById("effective-limits");
+  var limitsPanel = document.getElementById("limits-panel");
   var healthStatus = document.getElementById("health-status");
   var decisionFilter = document.getElementById("decision-filter");
   var eventTypeFilter = document.getElementById("event-type-filter");
@@ -475,6 +477,43 @@ _ADMIN_JS = """
     healthStatus.textContent = health === "ready" ? "ready" : "not ready";
   }
 
+  var LIMIT_ROWS = [
+    ["context_messages", "Context messages"],
+    ["context_budget", "Context budget"],
+    ["default_reply_tokens", "Default reply tokens"],
+    ["max_reply_tokens", "Maximum reply tokens"]
+  ];
+
+  function setLimits(limits) {
+    if (!effectiveLimits || !limitsPanel) {
+      return;
+    }
+    while (effectiveLimits.firstChild) {
+      effectiveLimits.removeChild(effectiveLimits.firstChild);
+    }
+    if (!limits || typeof limits !== "object") {
+      limitsPanel.hidden = true;
+      return;
+    }
+    limitsPanel.hidden = false;
+    for (var index = 0; index < LIMIT_ROWS.length; index += 1) {
+      var field = LIMIT_ROWS[index][0];
+      var entry = limits[field];
+      if (!entry || typeof entry !== "object") {
+        continue;
+      }
+      var term = document.createElement("dt");
+      term.textContent = LIMIT_ROWS[index][1];
+      var detail = document.createElement("dd");
+      var value = typeof entry.effective === "number" ? entry.effective : "unavailable";
+      var ceiling = typeof entry.ceiling === "number" ? entry.ceiling : "unavailable";
+      var source = entry.source === "policy" ? "policy" : "env";
+      detail.textContent = String(value) + " (env ceiling " + String(ceiling) + ", source " + source + ")";
+      effectiveLimits.appendChild(term);
+      effectiveLimits.appendChild(detail);
+    }
+  }
+
   function clearTable() {
     while (eventsBody.firstChild) {
       eventsBody.removeChild(eventsBody.firstChild);
@@ -509,6 +548,7 @@ _ADMIN_JS = """
     policyVersion.textContent = "";
     policyDigest.textContent = "";
     healthStatus.textContent = "";
+    setLimits(null);
   }
 
   function formatTimestamp(value) {
@@ -741,6 +781,7 @@ _ADMIN_JS = """
       var events = Array.isArray(data.events) ? data.events : [];
       renderEvents(events);
       setMeta(data.policy, data.health);
+      setLimits(data.limits);
       nextCursor = typeof data.next_cursor === "number" ? data.next_cursor : null;
       setEventsState("ready", "", "");
       var count = events.length;
@@ -1069,6 +1110,12 @@ ADMIN_HTML = f"""<!doctype html>
 <dt>Policy digest</dt><dd id="policy-digest"></dd>
 <dt>Gateway health</dt><dd id="health-status"></dd>
 </dl>
+</details>
+
+<details class="meta-block" id="limits-panel" hidden>
+<summary>Effective limits</summary>
+<dl class="meta" id="effective-limits"></dl>
+<p class="hint">Read-only. The environment (or built-in default) value is a hard ceiling; a startup policy may only tighten it.</p>
 </details>
 
 <div class="toolbar" role="group" aria-label="Filter audit events">

@@ -100,6 +100,8 @@ function createApp() {
     "events-state-text",
     "policy-version",
     "policy-digest",
+    "effective-limits",
+    "limits-panel",
     "health-status",
     "decision-filter",
     "event-type-filter",
@@ -261,6 +263,7 @@ function payload(events, options) {
     has_more: extras.has_more === true,
     next_cursor: typeof extras.next_cursor === "number" ? extras.next_cursor : null,
     policy: { version: extras.version || "v-test", digest: "d".repeat(64) },
+    limits: extras.limits,
     health: "ready",
   };
 }
@@ -622,6 +625,43 @@ async function lateExportCannotCrossSessions() {
   assert(app.elements["export-csv"].disabled === false, "new session export control unlocks");
 }
 
+async function effectiveLimitsAreReadOnlyAndCleared() {
+  const app = createApp();
+  connect(app, "secret-limits");
+  app.calls[0].respond(
+    payload([], {
+      limits: {
+        context_messages: { effective: 16, ceiling: 32, source: "policy" },
+        context_budget: { effective: 8192, ceiling: 8192, source: "env" },
+        default_reply_tokens: { effective: 384, ceiling: 1024, source: "policy" },
+        max_reply_tokens: { effective: 2048, ceiling: 4096, source: "policy" },
+      },
+    })
+  );
+  await flush();
+  const panel = app.elements["limits-panel"];
+  const list = app.elements["effective-limits"];
+  assert(panel.hidden === false, "effective limits panel is visible with data");
+  assert(list.children.length === 8, "four label/value pairs render");
+  assert(list.children[0].textContent === "Context messages", "first limit label");
+  assert(
+    list.children[1].textContent === "16 (env ceiling 32, source policy)",
+    "policy-tightened value names its source and ceiling"
+  );
+  assert(
+    list.children[3].textContent === "8192 (env ceiling 8192, source env)",
+    "unchanged value reports the env source"
+  );
+  assert(
+    list.children[5].textContent === "384 (env ceiling 1024, source policy)",
+    "pilot reply default is shown read-only"
+  );
+
+  app.elements["disconnect"].dispatch("click");
+  assert(list.children.length === 0, "disconnect clears the limits panel");
+  assert(panel.hidden === true, "disconnect hides the limits panel");
+}
+
 async function main() {
   const scenarios = [
     ["stale success after disconnect", staleSuccessAfterDisconnect],
@@ -636,6 +676,7 @@ async function main() {
     ["stale export cannot download", exportStaleCompletionCannotDownload],
     ["technical columns toggle and reset", technicalColumnsToggleAndReset],
     ["late export cannot cross sessions", lateExportCannotCrossSessions],
+    ["effective limits are read-only", effectiveLimitsAreReadOnlyAndCleared],
   ];
   for (const [name, scenario] of scenarios) {
     await scenario();

@@ -298,7 +298,7 @@ The production server requires one operator-supplied policy file:
 | `NASI_LEMAK_POLICY_FILE` | Path to one UTF-8 YAML policy file, read once while the app is constructed |
 
 `docs/policy.example.yaml` is a non-secret example of the exact canonical form.
-The loader accepts only these five keys:
+The loader requires these five keys and accepts one optional `limits` mapping:
 
 ```yaml
 app_id: nasi-lemak            # must equal the server-side app id
@@ -307,7 +307,16 @@ model: pilot-local            # the only accepted public alias
 token_budget: 256             # integer 1..512
 deny_phrases:                 # up to 64 non-empty strings, 256 chars each
   - "synthetic denied phrase"
+limits:                       # optional; may only tighten env/default ceilings
+  default_reply_tokens: 384
 ```
+
+Each `limits` field (`context_messages`, `context_budget`,
+`default_reply_tokens`, `max_reply_tokens`) must be a positive integer. The
+effective value is the smaller of the environment/default ceiling and the policy
+value, so a policy can never widen a limit; above-ceiling values are clamped.
+When the key is omitted the policy digest is unchanged. See
+[docs/chat-limits.md](docs/chat-limits.md) for precedence.
 
 The file must contain exactly one YAML document, no anchors, aliases or custom
 tags, no duplicate keys, at most 8 nested collections and at most 32 KiB. An
@@ -327,7 +336,7 @@ app live `200` but not ready `503`, and chat stays `503`; it never falls back to
 built-in defaults and never loads guard artifacts. A valid file's `version` and
 SHA-256 policy `digest` are recorded in `app.state` and on every audit event for
 the active policy. The digest covers the app identity, version, alias, token
-budget and deny phrases.
+budget, deny phrases and, when present, the optional `limits` mapping.
 
 `deny_phrases` are **literal, case-insensitive substrings** checked against every
 accepted input turn before generation and against buffered output before

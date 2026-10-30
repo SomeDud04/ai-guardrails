@@ -26,6 +26,7 @@ from nasi_lemak.server import make_app
 from tests.test_server import RecordingAdapters
 from tests.test_workspace_http import (
     GATEWAY_REPLY,
+    LEGACY_KEY,
     PASSWORD,
     WorkspaceHTTPBase,
 )
@@ -53,6 +54,38 @@ class ChatContextTests(WorkspaceHTTPBase):
             json=body,
             headers=self.auth(token),
         )
+
+    def test_policy_limits_apply_to_workspace_turns(self) -> None:
+        policy = Policy(
+            app_id="synthetic-app",
+            version="policy-limits",
+            model="pilot-local",
+            token_budget=512,
+            limits={"default_reply_tokens": 384, "max_reply_tokens": 512},
+        )
+        gateway = Gateway(
+            app_key=LEGACY_KEY,
+            audit_store=self.gateway.audit_store,
+            adapters=self.adapters,
+            policy=policy,
+        )
+        app = make_app(
+            gateway=gateway,
+            workspace_store=self.store,
+            environ=self.env(),
+        )
+        client = self.make_client(app)
+        self.assertEqual(app.state.workspace.chat_limits.default_reply_tokens, 384)
+        self.assertEqual(app.state.workspace.chat_limits.max_reply_tokens, 512)
+
+        token = self.login(client=client)
+        conversation_id = self.new_conversation(token, client=client)
+        accepted = self.send(client, token, conversation_id, "hello", max_tokens=512)
+        self.assertEqual(accepted.status_code, 200, accepted.text)
+
+        rejected = self.send(client, token, conversation_id, "hello", max_tokens=513)
+        self.assertEqual(rejected.status_code, 400, rejected.text)
+        self.assertEqual(rejected.json()["error"]["code"], "INVALID_REQUEST")
 
     def test_saved_history_beyond_eight_exchanges_continues_unchanged(self) -> None:
         token = self.login()

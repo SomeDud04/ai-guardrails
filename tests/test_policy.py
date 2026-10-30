@@ -45,6 +45,7 @@ class _Adapters:
     def __init__(self) -> None:
         self.attack_inputs: list[str] = []
         self.generate_inputs: list[list[dict[str, str]]] = []
+        self.generate_options: list[tuple[str, int]] = []
         self.output_inputs: list[str] = []
         self.generated = "Safe synthetic answer."
         self.attack_result: Any = {"decision": "allow"}
@@ -59,6 +60,7 @@ class _Adapters:
 
     def generate(self, messages: list[dict[str, str]], model: str, max_tokens: int) -> str:
         self.generate_inputs.append([dict(message) for message in messages])
+        self.generate_options.append((model, max_tokens))
         return self.generated
 
     def scan_output(self, text: str) -> Any:
@@ -118,6 +120,75 @@ class PolicyLoaderTests(unittest.TestCase):
         for variant in variants:
             self.assertNotIn(variant.digest, digests)
             digests.add(variant.digest)
+
+    def test_existing_five_key_policy_keeps_its_digest(self) -> None:
+        policy = load_policy(_write_policy(self.root / "stable.yaml"))
+        # Locked value from before the optional limits key existed.  A file
+        # without ``limits`` must remain comparable with existing audit rows.
+        self.assertEqual(
+            policy.digest,
+            "3462e6a641342c014873593533d9bb76beb828585a975c1625fa1f0266dad662",
+        )
+        self.assertIsNone(policy.limits)
+
+    def test_optional_limits_are_validated_and_included_in_digest(self) -> None:
+        policy = load_policy(
+            _write_policy(
+                self.root / "limits.yaml",
+                limits={"default_reply_tokens": 384, "context_messages": 8},
+            )
+        )
+        self.assertEqual(
+            policy.limits, {"context_messages": 8, "default_reply_tokens": 384}
+        )
+        baseline = load_policy(_write_policy(self.root / "baseline.yaml"))
+        self.assertNotEqual(policy.digest, baseline.digest)
+
+        # Canonical (sorted-key) digest: YAML mapping order does not matter.
+        reordered = self.root / "reordered.yaml"
+        reordered.write_text(
+            "\n".join(
+                [
+                    "app_id: nasi-lemak",
+                    "version: 2026-10-20.1",
+                    "model: pilot-local",
+                    "token_budget: 128",
+                    "deny_phrases: [Forbidden Phrase]",
+                    "limits:",
+                    "  default_reply_tokens: 384",
+                    "  context_messages: 8",
+                ]
+            ),
+            encoding="utf-8",
+        )
+        self.assertEqual(load_policy(reordered).digest, policy.digest)
+
+    def test_invalid_limits_are_policy_errors(self) -> None:
+        cases = {
+            "not-mapping": "limits: [384]",
+            "null-mapping": "limits:",
+            "unknown-key": "limits: {unknown: 1}",
+            "zero": "limits: {default_reply_tokens: 0}",
+            "negative": "limits: {context_budget: -1}",
+            "string": 'limits: {context_budget: "1024"}',
+            "bool": "limits: {context_budget: true}",
+            "float": "limits: {context_budget: 1.5}",
+            "default-above-max": (
+                "limits: {default_reply_tokens: 700, max_reply_tokens: 600}"
+            ),
+        }
+        base = [
+            "app_id: nasi-lemak",
+            "version: v1",
+            "model: pilot-local",
+            "token_budget: 10",
+            "deny_phrases: []",
+        ]
+        for name, extra in cases.items():
+            with self.subTest(name=name):
+                text = "\n".join(base + [extra]) + "\n"
+                with self.assertRaises(PolicyError):
+                    load_policy(self._write_text(text, name + ".yaml"))
 
     def test_empty_deny_phrase_list_is_allowed(self) -> None:
         policy = load_policy(_write_policy(self.root / "empty.yaml", deny_phrases=[]))
@@ -401,13 +472,22 @@ class StartupActivationTests(unittest.TestCase):
             env[ENV_POLICY_FILE] = str(policy_path)
         return env
 
-    def _activated_app(self, policy_path: Path, adapters: Any = None, *, app_id: str = "nasi-lemak"):
+    def _activated_app(
+        self,
+        policy_path: Path,
+        adapters: Any = None,
+        *,
+        app_id: str = "nasi-lemak",
+        env_extra: dict[str, str] | None = None,
+    ):
         def store(_dsn: str) -> SqliteAuditStore:
             return SqliteAuditStore(self.root / "audit.sqlite3")
 
+        environment = self._environment(policy_path)
+        environment.update(env_extra or {})
         with mock.patch.object(server_module, "PostgresAuditStore", store):
             return make_app(
-                environ=self._environment(policy_path),
+                environ=environment,
                 adapters=adapters or _Adapters(),
                 app_id=app_id,
             )
@@ -440,6 +520,51 @@ class StartupActivationTests(unittest.TestCase):
             {event["policy_digest"] for event in events}, {app.state.policy_digest}
         )
 
+    def test_policy_limits_tighten_the_env_ceiling_for_chat(self) -> None:
+        adapters = _Adapters()
+        path = _write_policy(
+            self.root / "limits-policy.yaml",
+            limits={
+                "default_reply_tokens": 384,
+                "max_reply_tokens": 512,
+            },
+        )
+        app = self._activated_app(
+            path,
+            adapters=adapters,
+            env_extra={
+                "NASI_LEMAK_CHAT_DEFAULT_REPLY_TOKENS": "384",
+                "NASI_LEMAK_CHAT_MAX_REPLY_TOKENS": "2048",
+            },
+        )
+        client = self._client(app)
+        self.assertTrue(app.state.config_ready)
+        self.assertEqual(app.state.gateway.limits.default_reply_tokens, 384)
+        self.assertEqual(app.state.gateway.limits.max_reply_tokens, 512)
+        self.assertEqual(
+            app.state.limits_view["max_reply_tokens"],
+            {"effective": 512, "ceiling": 2048, "source": "policy"},
+        )
+
+        response = client.post(
+            "/v1/chat/completions",
+            json={"model": "pilot-local", "messages": [{"role": "user", "content": "hello"}]},
+            headers=AUTH,
+        )
+        self.assertEqual(response.status_code, 200, response.text)
+        self.assertEqual(adapters.generate_options[-1], ("pilot-local", 384))
+
+        too_large = client.post(
+            "/v1/chat/completions",
+            json={
+                "model": "pilot-local",
+                "messages": [{"role": "user", "content": "hello"}],
+                "max_tokens": 513,
+            },
+            headers=AUTH,
+        )
+        self.assertEqual(too_large.status_code, 400, too_large.text)
+
     def test_missing_or_invalid_policy_never_loads_guards_or_defaults(self) -> None:
         invalid = self.root / "invalid.yaml"
         invalid.write_text("app_id: nasi-lemak\n", encoding="utf-8")
@@ -449,7 +574,12 @@ class StartupActivationTests(unittest.TestCase):
             "token_budget: 10\ndeny_phrases: " + "[" * 200 + "]" * 200 + "\n",
             encoding="utf-8",
         )
-        cases = [None, self.root / "missing.yaml", invalid, nested]
+        bad_limits = self.root / "bad-limits.yaml"
+        bad_limits.write_text(
+            json.dumps(_policy_data(limits={"default_reply_tokens": 700, "max_reply_tokens": 600})),
+            encoding="utf-8",
+        )
+        cases = [None, self.root / "missing.yaml", invalid, nested, bad_limits]
         with mock.patch.object(
             server_module,
             "make_adapters_from_env",

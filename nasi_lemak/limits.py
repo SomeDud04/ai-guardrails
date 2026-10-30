@@ -35,6 +35,15 @@ MAX_REPLY_TOKENS_CEILING = 8192
 # policy token budget remain the effective limits.
 MAX_PROMPT_CHARS = 64 * 1024
 
+# The four fields an operator policy may tighten.  The order is the public
+# display order; callers must not treat it as a priority order.
+LIMIT_FIELDS = (
+    "context_messages",
+    "context_budget",
+    "default_reply_tokens",
+    "max_reply_tokens",
+)
+
 _POSITIVE_INT = re.compile(r"[1-9][0-9]*\Z")
 
 
@@ -178,3 +187,63 @@ class ChatLimits:
             "default_reply_tokens": self.default_reply_tokens,
             "max_reply_tokens": self.max_reply_tokens,
         }
+
+
+def tighten(
+    env_limits: ChatLimits,
+    policy_limits: Mapping[str, int] | None,
+) -> ChatLimits:
+    """Return the effective limits after applying a policy's optional subset.
+
+    Environment/default values are hard ceilings: each supplied policy value is
+    reduced to ``min(env, policy)``.  A policy value above the ceiling is
+    therefore clamped, never an error.  A malformed policy value, an unknown
+    key, or a policy whose own default exceeds its own maximum raises
+    :class:`ChatLimitsError`.
+
+    If the policy lowers only ``max_reply_tokens``, the inherited default
+    follows that smaller effective ceiling, matching ``from_env``'s behaviour
+    for an explicit maximum.  The returned object is always revalidated, so the
+    ``default_reply_tokens <= max_reply_tokens`` invariant holds.
+    """
+    if not isinstance(env_limits, ChatLimits):
+        raise ChatLimitsError("chat limits are invalid")
+    if policy_limits is None:
+        return env_limits
+    if isinstance(policy_limits, (str, bytes, bytearray)) or isinstance(
+        policy_limits, bool
+    ):
+        raise ChatLimitsError("chat limits policy is invalid")
+    try:
+        supplied = dict(policy_limits)
+    except (TypeError, ValueError):
+        raise ChatLimitsError("chat limits policy is invalid") from None
+
+    for name, value in supplied.items():
+        if name not in LIMIT_FIELDS:
+            raise ChatLimitsError("chat limits policy is invalid")
+        if isinstance(value, bool) or not isinstance(value, int) or value <= 0:
+            raise ChatLimitsError("chat limits policy is invalid")
+    if (
+        "default_reply_tokens" in supplied
+        and "max_reply_tokens" in supplied
+        and supplied["default_reply_tokens"] > supplied["max_reply_tokens"]
+    ):
+        raise ChatLimitsError("chat limits policy is invalid")
+    if not supplied:
+        return env_limits
+
+    effective = env_limits.public()
+    for name, value in supplied.items():
+        effective[name] = min(effective[name], value)
+    if effective["default_reply_tokens"] > effective["max_reply_tokens"]:
+        effective["default_reply_tokens"] = effective["max_reply_tokens"]
+    return ChatLimits(**effective)
+
+
+def source_for(name: str, env_limits: ChatLimits, effective: ChatLimits) -> str:
+    """Return ``policy`` when the policy tightened a field, else ``env``."""
+    if name not in LIMIT_FIELDS:
+        raise ChatLimitsError("chat limits field is invalid")
+    env_value = getattr(env_limits, name)
+    return "policy" if getattr(effective, name) < env_value else "env"

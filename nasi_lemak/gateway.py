@@ -21,7 +21,7 @@ from .controls import GatewayControl, block_detail
 from .diagnostics import SIGNAL_CODES, record_signal
 from .generation import GenerationError, conservative_byte_budget
 from .guards import GuardInputLimit
-from .limits import ChatLimits
+from .limits import LIMIT_FIELDS, ChatLimits
 from .pii import mask_text
 from .scan_context import ScanContext
 
@@ -95,8 +95,10 @@ class Policy:
 
     There are deliberately no knobs for PII masking, guard verdict handling or
     audit ordering: those controls are unconditional in ``Gateway``.  A policy
-    only selects the public app identity, version, alias, token budget and the
-    bounded literal deny-phrase list.
+    only selects the public app identity, version, alias, token budget, the
+    bounded literal deny-phrase list and an optional set of chat-limit
+    tightening values.  ``limits`` is ``None`` when the policy file omitted the
+    key, and a flat mapping of field name to positive integer otherwise.
     """
 
     version: str = "synthetic-0.1"
@@ -104,6 +106,7 @@ class Policy:
     token_budget: int = 512
     app_id: str = "synthetic-app"
     deny_phrases: tuple[str, ...] = ()
+    limits: dict[str, int] | None = None
     # Derived once at construction, never serialized, hashed or exposed.  They
     # are excluded from equality so policy identity stays the raw configured
     # fields.  Matching uses the union of both canonical forms: (a) deletes
@@ -163,6 +166,46 @@ class Policy:
             spaced.append(spaced_candidate)
         object.__setattr__(self, "_normalized_deny_phrases", tuple(normalized))
         object.__setattr__(self, "_spaced_deny_phrases", tuple(spaced))
+        if self.limits is not None:
+            raw_limits = self.limits
+            if isinstance(raw_limits, (str, bytes, bytearray)) or isinstance(
+                raw_limits, bool
+            ):
+                raise ValueError("invalid policy")
+            try:
+                supplied = dict(raw_limits)
+            except (TypeError, ValueError):
+                raise ValueError("invalid policy") from None
+            for name, value in supplied.items():
+                if name not in LIMIT_FIELDS:
+                    raise ValueError("invalid policy")
+                if isinstance(value, bool) or not isinstance(value, int) or value <= 0:
+                    raise ValueError("invalid policy")
+            if (
+                "default_reply_tokens" in supplied
+                and "max_reply_tokens" in supplied
+                and supplied["default_reply_tokens"] > supplied["max_reply_tokens"]
+            ):
+                raise ValueError("invalid policy")
+            object.__setattr__(
+                self,
+                "limits",
+                {name: supplied[name] for name in LIMIT_FIELDS if name in supplied},
+            )
+
+    def __hash__(self) -> int:
+        return hash(
+            (
+                self.version,
+                self.model,
+                self.token_budget,
+                self.app_id,
+                self.deny_phrases,
+                None
+                if self.limits is None
+                else tuple(sorted(self.limits.items())),
+            )
+        )
 
     def denies(self, text: str) -> bool:
         """Literal substring match on both normalized forms; never a regex.
@@ -190,14 +233,19 @@ class Policy:
 
     @property
     def digest(self) -> str:
+        canonical_document = {
+            "app_id": self.app_id,
+            "deny_phrases": list(self.deny_phrases),
+            "model": self.model,
+            "token_budget": self.token_budget,
+            "version": self.version,
+        }
+        if self.limits is not None:
+            # Only a policy that actually has the optional key changes the
+            # digest, so existing five-key files and audit rows stay comparable.
+            canonical_document["limits"] = dict(self.limits)
         canonical = json.dumps(
-            {
-                "app_id": self.app_id,
-                "deny_phrases": list(self.deny_phrases),
-                "model": self.model,
-                "token_budget": self.token_budget,
-                "version": self.version,
-            },
+            canonical_document,
             sort_keys=True,
             separators=(",", ":"),
             ensure_ascii=False,

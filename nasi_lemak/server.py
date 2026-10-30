@@ -68,7 +68,13 @@ from .guard_api import (
     Qwen3GuardOutputAdapter,
     guard_client_config,
 )
-from .limits import ChatLimits, ChatLimitsError, has_explicit_env
+from .limits import (
+    LIMIT_FIELDS,
+    ChatLimits,
+    ChatLimitsError,
+    has_explicit_env,
+    tighten,
+)
 from .hosted_guards import (
     CLOUDFLARE_LLAMA_GUARD_MODEL,
     GROQ_PROMPT_GUARD_MODEL,
@@ -886,6 +892,28 @@ def _clone_gateway_with_limits(gateway: Gateway, limits: ChatLimits) -> Gateway:
     )
 
 
+def _limits_view(
+    env_limits: ChatLimits,
+    effective_limits: ChatLimits,
+    policy_limits: dict[str, int] | None = None,
+) -> dict[str, dict[str, int | str]]:
+    """Read-only admin view: effective value, env ceiling and winning source."""
+    tightened = set() if not policy_limits else set(policy_limits)
+    return {
+        name: {
+            "effective": getattr(effective_limits, name),
+            "ceiling": getattr(env_limits, name),
+            "source": (
+                "policy"
+                if name in tightened
+                and getattr(effective_limits, name) < getattr(env_limits, name)
+                else "env"
+            ),
+        }
+        for name in LIMIT_FIELDS
+    }
+
+
 def _build_runtime_gateway(
     environ: dict[str, str],
     app_key_digest: str | None,
@@ -935,6 +963,20 @@ def _build_runtime_gateway(
     # ``app_id`` remains a validated server-side setting for YAML activation.
     gateway_app_id = resolved.app_id
 
+    # Environment/default chat limits are the operator's hard ceiling.  The
+    # optional policy mapping may only tighten them; validation happens here,
+    # once, before the gateway (and later the workspace clone) is built.
+    env_chat_limits = (
+        limits if isinstance(limits, ChatLimits) else ChatLimits.defaults()
+    )
+    try:
+        effective_chat_limits = tighten(env_chat_limits, resolved.limits)
+    except ChatLimitsError:
+        config_ready = False
+        effective_chat_limits = env_chat_limits
+        resolved = Policy()
+        activation = POLICY_ACTIVATION_UNAVAILABLE
+
     digest = _normalize_key_digest(app_key_digest)
     if digest is None:
         config_ready = False
@@ -965,7 +1007,7 @@ def _build_runtime_gateway(
             adapters=adapters,
             policy=resolved,
             app_id=gateway_app_id,
-            limits=limits,
+            limits=effective_chat_limits,
         )
     except Exception:
         config_ready = False
@@ -975,7 +1017,7 @@ def _build_runtime_gateway(
             audit_store=UnreadyAuditStore(),
             adapters=None,
             policy=Policy(),
-            limits=limits,
+            limits=effective_chat_limits,
         )
 
     if not _gateway_static_ready(gateway):
@@ -1287,16 +1329,30 @@ def make_app(
         runtime_gateway = gateway
         config_ready = True
         policy_activation = POLICY_ACTIVATION_GATEWAY
-        if explicit_chat_limits and chat_limits_ok:
-            # An explicit environment setting is app-owned configuration.  Build
-            # a clone instead of mutating a caller/fixture Gateway in place.
+        policy_limits = getattr(gateway.policy, "limits", None)
+        if explicit_chat_limits:
+            if chat_limits_ok:
+                # An explicit environment setting is app-owned configuration.
+                # Build a clone instead of mutating a caller/fixture Gateway.
+                try:
+                    runtime_gateway = _clone_gateway_with_limits(
+                        gateway, tighten(chat_limits, policy_limits)
+                    )
+                except Exception:
+                    runtime_gateway = gateway
+                    config_ready = False
+            else:
+                config_ready = False
+        elif policy_limits is not None:
+            # The injected Gateway's own limits are the ceiling when no env
+            # override is present; a policy may still tighten that fixture.
             try:
-                runtime_gateway = _clone_gateway_with_limits(gateway, chat_limits)
+                runtime_gateway = _clone_gateway_with_limits(
+                    gateway, tighten(gateway.limits, policy_limits)
+                )
             except Exception:
                 runtime_gateway = gateway
                 config_ready = False
-        elif explicit_chat_limits:
-            config_ready = False
     else:
         runtime_gateway, config_ready, policy_activation = _build_runtime_gateway(
             env,
@@ -1307,6 +1363,9 @@ def make_app(
             app_id,
             limits=chat_limits,
         )
+    effective_chat_limits = getattr(runtime_gateway, "limits", chat_limits)
+    if not isinstance(effective_chat_limits, ChatLimits):
+        effective_chat_limits = chat_limits
     # An unknown mode is never treated as guarded or test. It keeps the app
     # live but not ready, and the header/admin surface must not imply either
     # supported safety posture.
@@ -1400,6 +1459,13 @@ def make_app(
     policy_active = policy_activation != POLICY_ACTIVATION_UNAVAILABLE
     app.state.policy_digest = runtime_gateway.policy.digest if policy_active else None
     app.state.policy_version = runtime_gateway.policy.version if policy_active else None
+    app.state.env_chat_limits = chat_limits
+    app.state.chat_limits = effective_chat_limits
+    app.state.limits_view = _limits_view(
+        chat_limits,
+        effective_chat_limits,
+        getattr(runtime_gateway.policy, "limits", None),
+    )
     app.state.max_body_bytes = body_limit
     app.state.body_read_timeout = read_timeout
     app.state.max_concurrency = concurrency
@@ -1578,6 +1644,7 @@ def make_app(
                 "version": request.app.state.policy_version,
                 "digest": request.app.state.policy_digest,
             },
+            "limits": request.app.state.limits_view,
             "health": "ready" if health else "not_ready",
         }
         return JSONResponse(payload, headers=ADMIN_SECURITY_HEADERS)
