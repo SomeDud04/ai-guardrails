@@ -47,7 +47,7 @@ from urllib.parse import urlsplit
 from fastapi import FastAPI, Request
 from fastapi.responses import JSONResponse
 
-from .controls import BLOCK_REASONS, GatewayControl, block_detail
+from .controls import BLOCK_REASONS, GatewayControl, block_detail, guardrail_details
 from .diagnostics import BLOCK_PAYLOAD_REJECTED, SafeDiagnostics
 from .gateway import Gateway, serialize_messages
 from .generation import conservative_byte_budget
@@ -1485,6 +1485,7 @@ def _gateway_handle(
     body: dict[str, Any],
     scan_context: ScanContext,
     control: GatewayControl,
+    result_sink: dict[str, Any] | None = None,
 ):
     """Call the real Gateway with an explicit control, or a legacy test double.
 
@@ -1504,12 +1505,14 @@ def _gateway_handle(
             body,
             scan_context=scan_context,
             control=control,
+            result_sink=result_sink,
         )
     try:
         parameters = inspect.signature(handle).parameters
     except (TypeError, ValueError):
         raise TypeError("gateway control is unsupported") from None
     if "control" in parameters:
+        extra = {"result_sink": result_sink} if "result_sink" in parameters else {}
         return handle(
             "POST",
             "/v1/chat/completions",
@@ -1517,6 +1520,7 @@ def _gateway_handle(
             body,
             scan_context=scan_context,
             control=control,
+            **extra,
         )
     if isinstance(gateway, Gateway) and getattr(handle, "__func__", None) is not None:
         # A configured Gateway subclass that drops the control argument would
@@ -1859,6 +1863,7 @@ def _run_turn_pipeline(
         "messages": messages,
         "max_tokens": max_tokens,
     }
+    result_sink: dict[str, Any] = {}
     try:
         status, payload = _gateway_handle(
             gateway,
@@ -1866,6 +1871,7 @@ def _run_turn_pipeline(
             body=gateway_body,
             scan_context=scan_context,
             control=control,
+            result_sink=result_sink,
         )
     except Exception:
         fail("failed", "UNAVAILABLE")
@@ -1912,6 +1918,7 @@ def _run_turn_pipeline(
                 "role": "assistant",
                 "content": delivered,
                 "context": context_meta,
+                "guardrail": guardrail_details(result_sink, text, control),
             },
         }
 
@@ -1966,6 +1973,7 @@ def _run_turn_pipeline(
             "message": block["title"],
             "block": {**block, "ref": block_request_id},
             "turn_request_id": block_request_id,
+            "guardrail": guardrail_details(result_sink, text, control),
         }
 
     fail("failed", clean_code, safe_request_id)
@@ -2012,6 +2020,9 @@ def _turn_response(request: Request, result: Any):
             and not any(ord(char) < 32 or ord(char) == 127 for char in reference)
         ):
             details = {"block": block, "turn_request_id": reference}
+            guardrail = result.get("guardrail")
+            if isinstance(guardrail, dict):
+                details["guardrail"] = guardrail
     return _ws_error(request, code, status, message, details=details)
 
 

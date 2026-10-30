@@ -7,6 +7,7 @@ or network service is contacted.
 
 from __future__ import annotations
 
+import json
 from typing import Any
 
 from nasi_lemak.controls import block_detail
@@ -266,6 +267,60 @@ class PolicyPipelineTests(WorkspaceHTTPBase):
         self.assertIn("[EMAIL]", reply)
         self.assertIn("0123456789", reply)
         self.assertNotIn("second@example.com", reply)
+
+    def test_allowed_turn_reports_guardrail_details(self) -> None:
+        token = self.login()
+        conversation_id = self.new_conversation(token)
+        response = self.client.post(
+            f"/workspace/api/conversations/{conversation_id}/messages",
+            json={"text": "My email is ali@example.com"},
+            headers=self.auth(token),
+        )
+        self.assertEqual(response.status_code, 200, response.text)
+        details = response.json()["guardrail"]
+        self.assertEqual(details["input_check"], "safe")
+        self.assertEqual(details["output_check"], "safe")
+        self.assertIs(details["input_pii_masked"], True)
+        self.assertIsInstance(details["output_pii_masked"], bool)
+        self.assertIsInstance(details["latency_ms"], int)
+        self.assertNotIn("ali@example.com", json.dumps(details))
+
+    def test_blocked_turn_reports_guardrail_details_without_text(self) -> None:
+        token = self.login()
+        conversation_id = self.new_conversation(token)
+        prompt_canary = "CANARY-GUARDRAIL-PROMPT-71f"
+        classifier_canary = "RAW-CLASSIFIER-GUARDRAIL-90c"
+        self.adapters.attack_result = {"decision": "block", "reason": classifier_canary}
+        blocked = self.client.post(
+            f"/workspace/api/conversations/{conversation_id}/messages",
+            json={"text": prompt_canary},
+            headers=self.auth(token),
+        )
+        self.assertEqual(blocked.status_code, 403, blocked.text)
+        details = blocked.json()["error"]["guardrail"]
+        self.assertEqual(details["input_check"], "blocked")
+        self.assertEqual(details["output_check"], "not_run")
+        self.assertIs(details["input_pii_masked"], False)
+        self.assertIs(details["output_pii_masked"], False)
+        self.assertNotIn(prompt_canary, blocked.text)
+        self.assertNotIn(classifier_canary, blocked.text)
+
+    def test_policy_disabled_check_reads_off_not_safe(self) -> None:
+        admin_token = self.login("root.admin")
+        profile = self._profile(
+            admin_token, "input-check-off", input_check_enabled=False
+        )
+        self._assign(admin_token, profile["id"])
+        token = self.login()
+        conversation_id = self.new_conversation(token)
+        response = self.client.post(
+            f"/workspace/api/conversations/{conversation_id}/messages",
+            json={"text": "hello"},
+            headers=self.auth(token),
+        )
+        self.assertEqual(response.status_code, 200, response.text)
+        self.assertEqual(response.json()["guardrail"]["input_check"], "off")
+        self.assertEqual(response.json()["guardrail"]["output_check"], "safe")
 
     def test_blocks_keep_fixed_feedback_and_never_store_raw_output(self) -> None:
         alice_token = self.login()

@@ -42,6 +42,7 @@ from starlette.exceptions import HTTPException as StarletteHTTPException
 
 from .admin_page import ADMIN_SECURITY_HEADERS, admin_html
 from .audit import PostgresAuditStore, UnreadyAuditStore
+from .controls import audit_latency_ms as _latency_ms
 from .demo_page import DEMO_SECURITY_HEADERS, demo_html
 from .workspace_page import WORKSPACE_SECURITY_HEADERS, workspace_html
 from .export import (
@@ -281,24 +282,6 @@ def _sanitized_prompt(result_sink: dict[str, Any]) -> str | None:
         and isinstance(message.get("content"), str)
     ]
     return "\n".join(parts) if parts else None
-
-
-def _latency_ms(result_sink: dict[str, Any]) -> int | None:
-    """Server latency derived from the two audit timestamps this request wrote.
-
-    Both values come from the same request's pipeline sink and are the audit
-    store's own ``timestamp`` column values.  Nothing is timed or estimated
-    here: when either stamp is absent (a stage that did not run) the field is
-    omitted rather than invented.
-    """
-    started = result_sink.get("audit_started_at")
-    terminal = result_sink.get("audit_terminal_at")
-    for value in (started, terminal):
-        if isinstance(value, bool) or not isinstance(value, (int, float)):
-            return None
-        if not math.isfinite(value):
-            return None
-    return int(round((terminal - started) * 1000))
 
 
 def _error_response(request_id: str, code: str, status_code: int) -> JSONResponse:

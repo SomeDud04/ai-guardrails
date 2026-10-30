@@ -3963,6 +3963,140 @@ async function scenarioChatBlockNoticeDeduplicated() {
   }
 }
 
+async function scenarioChatGuardrailDetails() {
+  const app = createApp();
+  await start(app);
+  await signIn(app);
+  app.lastMatching("/workspace/api/conversations?limit=25").respond(
+    {
+      items: [{ id: "conv-guard", created_at: 1700000001, updated_at: 1700000002 }],
+      next: null,
+    },
+    200
+  );
+  await settle();
+  app.elementFor("conversation-list").children[0].dispatch("click");
+  app.lastMatching("/workspace/api/conversations/conv-guard").respond(
+    { id: "conv-guard", created_at: 1700000001, messages: [] },
+    200
+  );
+  await settle();
+
+  async function reloadWith(messages) {
+    await settle();
+    app.lastMatching("/workspace/api/conversations/conv-guard").respond(
+      { id: "conv-guard", created_at: 1700000001, messages: messages },
+      200
+    );
+    await settle();
+    const recency = app.lastMatching("/workspace/api/conversations?limit=25");
+    if (recency && !recency.settled) {
+      recency.respond(
+        {
+          items: [{ id: "conv-guard", created_at: 1700000001, updated_at: 1700000003 }],
+          next: null,
+        },
+        200
+      );
+      await settle();
+    }
+  }
+
+  app.elementFor("composer").value = "My email is ali@example.com";
+  app.elementFor("composer-form").dispatch("submit");
+  app.lastMatching("/workspace/api/conversations/conv-guard/messages").respond(
+    {
+      id: "req-allow",
+      conversation_id: "conv-guard",
+      role: "assistant",
+      content: "Hello",
+      context: {},
+      guardrail: {
+        input_check: "safe",
+        output_check: "safe",
+        input_pii_masked: true,
+        output_pii_masked: false,
+        latency_ms: 17786,
+      },
+    },
+    200
+  );
+  const allowed = [
+    { id: "m1", role: "user", outcome: "allowed", request_id: "req-allow",
+      text: "My email is ali@example.com", created_at: 1700000002 },
+    { id: "m2", role: "assistant", outcome: "allowed", request_id: "req-allow",
+      text: "Hello", created_at: 1700000003 },
+  ];
+  await reloadWith(allowed);
+  let shown = app.elementFor("messages").textContent;
+  assert(shown.indexOf("Input: Safe") >= 0 && shown.indexOf("Output: Safe") >= 0,
+    "an allowed turn must show both guard checks after the transcript reloads");
+  assert(shown.indexOf("PII masked in prompt") >= 0,
+    "a masked prompt must be stated");
+  assert(shown.indexOf("17.8 s") >= 0, "the server latency must be shown in seconds");
+  assert(shown.split("Input: Safe").length - 1 === 1,
+    "the panel belongs to the assistant message only, once");
+
+  app.elementFor("composer").value = "blocked prompt";
+  app.elementFor("composer-form").dispatch("submit");
+  app.lastMatching("/workspace/api/conversations/conv-guard/messages").respond(
+    {
+      error: {
+        code: "FORBIDDEN",
+        message: "Prompt blocked",
+        block: {
+          stage: "input",
+          reason_code: "INPUT_GUARD_BLOCK",
+          title: "Prompt blocked",
+          ref: "req-block",
+        },
+        request_id: "req-block",
+        turn_request_id: "req-block",
+        guardrail: {
+          input_check: "blocked",
+          output_check: "not_run",
+          input_pii_masked: false,
+          output_pii_masked: false,
+          latency_ms: 6400,
+        },
+      },
+    },
+    403
+  );
+  await reloadWith(allowed.concat([
+    { id: "m3", role: "user", outcome: "blocked", error_code: "POLICY_BLOCK",
+      request_id: "req-block", text: "blocked prompt", created_at: 1700000004 },
+  ]));
+  shown = app.elementFor("messages").textContent;
+  assert(shown.indexOf("Input: Blocked") >= 0 && shown.indexOf("Output: Not run") >= 0,
+    "a blocked turn must not read as if the output check passed");
+  assert(shown.indexOf("Input: Safe") >= 0,
+    "the earlier turn keeps its own details after the next reload");
+
+  // A malformed summary is dropped, never shown as a passed check.
+  app.elementFor("composer").value = "second";
+  app.elementFor("composer-form").dispatch("submit");
+  app.lastMatching("/workspace/api/conversations/conv-guard/messages").respond(
+    {
+      id: "req-bad",
+      conversation_id: "conv-guard",
+      role: "assistant",
+      content: "Fine",
+      context: {},
+      guardrail: { input_check: "<b>unknown</b>", output_check: "safe",
+        input_pii_masked: false, output_pii_masked: false },
+    },
+    200
+  );
+  await reloadWith([
+    { id: "m4", role: "assistant", outcome: "allowed", request_id: "req-bad",
+      text: "Fine", created_at: 1700000005 },
+  ]);
+  shown = app.elementFor("messages").textContent;
+  assert(shown.indexOf("Input:") < 0 && shown.indexOf("unknown") < 0,
+    "an unrecognized guardrail summary must not render");
+}
+
 async function scenarioChatMobileCloseAndDeletedEmptyState() {
   const app = createApp();
   await start(app);
@@ -4749,6 +4883,7 @@ async function main() {
   await scenarioEffectivePolicyPreview();
   await scenarioPolicyPostalMask();
   await scenarioPolicyLimits();
+  await scenarioChatGuardrailDetails();
   await scenarioAlertProfileFallbackAndAcknowledgement();
   await scenarioMarkAllAlertsRead();
   await scenarioOwnNavigationFromAdmin();

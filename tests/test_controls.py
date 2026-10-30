@@ -16,7 +16,9 @@ from nasi_lemak.controls import (
     BLOCK_REASONS,
     MASK_TYPES,
     GatewayControl,
+    audit_latency_ms,
     block_detail,
+    guardrail_details,
 )
 from nasi_lemak.gateway import Gateway, MemoryAdapters, Policy, make_demo_gateway
 
@@ -438,6 +440,84 @@ class GatewayControlEnforcementTests(unittest.TestCase):
             control=tight,
         )
         self.assertEqual((status, body["error"]["code"]), (413, "INPUT_LIMIT"))
+
+
+class GuardrailDetailsTests(unittest.TestCase):
+    def sink(self, **overrides):
+        base = {
+            "input_decision": "allow",
+            "output_safe": True,
+            "sanitized_messages": [{"role": "user", "content": "plain text"}],
+            "output_masked": False,
+            "audit_started_at": 10.0,
+            "audit_terminal_at": 12.5,
+        }
+        base.update(overrides)
+        return base
+
+    def test_clean_turn(self):
+        self.assertEqual(
+            guardrail_details(self.sink(), "plain text", GatewayControl()),
+            {
+                "input_check": "safe",
+                "output_check": "safe",
+                "input_pii_masked": False,
+                "output_pii_masked": False,
+                "latency_ms": 2500,
+            },
+        )
+
+    def test_masking_is_reported_for_each_direction(self):
+        details = guardrail_details(
+            self.sink(
+                sanitized_messages=[{"role": "user", "content": "My email is [EMAIL]"}],
+                output_masked=True,
+            ),
+            "My email is ali@example.com",
+            GatewayControl(),
+        )
+        self.assertIs(details["input_pii_masked"], True)
+        self.assertIs(details["output_pii_masked"], True)
+
+    def test_only_the_latest_message_is_compared(self):
+        history = [
+            {"role": "user", "content": "older [EMAIL]"},
+            {"role": "assistant", "content": "ok"},
+            {"role": "user", "content": "plain text"},
+        ]
+        details = guardrail_details(
+            self.sink(sanitized_messages=history), "plain text", GatewayControl()
+        )
+        self.assertIs(details["input_pii_masked"], False)
+
+    def test_block_and_stages_that_never_ran_are_not_safe(self):
+        details = guardrail_details(
+            {"input_decision": "block"}, "text", GatewayControl()
+        )
+        self.assertEqual(details["input_check"], "blocked")
+        self.assertEqual(details["output_check"], "not_run")
+        self.assertEqual(
+            guardrail_details({}, "text", GatewayControl())["input_check"], "not_run"
+        )
+        self.assertEqual(
+            guardrail_details(self.sink(output_safe=False), "plain text", GatewayControl())[
+                "output_check"
+            ],
+            "blocked",
+        )
+
+    def test_disabled_checks_read_off(self):
+        control = GatewayControl(input_check_enabled=False, output_check_enabled=False)
+        details = guardrail_details(self.sink(), "plain text", control)
+        self.assertEqual(details["input_check"], "off")
+        self.assertEqual(details["output_check"], "off")
+
+    def test_missing_audit_stamps_omit_latency(self):
+        sink = self.sink()
+        del sink["audit_terminal_at"]
+        self.assertNotIn("latency_ms", guardrail_details(sink, "plain text", GatewayControl()))
+        self.assertIsNone(audit_latency_ms(sink))
+        self.assertIsNone(audit_latency_ms({"audit_started_at": True, "audit_terminal_at": 1.0}))
 
 
 if __name__ == "__main__":

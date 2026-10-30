@@ -198,6 +198,18 @@ control. It keeps the existing defaults: both model checks enabled and all
 three masks. Administrator profiles cannot weaken that path. The startup YAML
 policy continues to apply to both paths.
 
+### Guardrail details for a turn
+
+An allowed or blocked workspace turn returns a `guardrail` summary, shown under
+the message: `input_check` and `output_check` (`safe`, `blocked`, `off` when the
+policy disabled the check, or `not_run` when the turn never reached it),
+`input_pii_masked`, `output_pii_masked` and the audit-derived `latency_ms`. It
+holds only those fixed values, never classifier text, categories, prompts or
+withheld output.
+
+The summary is not stored. The page keeps it in memory for the session, so a
+reloaded conversation shows the saved Blocked or Failed labels without it.
+
 ## In-app block alerts
 
 When a workspace turn is blocked by an exact, known policy block from the

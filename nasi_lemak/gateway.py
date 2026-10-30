@@ -619,6 +619,7 @@ class Gateway:
                 _audit_sink("request_blocked", "blocked", "POLICY_BLOCK")
                 return self._blocked(request_id, "OUTPUT_POLICY_BLOCK")
             masked_output = mask_pii(output, control.output_masks)
+            _sink("output_masked", masked_output != output)
         except Exception:
             self._terminal_best_effort(
                 request_id, "failed", "UNAVAILABLE", stage="output_guard"
