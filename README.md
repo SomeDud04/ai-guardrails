@@ -816,6 +816,23 @@ variables. The administrator DSN is not used by the gateway.
 
 ## Security and operational limits
 
+The server's operational bounds can be set through optional environment
+variables. An explicit `make_app` argument still wins (tests rely on it); the
+environment applies when no argument is given, and the built-in default applies
+otherwise. An explicitly configured invalid or out-of-range value makes the app
+live but not ready, and the value is never echoed.
+
+| Variable | Meaning | Range | Default |
+| --- | --- | --- | --- |
+| `NASI_LEMAK_CHAT_WORK_TIMEOUT` | Chat work deadline in seconds | 1–300 | 60 |
+| `NASI_LEMAK_CHAT_MAX_CONCURRENCY` | Admitted chat requests | 1–256 | 5 |
+| `NASI_LEMAK_CONTROL_CONCURRENCY` | Control-plane work slots | 1–64 | 2 |
+| `NASI_LEMAK_MAX_BODY_BYTES` | Request body limit in bytes | 1024–4194304 | 65536 |
+| `NASI_LEMAK_BODY_READ_TIMEOUT` | Body read timeout in seconds | 0.5–60 | 5.0 |
+
+The resolved values are read-only in the authenticated `/admin/events` payload
+under `operational`.
+
 - The gateway is localhost-only HTTP by default. **TLS ingress is required before
   any remote pilot.** The separate optional demo proxy is plain HTTP on a
   trusted LAN/VPN only and does not satisfy that requirement.

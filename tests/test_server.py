@@ -406,6 +406,133 @@ class StreamedBodyTests(unittest.TestCase):
         self.assertEqual(self.adapters.generate_calls, 0)
 
 
+class OperationalEnvironmentTests(unittest.TestCase):
+    """Operational bounds: explicit argument > env > built-in default."""
+
+    def setUp(self) -> None:
+        self.tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(self.tmp.cleanup)
+        self.gateway = Gateway(
+            app_key=TEST_KEY,
+            audit_store=SqliteAuditStore(Path(self.tmp.name) / "audit.sqlite3"),
+            adapters=RecordingAdapters(),
+        )
+
+    def _app(self, environ, **kwargs):
+        return make_app(gateway=self.gateway, environ=environ, **kwargs)
+
+    def test_environment_sets_bounds_when_no_argument_is_passed(self) -> None:
+        app = self._app(
+            {
+                "NASI_LEMAK_CHAT_WORK_TIMEOUT": "30",
+                "NASI_LEMAK_CHAT_MAX_CONCURRENCY": "2",
+                "NASI_LEMAK_CONTROL_CONCURRENCY": "3",
+                "NASI_LEMAK_MAX_BODY_BYTES": "2048",
+                "NASI_LEMAK_BODY_READ_TIMEOUT": "1.5",
+            }
+        )
+        self.assertTrue(app.state.config_ready)
+        self.assertEqual(app.state.chat_work_timeout, 30.0)
+        self.assertEqual(app.state.max_concurrency, 2)
+        self.assertEqual(app.state.control_concurrency, 3)
+        self.assertEqual(app.state.max_body_bytes, 2048)
+        self.assertEqual(app.state.body_read_timeout, 1.5)
+        self.assertEqual(
+            app.state.operational,
+            {
+                "chat_work_timeout": 30.0,
+                "max_concurrency": 2,
+                "control_concurrency": 3,
+                "max_body_bytes": 2048,
+                "body_read_timeout": 1.5,
+            },
+        )
+
+    def test_explicit_arguments_win_over_environment(self) -> None:
+        app = self._app(
+            {
+                "NASI_LEMAK_CHAT_WORK_TIMEOUT": "30",
+                "NASI_LEMAK_CHAT_MAX_CONCURRENCY": "2",
+                "NASI_LEMAK_CONTROL_CONCURRENCY": "3",
+                "NASI_LEMAK_MAX_BODY_BYTES": "2048",
+                "NASI_LEMAK_BODY_READ_TIMEOUT": "1.5",
+            },
+            chat_work_timeout=45.0,
+            max_concurrency=4,
+            control_concurrency=5,
+            max_body_bytes=4096,
+            body_read_timeout=2.5,
+        )
+        self.assertTrue(app.state.config_ready)
+        self.assertEqual(app.state.chat_work_timeout, 45.0)
+        self.assertEqual(app.state.max_concurrency, 4)
+        self.assertEqual(app.state.control_concurrency, 5)
+        self.assertEqual(app.state.max_body_bytes, 4096)
+        self.assertEqual(app.state.body_read_timeout, 2.5)
+
+    def test_explicit_arguments_ignore_invalid_environment_values(self) -> None:
+        app = self._app(
+            {
+                "NASI_LEMAK_CHAT_WORK_TIMEOUT": "abc",
+                "NASI_LEMAK_CHAT_MAX_CONCURRENCY": "0",
+                "NASI_LEMAK_CONTROL_CONCURRENCY": "0",
+                "NASI_LEMAK_MAX_BODY_BYTES": "0",
+                "NASI_LEMAK_BODY_READ_TIMEOUT": "0",
+            },
+            chat_work_timeout=45.0,
+            max_concurrency=4,
+            control_concurrency=5,
+            max_body_bytes=4096,
+            body_read_timeout=2.5,
+        )
+        self.assertTrue(app.state.config_ready)
+        self.assertEqual(app.state.chat_work_timeout, 45.0)
+        self.assertEqual(app.state.max_concurrency, 4)
+        self.assertEqual(app.state.control_concurrency, 5)
+        self.assertEqual(app.state.max_body_bytes, 4096)
+        self.assertEqual(app.state.body_read_timeout, 2.5)
+
+    def test_unset_environment_keeps_built_in_defaults(self) -> None:
+        app = self._app({})
+        self.assertTrue(app.state.config_ready)
+        self.assertEqual(app.state.chat_work_timeout, 60.0)
+        self.assertEqual(app.state.max_concurrency, 5)
+        self.assertEqual(app.state.control_concurrency, 2)
+        self.assertEqual(app.state.max_body_bytes, 64 * 1024)
+        self.assertEqual(app.state.body_read_timeout, 5.0)
+
+    def test_invalid_environment_is_not_ready_and_never_echoed(self) -> None:
+        cases = {
+            "NASI_LEMAK_CHAT_WORK_TIMEOUT": ("0", "abc", "nan", "301"),
+            "NASI_LEMAK_CHAT_MAX_CONCURRENCY": ("0", "abc", "257"),
+            "NASI_LEMAK_CONTROL_CONCURRENCY": ("0", "abc", "65"),
+            "NASI_LEMAK_MAX_BODY_BYTES": ("1023", "abc", "4194305"),
+            "NASI_LEMAK_BODY_READ_TIMEOUT": ("0", "abc", "61"),
+        }
+        for name, values in cases.items():
+            for value in values:
+                with self.subTest(name=name, value=value):
+                    app = self._app({name: value})
+                    self.assertFalse(app.state.config_ready)
+                    client = TestClient(app)
+                    self.addCleanup(client.close)
+                    self.assertEqual(client.get("/health/live").status_code, 200)
+                    ready = client.get("/health/ready")
+                    self.assertEqual(ready.status_code, 503)
+                    self.assertEqual(ready.json()["status"], "not_ready")
+                    self.assertNotIn("NASI_LEMAK", ready.text)
+                    self.assertNotIn(value, ready.text)
+
+    def test_defaults_apply_to_invalid_environment_values(self) -> None:
+        app = self._app({"NASI_LEMAK_CHAT_WORK_TIMEOUT": "abc"})
+        self.assertFalse(app.state.config_ready)
+        self.assertEqual(app.state.chat_work_timeout, 60.0)
+        self.assertEqual(app.state.max_concurrency, 5)
+        self.assertEqual(app.state.control_concurrency, 2)
+        self.assertEqual(app.state.max_body_bytes, 64 * 1024)
+        self.assertEqual(app.state.body_read_timeout, 5.0)
+
+
 class DefaultConfigurationTests(unittest.TestCase):
     def _client(self, app):
         client = TestClient(app)

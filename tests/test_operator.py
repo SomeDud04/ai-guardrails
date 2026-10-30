@@ -219,6 +219,33 @@ class EffectiveLimitsAdminTests(OperatorTestBase):
             self.assertIn('id="effective-limits"', page.text)
             self.assertNotIn('id="limit-editor"', page.text)
 
+    def test_admin_shows_resolved_operational_values_read_only(self) -> None:
+        app = make_app(
+            gateway=self.gateway,
+            operator_key_digest=OPERATOR_DIGEST,
+            operator_reader=self.reader,
+            environ={
+                "NASI_LEMAK_CHAT_WORK_TIMEOUT": "30",
+                "NASI_LEMAK_CHAT_MAX_CONCURRENCY": "1",
+                "NASI_LEMAK_CONTROL_CONCURRENCY": "3",
+                "NASI_LEMAK_MAX_BODY_BYTES": "2048",
+                "NASI_LEMAK_BODY_READ_TIMEOUT": "1.5",
+            },
+        )
+        with TestClient(app) as client:
+            response = client.get("/admin/events", headers=self.auth())
+            self.assertEqual(response.status_code, 200, response.text)
+            self.assertEqual(
+                response.json()["operational"],
+                {
+                    "chat_work_timeout": 30.0,
+                    "max_concurrency": 1,
+                    "control_concurrency": 3,
+                    "max_body_bytes": 2048,
+                    "body_read_timeout": 1.5,
+                },
+            )
+
 
 class ConfigurationTests(OperatorTestBase):
     def test_absent_configuration_disables_admin_routes_with_404(self):
