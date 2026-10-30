@@ -8,6 +8,11 @@ the existing :func:`~nasi_lemak.guard_api.guard_client_config` helper, and runs
 the real :class:`~nasi_lemak.guard_api.InputGuardApiAdapter` and
 :class:`~nasi_lemak.guard_api.Qwen3GuardOutputAdapter`.
 
+``--backend qwen3guard-local`` runs the same cases through the in-process
+:class:`~nasi_lemak.qwen3_local.Qwen3GuardLocal` guard instead, configured by the
+same ``NASI_LEMAK_QWEN3GUARD_*`` settings as the server.  It is meant to run
+inside the guard container, and it reads no API key.
+
 This is an agent-authored smoke harness, not a held-out benchmark. It reports
 no model-quality acceptance and no live endpoint claim. Reports contain case
 identifiers, labels, counts, generic error codes and timings only: never raw
@@ -50,7 +55,7 @@ from .guard_api import (
     Qwen3GuardOutputAdapter,
     guard_client_config,
 )
-from .guards import GuardError
+from .guards import GuardError, GuardInputLimit
 
 SCHEMA_VERSION = 1
 REPORT_KIND = "guard_evaluation"
@@ -58,9 +63,30 @@ EVIDENCE_LABEL = "agent-authored-synthetic-smoke-not-holdout"
 STAGES = ("input", "output")
 LANGUAGES = ("en", "bm", "zh", "mixed")
 EXPECTED_VALUES = ("allow", "block")
+#: Optional per-case label for reporting only.  ``benign`` covers everything that
+#: must pass; the others follow the guard taxonomy.  A label is never sent to a
+#: guard and has no effect on any decision.
+CATEGORIES = (
+    "benign",
+    "jailbreak",
+    "violent",
+    "illegal",
+    "sexual",
+    "pii",
+    "self-harm",
+    "unethical",
+    "political",
+    "copyright",
+)
+BACKEND_API = "api"
+BACKEND_LOCAL = "qwen3guard-local"
+BACKENDS = (BACKEND_API, BACKEND_LOCAL)
+#: Reads the dataset from standard input, for piping it into a container.
+STDIN_DATASET = "-"
+PROGRESS_EVERY = 10
 
-MAX_DATASET_BYTES = 256 * 1024
-MAX_CASES = 64
+MAX_DATASET_BYTES = 512 * 1024
+MAX_CASES = 256
 MAX_CASE_ID_LENGTH = 64
 MAX_MESSAGES_PER_CASE = 16
 MAX_MESSAGE_CHARS = 1024
@@ -106,6 +132,7 @@ class GuardCase:
     expected: str
     messages: tuple[dict[str, str], ...]
     output: str | None
+    category: str | None = None
 
 
 @dataclass(frozen=True)
@@ -125,6 +152,7 @@ class Outcome:
     observed: str
     error_code: str | None
     elapsed_ms: float
+    category: str | None = None
 
 
 def _require_str(
@@ -236,8 +264,13 @@ def parse_dataset(payload: object, *, sha256: str) -> GuardDataset:
             if stage == "input"
             else {"id", "stage", "language", "expected", "messages", "output"}
         )
-        if set(item) != expected_fields:
+        if set(item) - {"category"} != expected_fields:
             raise DatasetError(f"invalid case fields in case {case_id}")
+        category = item.get("category")
+        if "category" in item and (
+            not isinstance(category, str) or category not in CATEGORIES
+        ):
+            raise DatasetError(f"invalid category in case {case_id}")
         language = item.get("language")
         if not isinstance(language, str) or language not in LANGUAGES:
             raise DatasetError(f"invalid language in case {case_id}")
@@ -253,7 +286,7 @@ def parse_dataset(payload: object, *, sha256: str) -> GuardDataset:
                 case_id=case_id,
                 maximum=MAX_OUTPUT_CHARS,
             )
-        case = GuardCase(case_id, stage, language, expected, messages, output)
+        case = GuardCase(case_id, stage, language, expected, messages, output, category)
         if _encoded_conversation_bytes(case) > MAX_ENCODED_INPUT_BYTES:
             raise DatasetError(f"conversation exceeds the configured limit in case {case_id}")
         cases.append(case)
@@ -276,8 +309,11 @@ def _reject_constant(_value: str) -> Any:
 def load_dataset(path: str | Path) -> GuardDataset:
     """Read, bound and fully validate the dataset; never touches the network."""
     try:
-        with Path(path).open("rb") as handle:
-            raw = handle.read(MAX_DATASET_BYTES + 1)
+        if str(path) == STDIN_DATASET:
+            raw = sys.stdin.buffer.read(MAX_DATASET_BYTES + 1)
+        else:
+            with Path(path).open("rb") as handle:
+                raw = handle.read(MAX_DATASET_BYTES + 1)
     except OSError:
         raise DatasetError("cannot read dataset") from None
     if len(raw) > MAX_DATASET_BYTES:
@@ -352,6 +388,30 @@ def build_adapters(
     return adapters, models
 
 
+def build_local_adapters(
+    environ: Mapping[str, str],
+) -> tuple[dict[str, Any], dict[str, str]]:
+    """Load the in-process guard once for both stages, as the server does."""
+    try:
+        from .server import _load_qwen3guard_local, _qwen3guard_config
+
+        directory, input_threshold, output_threshold, workers, threads, long_input = (
+            _qwen3guard_config(dict(environ))
+        )
+        guard = _load_qwen3guard_local(
+            directory,
+            input_threshold=input_threshold,
+            output_threshold=output_threshold,
+            workers=workers,
+            threads=threads,
+            long_input=long_input,
+        )
+    except (GuardError, ImportError, OSError, TypeError, ValueError):
+        raise EvaluationConfigError("local guard configuration is invalid") from None
+    name = Path(directory).name
+    return {"input": guard, "output": guard}, {"input": name, "output": name}
+
+
 def _observe(
     case: GuardCase,
     *,
@@ -373,6 +433,8 @@ def _observe(
             ):
                 raise GuardError("guard input API response is invalid")
             observed = result["decision"]
+        except GuardInputLimit:
+            observed, error_code = "error", ERROR_INPUT_WINDOW
         except (GuardError, OSError, ValueError, TypeError):
             observed, error_code = "error", ERROR_INPUT_API
     else:
@@ -387,34 +449,59 @@ def _observe(
             observed, error_code = "error", ERROR_OUTPUT_API
     elapsed = round((time.perf_counter() - start) * 1000.0, 3)
     return Outcome(
-        case.case_id, case.stage, case.language, case.expected, observed, error_code, elapsed
+        case.case_id,
+        case.stage,
+        case.language,
+        case.expected,
+        observed,
+        error_code,
+        elapsed,
+        case.category,
     )
 
 
 def execute_dataset(
-    dataset: GuardDataset, *, environ: Mapping[str, str]
+    dataset: GuardDataset,
+    *,
+    environ: Mapping[str, str],
+    backend: str = BACKEND_API,
+    progress: Any = None,
 ) -> tuple[tuple[Outcome, ...], dict[str, str]]:
-    """Run every case against the real API adapters; no generator or database."""
-    stages = tuple(stage for stage in STAGES if any(case.stage == stage for case in dataset.cases))
-    adapters, models = build_adapters(environ, stages)
+    """Run every case against the real guards; no generator or database.
+
+    The legacy classifier's fixed window applies only to the API backend.  The
+    local guard enforces its own budget and reports an over-budget input itself.
+    """
+    if backend == BACKEND_LOCAL:
+        adapters, models = build_local_adapters(environ)
+    else:
+        stages = tuple(
+            stage for stage in STAGES if any(case.stage == stage for case in dataset.cases)
+        )
+        adapters, models = build_adapters(environ, stages)
     serialized = {
         case.case_id: input_serialized(case) if case.stage == "input" else None
         for case in dataset.cases
     }
     windows = {
-        case.case_id: input_window_exceeded(case) if case.stage == "input" else False
-        for case in dataset.cases
-    }
-    outcomes = tuple(
-        _observe(
-            case,
-            serialized=serialized[case.case_id],
-            window_exceeded=windows[case.case_id],
-            adapters=adapters,
+        case.case_id: (
+            backend == BACKEND_API and case.stage == "input" and input_window_exceeded(case)
         )
         for case in dataset.cases
-    )
-    return outcomes, models
+    }
+    outcomes: list[Outcome] = []
+    for case in dataset.cases:
+        outcomes.append(
+            _observe(
+                case,
+                serialized=serialized[case.case_id],
+                window_exceeded=windows[case.case_id],
+                adapters=adapters,
+            )
+        )
+        if progress is not None and len(outcomes) % PROGRESS_EVERY == 0:
+            progress(len(outcomes), len(dataset.cases))
+    return tuple(outcomes), models
 
 
 def _empty_group() -> dict[str, int]:
@@ -513,6 +600,8 @@ def aggregate_outcomes(outcomes: Sequence[Outcome]) -> dict[str, Any]:
     per_stage_language = {
         stage: {language: _empty_group() for language in LANGUAGES} for stage in STAGES
     }
+    per_stage_category: dict[str, dict[str, dict[str, int]]] = {}
+    stage_category_latencies: dict[str, dict[str, list[float]]] = {}
     total_latencies: list[float] = []
     stage_latencies = {stage: [] for stage in STAGES}
     language_latencies = {language: [] for language in LANGUAGES}
@@ -530,7 +619,15 @@ def aggregate_outcomes(outcomes: Sequence[Outcome]) -> dict[str, Any]:
         stage_language_latencies[outcome.stage][outcome.language].append(
             outcome.elapsed_ms
         )
-    return {
+        if outcome.category is not None:
+            group = per_stage_category.setdefault(outcome.stage, {}).setdefault(
+                outcome.category, _empty_group()
+            )
+            _record(group, outcome)
+            stage_category_latencies.setdefault(outcome.stage, {}).setdefault(
+                outcome.category, []
+            ).append(outcome.elapsed_ms)
+    aggregates: dict[str, Any] = {
         "total": _finalize(total, total_latencies),
         "per_stage": {
             stage: _finalize(per_stage[stage], stage_latencies[stage]) for stage in STAGES
@@ -550,6 +647,15 @@ def aggregate_outcomes(outcomes: Sequence[Outcome]) -> dict[str, Any]:
             for stage in STAGES
         },
     }
+    if per_stage_category:
+        aggregates["per_stage_category"] = {
+            stage: {
+                category: _finalize(group, stage_category_latencies[stage][category])
+                for category, group in categories.items()
+            }
+            for stage, categories in per_stage_category.items()
+        }
+    return aggregates
 
 
 def _expected_counts(cases: Sequence[GuardCase]) -> dict[str, Any]:
@@ -577,7 +683,7 @@ def _expected_counts(cases: Sequence[GuardCase]) -> dict[str, Any]:
 
 
 def _outcome_entry(outcome: Outcome) -> dict[str, Any]:
-    return {
+    entry = {
         "id": outcome.case_id,
         "stage": outcome.stage,
         "language": outcome.language,
@@ -586,6 +692,9 @@ def _outcome_entry(outcome: Outcome) -> dict[str, Any]:
         "error_code": outcome.error_code,
         "elapsed_ms": outcome.elapsed_ms,
     }
+    if outcome.category is not None:
+        entry["category"] = outcome.category
+    return entry
 
 
 def build_run_report(
@@ -593,6 +702,7 @@ def build_run_report(
     outcomes: Sequence[Outcome],
     *,
     models: Mapping[str, str],
+    backend: str = BACKEND_API,
 ) -> tuple[dict[str, Any], int]:
     """Build a metadata-only execute report; never includes payload text."""
     return {
@@ -602,6 +712,7 @@ def build_run_report(
         "dataset_id": dataset.dataset_id,
         "dataset_sha256": dataset.sha256,
         "evidence_label": dataset.evidence_label,
+        "backend": backend,
         "models": dict(models),
         "counts": {
             "cases": len(dataset.cases),
@@ -724,11 +835,21 @@ def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(
         description="Validate a synthetic guard dataset; execute only with --execute."
     )
-    parser.add_argument("--dataset", required=True, help="version-1 synthetic JSON dataset")
+    parser.add_argument(
+        "--dataset",
+        required=True,
+        help="version-1 synthetic JSON dataset, or - for standard input",
+    )
     parser.add_argument(
         "--execute",
         action="store_true",
-        help="call the configured guard APIs (default: validate only)",
+        help="call the configured guards (default: validate only)",
+    )
+    parser.add_argument(
+        "--backend",
+        choices=BACKENDS,
+        default=BACKEND_API,
+        help="guards used with --execute (default: the configured guard APIs)",
     )
     parser.add_argument("--report", help="create-exclusive JSON report path")
     args = parser.parse_args(argv)
@@ -744,15 +865,22 @@ def main(argv: list[str] | None = None) -> int:
         if report_path is not None:
             _check_report_target(report_path, dataset_path=args.dataset)
         if args.execute:
-            outcomes, models = execute_dataset(dataset, environ=os.environ)
-            report, code = build_run_report(dataset, outcomes, models=models)
+            def progress(done: int, total: int) -> None:
+                print(f"progress: {done}/{total}", file=sys.stderr, flush=True)
+
+            outcomes, models = execute_dataset(
+                dataset, environ=os.environ, backend=args.backend, progress=progress
+            )
+            report, code = build_run_report(
+                dataset, outcomes, models=models, backend=args.backend
+            )
         else:
             report = build_dry_run_report(dataset)
             code = 0
         if report_path is not None:
             write_report(report, report_path, dataset_path=args.dataset)
     except EvaluationConfigError:
-        print("error: guard API configuration is invalid", file=sys.stderr)
+        print("error: guard configuration is invalid", file=sys.stderr)
         return 2
     except ReportError:
         print("error: cannot write guard evaluation report", file=sys.stderr)

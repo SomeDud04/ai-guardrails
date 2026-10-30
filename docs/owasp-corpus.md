@@ -511,6 +511,11 @@ separate owners and different evidence:
 
 ## Known gaps in the corpus itself
 
+The output-stage and BM gaps below are covered by a separate dataset,
+[`evals/guards/multilingual-guard-lanes-v2.json`](guard-evaluation.md#multilingual-guard-lane-dataset-v2),
+which adds matched en/bm/zh rows and output-stage fixtures. This frozen corpus
+is unchanged.
+
 - **No `POSTAL_ADDRESS` rows.** The product now masks a fourth entity type
   (postal addresses) in input and output, but the corpus only exercises EMAIL,
   MY_PHONE and MYKAD. Adding rows requires regenerating the workbook and its
