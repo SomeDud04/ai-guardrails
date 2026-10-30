@@ -2284,6 +2284,278 @@ async function scenarioPolicyPostalMask() {
     "the effective preview must not show postal masking on an input channel that omits it");
 }
 
+async function scenarioPolicyLimits() {
+  const app = createApp();
+  await start(app);
+  const adminProfile = {
+    user: { ...ALICE_USER, id: "user-admin", username: "admin", full_name: "Ada Admin", role: "admin" },
+    department: { id: "dept-accounting", name: "Accounting" },
+    review_scope: null,
+    review_department_ids: [],
+    review_grants: [],
+  };
+  const aliceRow = {
+    id: "user-alice", username: "alice", full_name: "Alice Tan",
+    department_id: "dept-accounting", role: "employee", disabled: false, created_at: 1700000001,
+  };
+  const ceiling = {
+    context_messages: 32,
+    context_budget: 8192,
+    default_reply_tokens: 1024,
+    max_reply_tokens: 4096,
+  };
+  const limitedProfile = {
+    id: "profile-limited",
+    name: "Limited replies",
+    revision: 2,
+    settings: {
+      input_check_enabled: true,
+      output_check_enabled: true,
+      input_masks: ["EMAIL"],
+      output_masks: ["EMAIL"],
+      limits: {
+        context_messages: 16,
+        default_reply_tokens: 256,
+        max_reply_tokens: 2048,
+      },
+      ceiling: ceiling,
+    },
+    settings_digest: "e".repeat(64),
+  };
+  const unlimitedProfile = {
+    id: "profile-unlimited",
+    name: "Server limits",
+    revision: 1,
+    settings: {
+      input_check_enabled: true,
+      output_check_enabled: true,
+      input_masks: [],
+      output_masks: [],
+      limits: {},
+      ceiling: ceiling,
+    },
+    settings_digest: "f".repeat(64),
+  };
+  await signIn(app, adminProfile);
+  app.lastMatching("/workspace/api/conversations?limit=25").respond({ items: [], next: null }, 200);
+  await settle();
+  await settleSummarySurfaces(app);
+
+  app.elementFor("tab-admin").dispatch("click");
+  await settle();
+  app.lastMatching("/workspace/api/admin/departments?limit=25").respond(
+    { items: [{ id: "dept-accounting", name: "Accounting", created_at: 1700000000 }], next: null },
+    200
+  );
+  await settle();
+  app.lastMatching("/workspace/api/admin/users?limit=25").respond(
+    { items: [aliceRow], next: null },
+    200
+  );
+  await settle();
+  app.elementFor("admin-tab-policies").dispatch("click");
+  await settle();
+  app.lastMatching("/workspace/api/admin/policy/profiles?limit=25").respond(
+    { items: [limitedProfile, unlimitedProfile], next: null },
+    200
+  );
+  await settle();
+  const assignment = app.lastMatching("/workspace/api/admin/policy/assignments/workspace");
+  assert(assignment, "the policies tab must read the current workspace assignment");
+  assignment.respond({ assignment: null }, 200);
+  await settle();
+
+  const listText = app.elementFor("policy-list").textContent;
+  assert(listText.indexOf("reply ≤ 2048") >= 0,
+    "the profile list must show the limits a profile sets");
+  assert(listText.indexOf("Server limits") >= 0,
+    "the profile list must say when a profile sets no limits");
+
+  const limitedRow = findDataRow(app.elementFor("policy-list"), "data-policy", "profile-limited");
+  assert(limitedRow, "the limited profile row is missing");
+  findButton(limitedRow, "Edit").dispatch("click");
+  const profileGet = app.lastMatching("/workspace/api/admin/policy/profiles/profile-limited");
+  assert(profileGet, "editing must read the latest stored profile revision");
+  profileGet.respond(limitedProfile, 200);
+  await settle();
+  assert(app.elementFor("policy-limit-context-messages").value === "16",
+    "editing must prefill the context-message limit");
+  assert(app.elementFor("policy-limit-context-budget").value === "",
+    "a limit the profile does not set must stay blank");
+  assert(app.elementFor("policy-limit-default-reply-tokens").value === "256",
+    "editing must prefill the default reply limit");
+  assert(app.elementFor("policy-limit-max-reply-tokens").value === "2048",
+    "editing must prefill the max reply limit");
+  assert(app.elementFor("policy-limit-context-messages-hint").textContent === "Server: 32",
+    "each limit field must show the server ceiling beside it");
+  assert(app.elementFor("policy-limit-max-reply-tokens-hint").textContent === "Server: 4096",
+    "the max reply field must show its server ceiling");
+
+  app.elementFor("policy-form").dispatch("submit");
+  const revise = app.lastMatching("/workspace/api/admin/policy/profiles/profile-limited/revise");
+  assert(revise, "saving an edited profile must revise it");
+  const revisePayload = JSON.parse(revise.options.body);
+  assert(revisePayload.expected_revision === 2, "the pinned revision must be sent");
+  assert(JSON.stringify(revisePayload.limits) ===
+    JSON.stringify({ context_messages: 16, default_reply_tokens: 256, max_reply_tokens: 2048 }),
+    "only the set limits must be sent as integers");
+  const revisedProfile = { ...limitedProfile, revision: 3 };
+  revise.respond(revisedProfile, 200);
+  await settle();
+  app.lastMatching("/workspace/api/admin/policy/profiles?limit=25").respond(
+    { items: [revisedProfile, unlimitedProfile], next: null },
+    200
+  );
+  await settle();
+
+  app.elementFor("policy-new").dispatch("click");
+  assert(app.elementFor("policy-limit-context-messages").value === "",
+    "a new profile must clear the limit fields");
+  app.elementFor("policy-name").value = "Above ceiling";
+  app.elementFor("policy-limit-default-reply-tokens").value = "300";
+  app.elementFor("policy-limit-max-reply-tokens").value = "200";
+  app.elementFor("policy-form").dispatch("submit");
+  const postsBefore = app.calls.filter(
+    (call) => call.url === "/workspace/api/admin/policy/profiles" &&
+      call.options.method === "POST"
+  ).length;
+  assert(postsBefore === 0,
+    "a default reply above the max reply must be rejected before submit");
+  assert(app.elementFor("policy-state").textContent.indexOf("must not exceed") >= 0,
+    "the rejected default-over-max value must explain itself");
+
+  app.elementFor("policy-limit-default-reply-tokens").value = "";
+  app.elementFor("policy-limit-max-reply-tokens").value = "9999";
+  app.elementFor("policy-limit-max-reply-tokens").dispatch("input");
+  assert(app.elementFor("policy-limit-warning").hidden === false &&
+    app.elementFor("policy-limit-warning").textContent.indexOf("will be clamped to 4096") >= 0,
+    "a value above the ceiling must show a clamping warning");
+  app.elementFor("policy-name").value = "Above ceiling";
+  app.elementFor("policy-limit-context-budget").value = "4096";
+  app.elementFor("policy-limit-default-reply-tokens").value = "512";
+  app.elementFor("policy-form").dispatch("submit");
+  const create = app.calls.filter(
+    (call) => call.url === "/workspace/api/admin/policy/profiles" &&
+      call.options.method === "POST"
+  ).pop();
+  assert(create, "a value above the ceiling must still be allowed to submit");
+  const createPayload = JSON.parse(create.options.body);
+  assert(createPayload.limits.context_budget === 4096 &&
+    createPayload.limits.default_reply_tokens === 512 &&
+    createPayload.limits.max_reply_tokens === 9999,
+    "blank limit fields must be omitted and the rest sent as integers");
+  assert(!("context_messages" in createPayload.limits),
+    "a blank limit field must not be sent");
+  const createdProfile = {
+    id: "profile-above",
+    name: "Above ceiling",
+    revision: 1,
+    settings: {
+      input_check_enabled: true,
+      output_check_enabled: true,
+      input_masks: ["EMAIL", "MY_PHONE", "MYKAD", "POSTAL_ADDRESS"],
+      output_masks: ["EMAIL", "MY_PHONE", "MYKAD", "POSTAL_ADDRESS"],
+      limits: { context_budget: 4096, default_reply_tokens: 512, max_reply_tokens: 9999 },
+      ceiling: ceiling,
+    },
+    settings_digest: "a".repeat(64),
+  };
+  create.respond(createdProfile, 201);
+  await settle();
+  app.lastMatching("/workspace/api/admin/policy/profiles?limit=25").respond(
+    { items: [createdProfile, revisedProfile, unlimitedProfile], next: null },
+    200
+  );
+  await settle();
+
+  const historyRow = findDataRow(app.elementFor("policy-list"), "data-policy", "profile-limited");
+  findButton(historyRow, "History").dispatch("click");
+  const history = app.lastMatching("/workspace/api/admin/policy/profiles/profile-limited/history?limit=50");
+  assert(history, "the history request is missing");
+  history.respond(
+    {
+      items: [
+        {
+          revision: 3,
+          settings: revisedProfile.settings,
+          settings_digest: "e".repeat(64),
+          created_at: 1700000500,
+        },
+      ],
+      next: null,
+    },
+    200
+  );
+  await settle();
+  assert(app.elementFor("policy-history").textContent.indexOf("reply ≤ 2048") >= 0,
+    "the revision history must show the limits a revision sets");
+
+  app.elementFor("effective-user").value = "user-alice";
+  app.elementFor("effective-preview").dispatch("click");
+  const effective = app.lastMatching("/workspace/api/admin/policy/effective?user_id=user-alice");
+  assert(effective, "the effective preview request is missing");
+  effective.respond(
+    {
+      user_id: "user-alice",
+      department_id: "dept-accounting",
+      input_check_enabled: true,
+      output_check_enabled: true,
+      input_masks: ["EMAIL"],
+      output_masks: ["EMAIL"],
+      limits: { max_reply_tokens: 2048 },
+      ceiling: ceiling,
+      effective_limits: {
+        context_messages: 32,
+        context_budget: 8192,
+        default_reply_tokens: 1024,
+        max_reply_tokens: 2048,
+      },
+      revision: "profile:profile-limited:3",
+      settings_digest: "e".repeat(64),
+      source: {
+        scope_type: "user",
+        scope_id: "user-alice",
+        profile_id: "profile-limited",
+        profile_name: "Limited replies",
+        revision: 3,
+      },
+      sources: [
+        {
+          scope_type: "user",
+          scope_id: "user-alice",
+          profile_id: "profile-limited",
+          profile_name: "Limited replies",
+          revision: 3,
+        },
+      ],
+      is_default: false,
+    },
+    200
+  );
+  await settle();
+  const preview = app.elementFor("effective-policy");
+  assert(preview.textContent.indexOf("Chat limits") >= 0,
+    "the effective preview must include a chat limits block");
+  assert(preview.textContent.indexOf("Context messages: 32") >= 0 &&
+    preview.textContent.indexOf("Max reply tokens: 2048") >= 0,
+    "the chat limits block must list each effective value");
+  const maxLimit = collect(preview).find(
+    (element) => element.getAttribute("data-limit") === "max_reply_tokens"
+  );
+  assert(maxLimit, "the max reply limit row is missing from the preview");
+  assert(collect(maxLimit).some(
+    (element) => String(element.className).split(" ").indexOf("is-tightened") >= 0
+  ), "a limit tightened below the ceiling must be marked");
+  assert(maxLimit.textContent.indexOf("tightened below server 4096") >= 0,
+    "a tightened limit must name the server ceiling it was reduced below");
+  const contextLimit = collect(preview).find(
+    (element) => element.getAttribute("data-limit") === "context_messages"
+  );
+  assert(!collect(contextLimit).some(
+    (element) => String(element.className).split(" ").indexOf("is-tightened") >= 0
+  ), "a limit at the ceiling must not be marked as tightened");
+}
+
 async function scenarioEffectivePolicyPreview() {
   const app = createApp();
   await start(app);
@@ -4476,6 +4748,7 @@ async function main() {
   await scenarioAdminOwnRoleChange();
   await scenarioEffectivePolicyPreview();
   await scenarioPolicyPostalMask();
+  await scenarioPolicyLimits();
   await scenarioAlertProfileFallbackAndAcknowledgement();
   await scenarioMarkAllAlertsRead();
   await scenarioOwnNavigationFromAdmin();

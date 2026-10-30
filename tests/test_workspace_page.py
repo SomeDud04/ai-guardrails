@@ -156,6 +156,25 @@ class WorkspacePageHTTPTests(WorkspaceHTTPBase):
         self.assertIn("bounded ASCII Malaysian single-line address shape", html)
         self.assertIn("each direction is selected independently", html)
 
+    def test_policy_form_exposes_the_four_chat_limit_fields(self) -> None:
+        html = self._page().text
+        fields = (
+            "policy-limit-context-messages",
+            "policy-limit-context-budget",
+            "policy-limit-default-reply-tokens",
+            "policy-limit-max-reply-tokens",
+        )
+        self.assertIn("<legend>Chat limits</legend>", html)
+        for control in fields:
+            self.assertRegex(
+                html,
+                rf'<input id="{control}"[^>]*type="number"[^>]*'
+                rf'min="1"[^>]*step="1"',
+            )
+            self.assertIn(f'<span id="{control}-hint"', html)
+        self.assertEqual(html.count('class="policy-limit-hint"'), 4)
+        self.assertIn("will be clamped", html)
+
     def test_admin_table_density_and_identifier_styles_are_present(self) -> None:
         html = self._page().text
         styles = re.findall(r"<style>(.*?)</style>", html, re.S)

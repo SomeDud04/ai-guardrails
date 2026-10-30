@@ -404,6 +404,11 @@ textarea:focus-visible { outline-offset: -2px; }
 .policy-grid legend { padding: 0 var(--space-1); color: var(--muted); font-size: .74rem; }
 .policy-checks { display: grid; gap: var(--space-1); }
 .policy-checks label { display: flex; align-items: flex-start; gap: var(--space-1); color: var(--text-soft); font-size: .76rem; }
+.policy-limits { display: grid; gap: var(--space-2); }
+.policy-limit-row { display: grid; gap: 2px; }
+.policy-limit-row label { color: var(--text-soft); font-size: .76rem; }
+.policy-limit-row input { width: 100%; }
+.policy-limit-hint { color: var(--muted-dim); font-size: .7rem; }
 .policy-actions { display: flex; flex-wrap: wrap; gap: var(--space-2); }
 .policy-note { margin: 0; color: var(--muted-dim); font-size: .74rem; max-width: 88ch; }
 .policy-history { display: grid; gap: 0; border: 1px solid var(--line); border-radius: var(--radius); overflow: hidden; }
@@ -434,6 +439,13 @@ textarea:focus-visible { outline-offset: -2px; }
 .effective-chain-item.depth-2 { margin-left: 28px; }
 .effective-chain-item.is-winner { border-left-color: var(--amber); color: var(--text-soft); }
 .effective-chain-item .effective-chip { margin-left: var(--space-1); }
+.effective-limits { display: grid; gap: var(--space-2); align-content: start; border: 1px solid var(--line-strong); border-radius: var(--radius); background: var(--surface); padding: var(--space-3); }
+.effective-limits h4 { margin: 0; color: var(--muted); font-size: .7rem; font-weight: 650; letter-spacing: .06em; text-transform: uppercase; }
+.effective-limit-list { list-style: none; display: grid; gap: var(--space-1); margin: 0; padding: 0; }
+.effective-limit { display: flex; flex-wrap: wrap; align-items: baseline; gap: var(--space-1); color: var(--text-soft); font-size: .78rem; }
+.effective-limit-label { color: var(--muted); }
+.effective-limit-note { color: var(--amber); font-size: .72rem; }
+.effective-chip.is-tightened { border-color: var(--amber-line); background: var(--amber-soft); color: var(--amber); }
 .effective-action-note { color: var(--muted-dim); }
 .chat-block { margin: 0 0 var(--space-2); padding: var(--space-3); border: 1px solid var(--amber-line); border-radius: var(--radius); background: var(--amber-soft); color: var(--text-soft); font-size: .8rem; overflow-wrap: anywhere; }
 .chat-block h3 { margin: 0 0 var(--space-1); color: var(--amber); font-size: .86rem; }
@@ -663,6 +675,33 @@ _WORKSPACE_JS = """
   var policyOutputMykad = byId("policy-output-mykad");
   var policyOutputPostal = byId("policy-output-postal");
   var policyDisabledNote = byId("policy-disabled-note");
+  var policyLimitWarning = byId("policy-limit-warning");
+  var policyLimitFields = [
+    {
+      key: "context_messages",
+      label: "Context messages",
+      input: byId("policy-limit-context-messages"),
+      hint: byId("policy-limit-context-messages-hint")
+    },
+    {
+      key: "context_budget",
+      label: "Context budget",
+      input: byId("policy-limit-context-budget"),
+      hint: byId("policy-limit-context-budget-hint")
+    },
+    {
+      key: "default_reply_tokens",
+      label: "Default reply tokens",
+      input: byId("policy-limit-default-reply-tokens"),
+      hint: byId("policy-limit-default-reply-tokens-hint")
+    },
+    {
+      key: "max_reply_tokens",
+      label: "Max reply tokens",
+      input: byId("policy-limit-max-reply-tokens"),
+      hint: byId("policy-limit-max-reply-tokens-hint")
+    }
+  ];
   var policySubmit = byId("policy-submit");
   var policyCancel = byId("policy-cancel");
   var policyState = byId("policy-state");
@@ -775,6 +814,7 @@ _WORKSPACE_JS = """
   var policyHistoryFor = null;
   var policyHistoryLoading = false;
   var policyHistorySeq = 0;
+  var policyCeiling = null;
   var policySaving = false;
   var policyRollbackBusy = false;
   var assignmentVersion = null;
@@ -1149,6 +1189,48 @@ _WORKSPACE_JS = """
 
   // -- policies: profiles, assignments and effective preview --------------
 
+  var LIMIT_FIELDS = [
+    "context_messages",
+    "context_budget",
+    "default_reply_tokens",
+    "max_reply_tokens"
+  ];
+  var LIMIT_LABELS = {
+    context_messages: "Context messages",
+    context_budget: "Context budget",
+    default_reply_tokens: "Default reply tokens",
+    max_reply_tokens: "Max reply tokens"
+  };
+
+  function positiveInteger(value) {
+    return typeof value === "number" && isFinite(value) &&
+      value >= 1 && Math.floor(value) === value;
+  }
+
+  // The server returns limits as a sparse mapping and the ceiling as a
+  // complete mapping. Unknown, malformed or non-positive values are ignored
+  // rather than displayed as if they had been enforced.
+  function policyLimitMap(raw) {
+    var limits = {};
+    if (!isObject(raw)) { return limits; }
+    for (var i = 0; i < LIMIT_FIELDS.length; i += 1) {
+      var name = LIMIT_FIELDS[i];
+      if (positiveInteger(raw[name])) { limits[name] = raw[name]; }
+    }
+    return limits;
+  }
+
+  function policyLimitSummary(limits) {
+    var parts = [];
+    if (limits.context_messages) { parts.push("messages ≤ " + limits.context_messages); }
+    if (limits.context_budget) { parts.push("budget ≤ " + limits.context_budget); }
+    if (limits.default_reply_tokens) {
+      parts.push("default reply ≤ " + limits.default_reply_tokens);
+    }
+    if (limits.max_reply_tokens) { parts.push("reply ≤ " + limits.max_reply_tokens); }
+    return parts.length ? "Limits: " + parts.join(" · ") : "Server limits";
+  }
+
   function policySettings(raw) {
     if (!isObject(raw) ||
         typeof raw.input_check_enabled !== "boolean" ||
@@ -1176,7 +1258,9 @@ _WORKSPACE_JS = """
       input_check_enabled: raw.input_check_enabled,
       output_check_enabled: raw.output_check_enabled,
       input_masks: input,
-      output_masks: output
+      output_masks: output,
+      limits: policyLimitMap(raw.limits),
+      ceiling: policyLimitMap(raw.ceiling)
     };
   }
 
@@ -1344,7 +1428,12 @@ _WORKSPACE_JS = """
         ? profile.settings.input_masks.join(", ") : "None"));
       masksCell.appendChild(tableCell("Output: " + (profile.settings.output_masks.length
         ? profile.settings.output_masks.join(", ") : "None"), "cell-muted"));
+      masksCell.appendChild(tableCell(
+        policyLimitSummary(profile.settings.limits), "cell-muted"));
       row.appendChild(masksCell);
+      if (!policyCeiling && positiveInteger(profile.settings.ceiling.context_messages)) {
+        policyCeiling = profile.settings.ceiling;
+      }
 
       var actions = document.createElement("div");
       actions.className = "cell-actions";
@@ -1443,6 +1532,37 @@ _WORKSPACE_JS = """
     policyDisabledNote.hidden = !relaxed;
   }
 
+  function policyLimitInputValue(input) {
+    var raw = typeof input.value === "string" ? input.value.trim() : "";
+    if (!raw) { return null; }
+    if (!/^[0-9]+$/.test(raw)) { return NaN; }
+    return parseInt(raw, 10);
+  }
+
+  function syncPolicyLimitHints() {
+    for (var i = 0; i < policyLimitFields.length; i += 1) {
+      var field = policyLimitFields[i];
+      var ceiling = policyCeiling && positiveInteger(policyCeiling[field.key])
+        ? policyCeiling[field.key] : null;
+      field.hint.textContent = "Server: " + (ceiling === null ? "unknown" : ceiling);
+    }
+  }
+
+  function syncPolicyLimitWarning() {
+    var notes = [];
+    for (var i = 0; i < policyLimitFields.length; i += 1) {
+      var field = policyLimitFields[i];
+      var ceiling = policyCeiling && positiveInteger(policyCeiling[field.key])
+        ? policyCeiling[field.key] : null;
+      var value = policyLimitInputValue(field.input);
+      if (ceiling !== null && value !== null && isFinite(value) && value > ceiling) {
+        notes.push(field.label + " will be clamped to " + ceiling + ".");
+      }
+    }
+    policyLimitWarning.textContent = notes.join(" ");
+    policyLimitWarning.hidden = notes.length === 0;
+  }
+
   // A stored profile is applied exactly as saved.  Only a brand-new profile
   // selects every mask by default, so editing an existing profile never adds
   // postal-address masking that the administrator did not choose.
@@ -1472,6 +1592,17 @@ _WORKSPACE_JS = """
       ? storedMaskChecked(profile.settings, "output_masks", "MYKAD") : true;
     policyOutputPostal.checked = profile
       ? storedMaskChecked(profile.settings, "output_masks", "POSTAL_ADDRESS") : true;
+    if (profile && positiveInteger(profile.settings.ceiling.context_messages)) {
+      policyCeiling = profile.settings.ceiling;
+    }
+    for (var i = 0; i < policyLimitFields.length; i += 1) {
+      var field = policyLimitFields[i];
+      var limit = profile && profile.settings.limits
+        ? profile.settings.limits[field.key] : null;
+      field.input.value = positiveInteger(limit) ? String(limit) : "";
+    }
+    syncPolicyLimitHints();
+    syncPolicyLimitWarning();
     policyForm.hidden = false;
     policySubmit.disabled = false;
     policyCancel.disabled = false;
@@ -1488,6 +1619,11 @@ _WORKSPACE_JS = """
     policyEditingRevision = null;
     policyForm.hidden = true;
     policyName.value = "";
+    for (var i = 0; i < policyLimitFields.length; i += 1) {
+      policyLimitFields[i].input.value = "";
+    }
+    policyLimitWarning.textContent = "";
+    policyLimitWarning.hidden = true;
   }
 
   function editPolicyProfile(profileId) {
@@ -1544,13 +1680,36 @@ _WORKSPACE_JS = """
     }
     var editingId = policyEditingId;
     var editingRevision = policyEditingRevision;
+    var limits = {};
+    for (var i = 0; i < policyLimitFields.length; i += 1) {
+      var field = policyLimitFields[i];
+      var value = policyLimitInputValue(field.input);
+      if (value === null) { continue; }
+      if (!isFinite(value) || value < 1) {
+        setStatus(policyState, field.label + " must be a whole number of 1 or more, or blank to use the server value.", "error");
+        try { field.input.focus(); } catch (error) { /* non-fatal */ }
+        return;
+      }
+      limits[field.key] = value;
+    }
+    if (limits.default_reply_tokens !== undefined &&
+        limits.max_reply_tokens !== undefined &&
+        limits.default_reply_tokens > limits.max_reply_tokens) {
+      setStatus(policyState, "Default reply tokens must not exceed max reply tokens.", "error");
+      try { policyLimitFields[2].input.focus(); } catch (error) { /* non-fatal */ }
+      return;
+    }
+    // A value above the ceiling is accepted: the server clamps it. Show that
+    // outcome before the request leaves so the save is not a surprise.
+    syncPolicyLimitWarning();
     var payload = {
       input_check_enabled: policyInputEnabled.checked,
       output_check_enabled: policyOutputEnabled.checked,
       input_masks: selectedPolicyMasks(
         policyInputEmail, policyInputPhone, policyInputMykad, policyInputPostal),
       output_masks: selectedPolicyMasks(
-        policyOutputEmail, policyOutputPhone, policyOutputMykad, policyOutputPostal)
+        policyOutputEmail, policyOutputPhone, policyOutputMykad, policyOutputPostal),
+      limits: limits
     };
     var path = "/workspace/api/admin/policy/profiles";
     if (editingId) {
@@ -1679,6 +1838,10 @@ _WORKSPACE_JS = """
       masks.textContent = policyMasksText(settings);
       detail.appendChild(main);
       detail.appendChild(masks);
+      var limitsLine = document.createElement("div");
+      limitsLine.className = "cell-muted";
+      limitsLine.textContent = policyLimitSummary(settings.limits);
+      detail.appendChild(limitsLine);
       if (typeof raw.rollback_of === "number") {
         var rollbackFrom = document.createElement("div");
         rollbackFrom.className = "cell-muted";
@@ -2102,12 +2265,57 @@ _WORKSPACE_JS = """
       "lower scopes.";
   }
 
+  function appendEffectiveLimits(container, data) {
+    var ceiling = policyLimitMap(data.ceiling);
+    var effective = policyLimitMap(data.effective_limits);
+    var shown = 0;
+    for (var i = 0; i < LIMIT_FIELDS.length; i += 1) {
+      if (positiveInteger(ceiling[LIMIT_FIELDS[i]])) { shown += 1; }
+    }
+    if (!shown) { return; }
+    var block = document.createElement("div");
+    block.className = "effective-limits";
+    block.setAttribute("data-stage", "limits");
+    var heading = document.createElement("h4");
+    heading.textContent = "Chat limits";
+    block.appendChild(heading);
+    var list = document.createElement("ul");
+    list.className = "effective-limit-list";
+    for (var i2 = 0; i2 < LIMIT_FIELDS.length; i2 += 1) {
+      var name = LIMIT_FIELDS[i2];
+      var ceilingValue = ceiling[name];
+      if (!positiveInteger(ceilingValue)) { continue; }
+      var value = positiveInteger(effective[name]) ? effective[name] : ceilingValue;
+      var item = document.createElement("li");
+      item.className = "effective-limit";
+      item.setAttribute("data-limit", name);
+      var label = document.createElement("span");
+      label.className = "effective-limit-label";
+      label.textContent = LIMIT_LABELS[name] + ": ";
+      item.appendChild(label);
+      item.appendChild(effectiveChip(
+        String(value), value < ceilingValue ? "is-tightened" : ""));
+      if (value < ceilingValue) {
+        var note = document.createElement("span");
+        note.className = "effective-limit-note";
+        note.textContent = "tightened below server " + ceilingValue;
+        item.appendChild(note);
+      }
+      list.appendChild(item);
+    }
+    block.appendChild(list);
+    container.appendChild(block);
+  }
+
   function renderEffectivePreview(data, selectedUserId) {
     clearNode(effectivePolicy);
     var settings = policySettings(data);
     if (!settings) {
       setStatus(effectiveState, "The effective policy response was not valid. No settings were displayed.", "error");
       return;
+    }
+    if (positiveInteger(settings.ceiling.context_messages)) {
+      policyCeiling = settings.ceiling;
     }
     var user = findAdminUser(typeof data.user_id === "string" ? data.user_id : selectedUserId);
     var identity = user
@@ -2128,6 +2336,7 @@ _WORKSPACE_JS = """
       blocks, "output", "Output checks / masks",
       settings.output_check_enabled, settings.output_masks
     );
+    appendEffectiveLimits(blocks, data);
     effectivePolicy.appendChild(blocks);
 
     var rawSources = Array.isArray(data.sources) ? data.sources : [];
@@ -5625,6 +5834,14 @@ _WORKSPACE_JS = """
     if (departmentForm) { departmentForm.hidden = true; }
     if (policyForm) { policyForm.hidden = true; }
     if (policyDisabledNote) { policyDisabledNote.hidden = true; }
+    policyCeiling = null;
+    for (var limitIndex = 0; limitIndex < policyLimitFields.length; limitIndex += 1) {
+      policyLimitFields[limitIndex].input.value = "";
+    }
+    if (policyLimitWarning) {
+      policyLimitWarning.textContent = "";
+      policyLimitWarning.hidden = true;
+    }
     if (newUserToggle) { newUserToggle.setAttribute("aria-expanded", "false"); }
     if (newDepartmentToggle) { newDepartmentToggle.setAttribute("aria-expanded", "false"); }
     clearNode(departmentList);
@@ -5872,6 +6089,9 @@ _WORKSPACE_JS = """
   policyOutputPhone.addEventListener("change", syncPolicyFormNote);
   policyOutputMykad.addEventListener("change", syncPolicyFormNote);
   policyOutputPostal.addEventListener("change", syncPolicyFormNote);
+  for (var limitIndex = 0; limitIndex < policyLimitFields.length; limitIndex += 1) {
+    policyLimitFields[limitIndex].input.addEventListener("input", syncPolicyLimitWarning);
+  }
 
   assignmentScope.addEventListener("change", function () {
     syncAssignmentScope();
@@ -6340,9 +6560,36 @@ WORKSPACE_HTML = """<!doctype html>
 <label for="policy-output-postal"><input id="policy-output-postal" type="checkbox" checked> Mask Postal address</label>
 </div>
 </fieldset>
+<fieldset>
+<legend>Chat limits</legend>
+<div class="policy-limits">
+<div class="policy-limit-row">
+<label for="policy-limit-context-messages">Context messages</label>
+<input id="policy-limit-context-messages" name="policy-limit-context-messages" type="number" min="1" step="1" inputmode="numeric" autocomplete="off">
+<span id="policy-limit-context-messages-hint" class="policy-limit-hint">Server: unknown</span>
+</div>
+<div class="policy-limit-row">
+<label for="policy-limit-context-budget">Context budget</label>
+<input id="policy-limit-context-budget" name="policy-limit-context-budget" type="number" min="1" step="1" inputmode="numeric" autocomplete="off">
+<span id="policy-limit-context-budget-hint" class="policy-limit-hint">Server: unknown</span>
+</div>
+<div class="policy-limit-row">
+<label for="policy-limit-default-reply-tokens">Default reply tokens</label>
+<input id="policy-limit-default-reply-tokens" name="policy-limit-default-reply-tokens" type="number" min="1" step="1" inputmode="numeric" autocomplete="off">
+<span id="policy-limit-default-reply-tokens-hint" class="policy-limit-hint">Server: unknown</span>
+</div>
+<div class="policy-limit-row">
+<label for="policy-limit-max-reply-tokens">Max reply tokens</label>
+<input id="policy-limit-max-reply-tokens" name="policy-limit-max-reply-tokens" type="number" min="1" step="1" inputmode="numeric" autocomplete="off">
+<span id="policy-limit-max-reply-tokens-hint" class="policy-limit-hint">Server: unknown</span>
+</div>
+</div>
+<p class="policy-note">Blank uses the server value. A value above the server ceiling is clamped down, never increased.</p>
+</fieldset>
 </div>
 <p class="policy-note">Postal address masking recognises a bounded ASCII Malaysian single-line address shape with a house or unit number, a street keyword and a five-digit postcode. A numbered street address that follows an explicit Address: or Alamat: label is also masked without a postcode. It is not broad semantic address detection, and each direction is selected independently.</p>
 <p id="policy-disabled-note" class="admin-warning" hidden>If an input or output check is turned off, this profile does not ask the model guard to check that channel. No masking selected for a channel is an explicit relaxation and does not protect that content. Server limits and the denylist still apply, and the separate guard status shows whether the model guard runtime is active.</p>
+<p id="policy-limit-warning" class="admin-warning" hidden></p>
 <div class="policy-actions">
 <button id="policy-submit" class="primary" type="submit">Save profile</button>
 <button id="policy-cancel" class="ghost" type="button">Cancel</button>

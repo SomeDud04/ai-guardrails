@@ -146,6 +146,16 @@ An authenticated user with the persisted `admin` role may create profiles that:
   field keeps the server value, and an empty `limits` mapping means no profile
   tightening.
 
+In the `/workspace` admin policy form, the "Chat limits" fieldset exposes those
+four fields as optional whole numbers (context messages, context budget, default
+reply tokens, max reply tokens). Each field shows the server ceiling beside it,
+and blank means the server value applies. The form rejects a non-positive value
+and a default reply above the max reply, while a value above the ceiling is
+allowed with a visible "will be clamped" warning because the server only
+tightens. The profile list and history show the limits a profile sets (or
+"Server limits"), and the effective-user preview lists each effective value and
+marks any field tightened below the ceiling.
+
 The server ceiling for those limits is resolved once at startup: the
 environment values (or their built-in defaults), then the optional top-level
 `limits` mapping in the startup policy. A profile value may only tighten that
