@@ -1,3 +1,4 @@
+import time
 import unittest
 
 from nasi_lemak.gateway import mask_pii
@@ -165,6 +166,104 @@ class SharedPiiSpanTests(unittest.TestCase):
                     ["MY_PHONE"],
                 )
 
+    def test_mykad_common_separator_formats_are_masked(self):
+        # Every reviewed group separator, and the compact form, must mask.
+        for separator in ("-", " ", "\u2013", "\u2014", "\u2212", "\u2011"):
+            number = f"900101{separator}14{separator}5678"
+            text = f"IC {number} sah."
+            with self.subTest(separator=repr(separator)):
+                self.assertEqual(mask_text(text), "IC [MYKAD] sah.")
+                self.assertEqual(mask_pii(text), "IC [MYKAD] sah.")
+                self.assertEqual(
+                    [(item.entity_type, text[item.start:item.end])
+                     for item in find_redactions(text)],
+                    [("MYKAD", number)],
+                )
+        self.assertEqual(mask_text("id 900101123456"), "id [MYKAD]")
+        # The separator may differ between groups; only one character is used.
+        self.assertEqual(
+            mask_text("id 900101 14\u20135678"), "id [MYKAD]"
+        )
+
+    def test_mobile_dot_bracket_and_en_dash_formats_are_masked(self):
+        cases = {
+            "012.345.6789": "[MY_PHONE]",
+            "Telefon 012.345.6789.": "Telefon [MY_PHONE].",
+            "012\u2013345\u20136789": "[MY_PHONE]",
+            "(012) 345 6789": "[MY_PHONE]",
+            "(012)345-6789": "[MY_PHONE]",
+            "(+6012) 345 6789": "[MY_PHONE]",
+            "SMS ke (+6012) 345 6789 esok": "SMS ke [MY_PHONE] esok",
+        }
+        for text, expected in cases.items():
+            with self.subTest(text=text):
+                self.assertEqual(mask_text(text), expected)
+                self.assertEqual(mask_pii(text), expected)
+                self.assertEqual(
+                    [item.entity_type for item in find_redactions(text)],
+                    ["MY_PHONE"],
+                )
+
+    def test_landline_national_and_country_code_formats_are_masked(self):
+        # Full national lengths only: 03 + 8 digits, 04/05/06/07/09 + 7 and
+        # 08x + 6, including optional brackets and the +60/60 country code.
+        cases = {
+            "03-1234 5678": "[MY_PHONE]",
+            "+60 3-1234 5678": "[MY_PHONE]",
+            "603-1234 5678": "[MY_PHONE]",
+            "(03) 1234 5678": "[MY_PHONE]",
+            "(+603) 1234 5678": "[MY_PHONE]",
+            "04-123 4567": "[MY_PHONE]",
+            "05.123.4567": "[MY_PHONE]",
+            "06 123 4567": "[MY_PHONE]",
+            "07-123 4567": "[MY_PHONE]",
+            "09 123 4567": "[MY_PHONE]",
+            "082-123 456": "[MY_PHONE]",
+            "+60 82-123 456": "[MY_PHONE]",
+            "Hotline: 03-1234 5678.": "Hotline: [MY_PHONE].",
+        }
+        for text, expected in cases.items():
+            with self.subTest(text=text):
+                self.assertEqual(mask_text(text), expected)
+                self.assertEqual(mask_pii(text), expected)
+                self.assertEqual(
+                    [item.entity_type for item in find_redactions(text)],
+                    ["MY_PHONE"],
+                )
+
+    def test_phone_false_positive_examples_stay_unmasked(self):
+        cases = (
+            "3.14159265",
+            "2026-10-30",
+            "INV-0312345678",
+            "1234567890123",
+            "6012345678901",
+            "0312345678901",
+            "0123456",
+            "012345678901234",
+            "ABC0123456789",
+            "0123456789abc",
+            "0 1 2 3 4 5 6 7 8 9",
+        )
+        for text in cases:
+            with self.subTest(text=text):
+                self.assertEqual(mask_text(text), text)
+                self.assertEqual(mask_pii(text), text)
+                self.assertEqual(find_redactions(text), [])
+
+    def test_long_digit_separator_and_bracket_text_masks_within_one_second(self):
+        # 64 KiB of phone-shaped groups with separators and brackets must stay
+        # linear enough for the per-request masking path.
+        unit = "(012) 345 6789 / 03-1234 5678 / 900101 14 5678 / "
+        text = (unit * ((64 * 1024) // len(unit) + 1))[: 64 * 1024]
+        started = time.perf_counter()
+        masked = mask_text(text)
+        elapsed = time.perf_counter() - started
+        self.assertLess(elapsed, 1.0)
+        self.assertIn("[MY_PHONE]", masked)
+        self.assertIn("[MYKAD]", masked)
+        self.assertNotIn("900101 14 5678", masked)
+
     def test_email_phone_mykad_order_is_preserved(self):
         text = "a@example.invalid 0123456789 900101-12-3456"
         self.assertEqual(mask_pii(text), "[EMAIL] [MY_PHONE] [MYKAD]")
@@ -202,6 +301,18 @@ class SharedPiiSpanTests(unittest.TestCase):
             with self.subTest(text=text):
                 self.assertEqual(mask_text(text), expected)
                 self.assertEqual(mask_pii(text), expected)
+
+    def test_hyphen_prefixed_mobile_numbers_stay_masked(self):
+        for text, expected in (
+            ("HP-012-345 6789", "HP-[MY_PHONE]"),
+            ("tel-0123456789", "tel-[MY_PHONE]"),
+            ("Phone-+60123456789", "Phone-[MY_PHONE]"),
+            # A mobile-shaped id cannot be told apart from a labelled number, so
+            # it is masked: hiding an id costs less than leaking a phone number.
+            ("INV-0123456789", "INV-[MY_PHONE]"),
+        ):
+            with self.subTest(text=text):
+                self.assertEqual(mask_text(text), expected)
 
     def test_postal_address_span_is_the_full_address(self):
         text = "Rumah saya di No. 12, Jalan Melati 3, Taman Sri Indah, 43000 Kajang, Selangor. Jumpa esok!"

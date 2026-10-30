@@ -85,6 +85,19 @@ class GatewayTests(unittest.TestCase):
         self.assertNotIn(address, content)
         self.assertIn("Rumah: Alamat: [POSTAL_ADDRESS]", content)
 
+    def test_common_mykad_and_phone_formats_mask_gateway_output(self):
+        self.adapters.generated = (
+            "IC 900101 14 5678, mobile 012.345.6789, office +60 3-1234 5678."
+        )
+        response = self.call(request())
+        self.assertEqual(response[0], 200)
+        content = response[1]["choices"][0]["message"]["content"]
+        self.assertNotIn("900101 14 5678", content)
+        self.assertNotIn("012.345.6789", content)
+        self.assertNotIn("+60 3-1234 5678", content)
+        self.assertEqual(content.count("[MY_PHONE]"), 2)
+        self.assertEqual(content.count("[MYKAD]"), 1)
+
     def test_rejects_unknown_fields_and_client_policy_override_before_upstream(self):
         for body in (request(tools=[]), request(policy="unsafe"), request(extra_field=1)):
             with self.subTest(body=body):
