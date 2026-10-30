@@ -312,30 +312,35 @@ class Gateway:
         self.diagnostics = diagnostics
         self.app_id = app_id
 
-    def _audit(self, request_id: str, event_type: str, decision: str, code: str | None = None) -> None:
+    def _audit(self, request_id: str, event_type: str, decision: str, code: str | None = None) -> float:
+        """Write one audit row and return the timestamp that row recorded.
+
+        Nothing else is timed here: the returned value is the audit store's own
+        ``timestamp`` column value, so a served latency can be derived from the
+        two audit rows without inventing a second timer.
+        """
         stage = "initial" if event_type == "request_started" else "terminal"
         if self.fail_audit_stage == stage:
             raise OSError("audit unavailable")
         with self._audit_lock:
             if event_type == "request_started":
-                self.audit_store.record_initial(
+                return self.audit_store.record_initial(
                     request_id,
                     self.app_id,
                     self.policy.model,
                     self.policy.version,
                     self.policy.digest,
                 )
-            else:
-                self.audit_store.record_terminal(
-                    request_id,
-                    event_type,
-                    decision,
-                    code,
-                    app_id=self.app_id,
-                    model=self.policy.model,
-                    policy_version=self.policy.version,
-                    policy_digest=self.policy.digest,
-                )
+            return self.audit_store.record_terminal(
+                request_id,
+                event_type,
+                decision,
+                code,
+                app_id=self.app_id,
+                model=self.policy.model,
+                policy_version=self.policy.version,
+                policy_digest=self.policy.digest,
+            )
 
     def audit_events(self) -> list[dict[str, Any]]:
         with self._audit_lock:
@@ -387,9 +392,11 @@ class Gateway:
         control ordering, audit rows, releases or return values.  Keys are
         bounded pipeline facts only: ``input_decision`` (the validated adapter
         verdict ``allow``/``block``), ``output_safe`` (the validated output
-        verdict boolean) and ``sanitized_messages`` (the exact masked messages
-        passed to generation).  Raw withheld output and classifier text are
-        never written.  Fields for stages that did not run stay absent.
+        verdict boolean), ``sanitized_messages`` (the exact masked messages
+        passed to generation), ``audit_started_at`` and ``audit_terminal_at``
+        (the timestamps the audit store itself wrote).  Raw withheld output and
+        classifier text are never written.  Fields for stages that did not run
+        stay absent.
         """
         request_id = "req_" + uuid.uuid4().hex
         if method != "POST" or path != "/v1/chat/completions":
@@ -420,8 +427,25 @@ class Gateway:
             if result_sink is not None:
                 result_sink[name] = value
 
+        def _audit_sink(
+            event_type: str, decision: str, code: str | None = None
+        ) -> float:
+            """Write the audit row, then expose the timestamp it recorded.
+
+            The sink only receives the timestamp the store actually wrote, so a
+            missing pipeline stage stays absent rather than being estimated.
+            """
+            timestamp = self._audit(request_id, event_type, decision, code)
+            _sink(
+                "audit_started_at"
+                if event_type == "request_started"
+                else "audit_terminal_at",
+                timestamp,
+            )
+            return timestamp
+
         try:
-            self._audit(request_id, "request_started", "pending")
+            _audit_sink("request_started", "pending")
         except Exception:
             return self._error(503, "UNAVAILABLE", request_id)
         serialized = serialize_messages(messages)
@@ -433,7 +457,7 @@ class Gateway:
                 raise ValueError("invalid token count")
         except _InputLimit:
             try:
-                self._audit(request_id, "request_blocked", "blocked", "INPUT_LIMIT")
+                _audit_sink("request_blocked", "blocked", "INPUT_LIMIT")
             except Exception:
                 return self._error(503, "UNAVAILABLE", request_id)
             return self._error(413, "INPUT_LIMIT", request_id)
@@ -444,7 +468,7 @@ class Gateway:
             return self._error(503, "UNAVAILABLE", request_id)
         if count > self.policy.token_budget:
             try:
-                self._audit(request_id, "request_blocked", "blocked", "INPUT_LIMIT")
+                _audit_sink("request_blocked", "blocked", "INPUT_LIMIT")
             except Exception:
                 return self._error(503, "UNAVAILABLE", request_id)
             return self._error(413, "INPUT_LIMIT", request_id)
@@ -468,7 +492,7 @@ class Gateway:
                     raise ValueError("invalid attack result")
                 if result["decision"] == "block":
                     _sink("input_decision", "block")
-                    self._audit(request_id, "request_blocked", "blocked", "POLICY_BLOCK")
+                    _audit_sink("request_blocked", "blocked", "POLICY_BLOCK")
                     return self._blocked(request_id, "INPUT_GUARD_BLOCK")
                 _sink("input_decision", "allow")
             stage = "other"
@@ -476,7 +500,7 @@ class Gateway:
             # input turn before generation.  Disabling the model classifier never
             # disables this server-side policy control.
             if any(self.policy.denies(message["content"]) for message in messages):
-                self._audit(request_id, "request_blocked", "blocked", "POLICY_BLOCK")
+                _audit_sink("request_blocked", "blocked", "POLICY_BLOCK")
                 return self._blocked(request_id, "INPUT_POLICY_BLOCK")
             # A cancelled/deadlined workspace request must not launch new
             # inference after a successful scan.
@@ -510,7 +534,7 @@ class Gateway:
             return self._error(503, "UNAVAILABLE", request_id)
         except GuardInputLimit:
             try:
-                self._audit(request_id, "request_blocked", "blocked", "INPUT_LIMIT")
+                _audit_sink("request_blocked", "blocked", "INPUT_LIMIT")
             except Exception:
                 return self._error(503, "UNAVAILABLE", request_id)
             return self._error(413, "INPUT_LIMIT", request_id)
@@ -537,13 +561,13 @@ class Gateway:
                     raise ValueError("invalid output result")
                 _sink("output_safe", result["safe"])
                 if not result["safe"]:
-                    self._audit(request_id, "request_blocked", "blocked", "POLICY_BLOCK")
+                    _audit_sink("request_blocked", "blocked", "POLICY_BLOCK")
                     return self._blocked(request_id, "OUTPUT_GUARD_BLOCK")
             # The complete buffered output is checked before any release.
             # Disabling the model output classifier never bypasses the literal
             # policy deny list.
             if self.policy.denies(output):
-                self._audit(request_id, "request_blocked", "blocked", "POLICY_BLOCK")
+                _audit_sink("request_blocked", "blocked", "POLICY_BLOCK")
                 return self._blocked(request_id, "OUTPUT_POLICY_BLOCK")
             masked_output = mask_pii(output, control.output_masks)
         except Exception:
@@ -552,7 +576,7 @@ class Gateway:
             )
             return self._error(503, "UNAVAILABLE", request_id)
         try:
-            self._audit(request_id, "request_completed", "allowed")
+            _audit_sink("request_completed", "allowed")
         except Exception:
             self._terminal_best_effort(
                 request_id, "failed", "UNAVAILABLE", stage="audit"

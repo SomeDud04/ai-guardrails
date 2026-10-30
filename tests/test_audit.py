@@ -22,7 +22,7 @@ class SqliteAuditStoreTests(unittest.TestCase):
         self.tmp.cleanup()
 
     def _terminal(self, request_id, event_type, decision, error_code=None):
-        self.store.record_terminal(
+        return self.store.record_terminal(
             request_id,
             event_type,
             decision,
@@ -81,6 +81,20 @@ class SqliteAuditStoreTests(unittest.TestCase):
 
     def test_ready(self):
         self.assertTrue(self.store.ready())
+
+    def test_write_methods_return_the_timestamp_they_stored(self):
+        started = self.store.record_initial(
+            "r1", "app", "pilot-local", "v1", "digest1"
+        )
+        terminal = self._terminal("r1", "request_completed", "allowed")
+
+        events = self.store.read_events()
+        self.assertIsInstance(started, float)
+        self.assertIsInstance(terminal, float)
+        # The returned value is the stored column value, not a second timer.
+        self.assertEqual(started, events[0]["timestamp"])
+        self.assertEqual(terminal, events[1]["timestamp"])
+        self.assertGreaterEqual(terminal, started)
 
 
 class FakeCursor:
@@ -259,6 +273,34 @@ class PostgresAuditStoreUnitTests(unittest.TestCase):
         )
         self.assertEqual(params[7], "allowed")
         self.assertIsNone(params[8])
+
+    def test_write_methods_return_the_timestamp_they_stored(self):
+        conn = FakeConnection()
+        store, connector = self._store_and_connector(conn)
+        with patch("psycopg.connect", connector):
+            started = store.record_initial(
+                "r1", "app", "pilot-local", "v1", "digest1"
+            )
+            terminal = store.record_terminal(
+                "r1",
+                "request_completed",
+                "allowed",
+                app_id="app",
+                model="pilot-local",
+                policy_version="v1",
+                policy_digest="digest1",
+            )
+
+        self.assertIsInstance(started, float)
+        self.assertIsInstance(terminal, float)
+        inserts = [
+            statement
+            for statement in conn.statements
+            if statement[0].startswith("INSERT INTO events")
+        ]
+        self.assertEqual(len(inserts), 2)
+        self.assertEqual(started, inserts[0][1][2])
+        self.assertEqual(terminal, inserts[1][1][2])
 
     def test_terminal_zero_row_write_fails_and_rolls_back(self):
         conn = FakeConnection(insert_rowcount=0)

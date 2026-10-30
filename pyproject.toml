@@ -9,6 +9,9 @@ description = "Synthetic in-process gateway foundation for Project Nasi Lemak"
 requires-python = ">=3.11"
 dependencies = []
 
+[project.scripts]
+nasi-chat = "nasi_lemak.chat_cli:main"
+
 [project.optional-dependencies]
 # Tested HTTP runtime.  The core gateway and the dependency-free synthetic demo
 # remain usable without these extras.

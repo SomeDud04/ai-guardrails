@@ -117,9 +117,7 @@ class ChatAllowPathTests(ChatEndpointTestBase):
         self.assertEqual(payload["sanitized_prompt"], "Email [EMAIL]")
         self.assertEqual(payload["input_safety_label"], "safe")
         self.assertEqual(payload["output_safety_label"], "safe")
-        # There is no elapsed timer in the gateway or audit pipeline, so the
-        # field is absent rather than fabricated by the shim.
-        self.assertNotIn("latency_ms", payload)
+        self.assertIsInstance(payload["latency_ms"], int)
         self.assertEqual(payload["response"], "Synthetic local answer.")
 
         # The exact sanitized text shown in the blueprint body is the text the
@@ -140,6 +138,16 @@ class ChatAllowPathTests(ChatEndpointTestBase):
         self.assertEqual({event["request_id"] for event in events}, {events[0]["request_id"]})
         self.assertEqual(events[-1]["decision"], "allowed")
         self.assertEqual(payload["decision"], "ALLOW")
+        # The served latency is exactly the two audit rows this request wrote,
+        # never a second timer.
+        self.assertEqual(
+            payload["latency_ms"],
+            int(
+                round(
+                    (events[1]["timestamp"] - events[0]["timestamp"]) * 1000
+                )
+            ),
+        )
 
     def test_chat_does_not_create_a_second_audit_row_shape(self) -> None:
         self.post()
@@ -216,7 +224,13 @@ class ChatBlockPathTests(ChatEndpointTestBase):
         self.assertEqual(payload["input_safety_label"], "blocked")
         self.assertEqual(
             set(payload),
-            {"decision", "reason", "input_safety_label", "category"},
+            {
+                "decision",
+                "reason",
+                "input_safety_label",
+                "category",
+                "latency_ms",
+            },
         )
         # Masking never ran for an input-stage block, so no sanitized text is
         # exposed (and none is computed in the shim).
@@ -234,6 +248,14 @@ class ChatBlockPathTests(ChatEndpointTestBase):
         self.assertEqual(events[-1]["event_type"], "request_blocked")
         self.assertEqual(events[-1]["decision"], "blocked")
         self.assertEqual(events[-1]["error_code"], "POLICY_BLOCK")
+        self.assertEqual(
+            payload["latency_ms"],
+            int(
+                round(
+                    (events[-1]["timestamp"] - events[-2]["timestamp"]) * 1000
+                )
+            ),
+        )
 
     def test_output_guard_block_does_not_leak_model_output(self) -> None:
         self.adapters.generated = "RAW MODEL OUTPUT MUST NOT LEAK"
@@ -258,6 +280,7 @@ class ChatBlockPathTests(ChatEndpointTestBase):
                 "input_safety_label",
                 "category",
                 "sanitized_prompt",
+                "latency_ms",
             },
         )
         self.assertEqual(
@@ -268,6 +291,16 @@ class ChatBlockPathTests(ChatEndpointTestBase):
         self.assertNotIn("response", payload)
         self.assertNotIn("stage", payload)
         self.assertNotIn("reason_code", payload)
+        events = self.gateway.audit_events()
+        self.assertEqual(events[-1]["event_type"], "request_blocked")
+        self.assertEqual(
+            payload["latency_ms"],
+            int(
+                round(
+                    (events[-1]["timestamp"] - events[-2]["timestamp"]) * 1000
+                )
+            ),
+        )
 
 
 class ChatPolicyOnlyBlockTests(unittest.TestCase):
@@ -435,6 +468,43 @@ class ChatMissingStageDataTests(unittest.TestCase):
         self.assertEqual(payload["category"], "INPUT_GUARD_BLOCK")
         self.assertNotIn("sanitized_prompt", payload)
         self.assertNotIn("output_safety_label", payload)
+        # No audit stamps reached the sink, so no latency is invented.
+        self.assertNotIn("latency_ms", payload)
+
+
+class LatencyDerivationTests(unittest.TestCase):
+    """``latency_ms`` is audit-terminal minus audit-started, or absent."""
+
+    def test_only_two_real_stamps_produce_an_integer(self) -> None:
+        from nasi_lemak.server import _latency_ms
+
+        self.assertEqual(
+            _latency_ms({"audit_started_at": 10.0, "audit_terminal_at": 21.4}),
+            11400,
+        )
+        self.assertEqual(
+            _latency_ms({"audit_started_at": 5.0, "audit_terminal_at": 5.0}), 0
+        )
+        self.assertIsInstance(
+            _latency_ms({"audit_started_at": 1.0, "audit_terminal_at": 1.0004}),
+            int,
+        )
+
+    def test_missing_or_malformed_stamps_are_never_estimated(self) -> None:
+        from nasi_lemak.server import _latency_ms
+
+        cases = [
+            {},
+            {"audit_started_at": 1.0},
+            {"audit_terminal_at": 2.0},
+            {"audit_started_at": True, "audit_terminal_at": 2.0},
+            {"audit_started_at": "1.0", "audit_terminal_at": 2.0},
+            {"audit_started_at": 1.0, "audit_terminal_at": float("nan")},
+            {"audit_started_at": float("inf"), "audit_terminal_at": 2.0},
+        ]
+        for sink in cases:
+            with self.subTest(sink=sink):
+                self.assertIsNone(_latency_ms(sink))
 
 
 class ChatErrorMappingTests(ChatEndpointTestBase):

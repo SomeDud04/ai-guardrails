@@ -158,6 +158,39 @@ Request rules:
 The exact chat contract, including the unavailable-state semantics, is in
 `docs/api-contract.yaml`.
 
+### End-user CLI
+
+`pip install .` also installs `nasi-chat`, a standard-library terminal client
+for the `POST /chat` testing surface. It talks to exactly the endpoint you
+give it (there is no localhost default) and never changes guard, audit or error
+behaviour.
+
+```powershell
+$env:NASI_GATEWAY_URL = "https://guardrail.example"
+$env:NASI_GATEWAY_TOKEN = "..."   # or leave unset to be prompted
+nasi-chat                          # interactive; /quit or Ctrl-D exits
+nasi-chat --prompt "What is the capital of Malaysia?"
+nasi-chat --base-url https://guardrail.example --json --prompt "Hello"
+```
+
+`--base-url` (or `NASI_GATEWAY_URL`) is required and must be an absolute
+`http`/`https` URL; `--timeout` defaults to 90 s. Each turn prints one status
+line and then the released text:
+
+- `ALLOW (200) · input: safe · output: safe · PII: masked|none · 21.4 s server · req_…`
+- `BLOCK (403) · INPUT_GUARD_BLOCK · input: blocked · "…"`
+- `ERROR (503) UNAVAILABLE: … · req_…`
+
+`latency_ms` is served by `/chat` when the request's two audit rows both
+exist and is taken from their own timestamps; otherwise the CLI labels the
+measured client round trip. `--json` prints the raw reply JSON instead. ANSI
+colour is used only on a TTY with `NO_COLOR` unset. One-shot exit codes are `0`
+allowed, `1` blocked and `2` for a network, timeout, non-JSON or unexpected
+status; the REPL reports the same errors and keeps running. The bearer token
+is read from `NASI_GATEWAY_TOKEN` or prompted with `getpass` and is never
+printed, logged, written or included in an error message. The PII column reads
+`masked` when the returned sanitized prompt differs from the prompt sent.
+
 Chat context and reply bounds use the four `NASI_LEMAK_CHAT_*` settings in
 [docs/chat-limits.md](docs/chat-limits.md). The workspace keeps full saved
 history but sends only a recent complete-pair window; the model may not remember

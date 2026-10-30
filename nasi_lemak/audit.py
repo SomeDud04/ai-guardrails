@@ -45,8 +45,12 @@ class AuditStore(ABC):
         model: str,
         policy_version: str,
         policy_digest: str,
-    ) -> None:
-        """Persist the initial event durably and mark ownership where supported."""
+    ) -> float:
+        """Persist the initial event durably and return the timestamp written.
+
+        The value is exactly the ``timestamp`` column stored in the audit row;
+        callers may ignore it.  It is not a second, independent timer.
+        """
 
     @abstractmethod
     def record_terminal(
@@ -60,8 +64,8 @@ class AuditStore(ABC):
         model: str,
         policy_version: str,
         policy_digest: str,
-    ) -> None:
-        """Append a terminal event using the original trusted request metadata."""
+    ) -> float:
+        """Append a terminal event and return the timestamp written."""
 
     @abstractmethod
     def read_events(self) -> list[dict[str, Any]]:
@@ -167,7 +171,8 @@ class SqliteAuditStore(AuditStore):
         model: str,
         policy_version: str,
         policy_digest: str,
-    ) -> None:
+    ) -> float:
+        timestamp = time.time()
         with self._connection() as db:
             cursor = db.execute(
                 """
@@ -179,7 +184,7 @@ class SqliteAuditStore(AuditStore):
                 (
                     request_id,
                     "request_started",
-                    time.time(),
+                    timestamp,
                     app_id,
                     model,
                     policy_version,
@@ -194,6 +199,7 @@ class SqliteAuditStore(AuditStore):
                 "INSERT OR REPLACE INTO owners VALUES (?, ?)",
                 (request_id, self._owner_id),
             )
+        return timestamp
 
     def record_terminal(
         self,
@@ -206,7 +212,8 @@ class SqliteAuditStore(AuditStore):
         model: str,
         policy_version: str,
         policy_digest: str,
-    ) -> None:
+    ) -> float:
+        timestamp = time.time()
         with self._connection() as db:
             cursor = db.execute(
                 """
@@ -218,7 +225,7 @@ class SqliteAuditStore(AuditStore):
                 (
                     request_id,
                     event_type,
-                    time.time(),
+                    timestamp,
                     app_id,
                     model,
                     policy_version,
@@ -230,6 +237,7 @@ class SqliteAuditStore(AuditStore):
             if cursor.rowcount != 1:
                 raise AuditError("audit write was not applied")
             db.execute("DELETE FROM owners WHERE request_id = ?", (request_id,))
+        return timestamp
 
     def read_events(self) -> list[dict[str, Any]]:
         with self._connection() as db:
@@ -404,7 +412,7 @@ class PostgresAuditStore(AuditStore):
         policy_digest: str,
         decision: str,
         error_code: str | None,
-    ) -> None:
+    ) -> float:
         conn = self._connect()
         try:
             try:
@@ -432,6 +440,7 @@ class PostgresAuditStore(AuditStore):
                 raise AuditError("audit write failed") from None
         finally:
             self._close_connection(conn)
+        return timestamp
 
     def record_initial(
         self,
@@ -440,11 +449,12 @@ class PostgresAuditStore(AuditStore):
         model: str,
         policy_version: str,
         policy_digest: str,
-    ) -> None:
-        self._write_event(
+    ) -> float:
+        timestamp = time.time()
+        return self._write_event(
             request_id,
             "request_started",
-            time.time(),
+            timestamp,
             app_id,
             model,
             policy_version,
@@ -464,11 +474,12 @@ class PostgresAuditStore(AuditStore):
         model: str,
         policy_version: str,
         policy_digest: str,
-    ) -> None:
-        self._write_event(
+    ) -> float:
+        timestamp = time.time()
+        return self._write_event(
             request_id,
             event_type,
-            time.time(),
+            timestamp,
             app_id,
             model,
             policy_version,
@@ -569,7 +580,9 @@ class UnreadyAuditStore(AuditStore):
     to fail closed without claiming a working audit backend.
     """
 
-    def record_initial(self, request_id, app_id, model, policy_version, policy_digest):
+    def record_initial(
+        self, request_id, app_id, model, policy_version, policy_digest
+    ) -> float:
         raise AuditError("audit not configured")
 
     def record_terminal(
@@ -583,7 +596,7 @@ class UnreadyAuditStore(AuditStore):
         model,
         policy_version,
         policy_digest,
-    ):
+    ) -> float:
         raise AuditError("audit not configured")
 
     def read_events(self):

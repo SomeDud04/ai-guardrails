@@ -266,6 +266,24 @@ def _sanitized_prompt(result_sink: dict[str, Any]) -> str | None:
     return "\n".join(parts) if parts else None
 
 
+def _latency_ms(result_sink: dict[str, Any]) -> int | None:
+    """Server latency derived from the two audit timestamps this request wrote.
+
+    Both values come from the same request's pipeline sink and are the audit
+    store's own ``timestamp`` column values.  Nothing is timed or estimated
+    here: when either stamp is absent (a stage that did not run) the field is
+    omitted rather than invented.
+    """
+    started = result_sink.get("audit_started_at")
+    terminal = result_sink.get("audit_terminal_at")
+    for value in (started, terminal):
+        if isinstance(value, bool) or not isinstance(value, (int, float)):
+            return None
+        if not math.isfinite(value):
+            return None
+    return int(round((terminal - started) * 1000))
+
+
 def _error_response(request_id: str, code: str, status_code: int) -> JSONResponse:
     return JSONResponse(_error_payload(request_id, code), status_code=status_code)
 
@@ -1939,6 +1957,9 @@ def make_app(
             sanitized_prompt = _sanitized_prompt(result_sink)
             if sanitized_prompt is not None:
                 reply["sanitized_prompt"] = sanitized_prompt
+            latency_ms = _latency_ms(result_sink)
+            if latency_ms is not None:
+                reply["latency_ms"] = latency_ms
             return JSONResponse(reply, status_code=200)
 
         if status == 403:
@@ -1960,6 +1981,9 @@ def make_app(
             sanitized_prompt = _sanitized_prompt(result_sink)
             if sanitized_prompt is not None:
                 reply["sanitized_prompt"] = sanitized_prompt
+            latency_ms = _latency_ms(result_sink)
+            if latency_ms is not None:
+                reply["latency_ms"] = latency_ms
             return JSONResponse(reply, status_code=403)
 
         # 400/401/413/503 stay the standard generic envelope, exactly as /v1.
