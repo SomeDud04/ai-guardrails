@@ -31,6 +31,25 @@ LOGGER = logging.getLogger(__name__)
 FAILURE_STAGES = frozenset(
     {"input_guard", "generation", "output_guard", "audit", "other"}
 )
+# Fixed vocabulary for the one content-free rejection log line.  A reason that
+# is not in this tuple is never rendered: it collapses to ``invalid_request``.
+REJECTION_REASONS = (
+    "content_type",
+    "auth_header",
+    "not_ready",
+    "admission_full",
+    "body_timeout",
+    "body_too_large",
+    "invalid_json",
+    "invalid_body",
+    "unauthorized",
+    "model_mismatch",
+    "unknown_field",
+    "invalid_request",
+    "input_limit",
+)
+# The only keys ``_validate`` accepts in a chat body.
+CHAT_BODY_FIELDS = frozenset({"model", "messages", "stream", "max_tokens"})
 
 
 MAX_TOKEN_BUDGET = 32768
@@ -87,6 +106,22 @@ def _normalize_deny_text_spaced(text: str) -> str:
         for char in normalized
     )
     return " ".join(spaced.split()).casefold()
+
+
+def log_rejection(request_id: str, status: int, reason: str) -> None:
+    """Emit exactly one content-free rejection line.
+
+    Only the server-generated request id, the numeric status and a fixed
+    vocabulary reason are rendered.  Headers, keys, bodies, model and field
+    names, paths and exception text are never passed here.
+    """
+    safe_reason = reason if reason in REJECTION_REASONS else "invalid_request"
+    LOGGER.warning(
+        "request_rejected request_id=%s status=%s reason=%s",
+        request_id,
+        status,
+        safe_reason,
+    )
 
 
 @dataclass(frozen=True)
@@ -450,25 +485,32 @@ class Gateway:
         if method != "POST" or path != "/v1/chat/completions":
             return self._error(404, "INVALID_REQUEST", request_id)
         if not isinstance(headers, dict):
+            log_rejection(request_id, 401, "unauthorized")
             return self._error(401, "UNAUTHORIZED", request_id)
         supplied = next((value for key, value in headers.items() if isinstance(key, str) and key.lower() == "authorization"), "")
         if not isinstance(supplied, str):
+            log_rejection(request_id, 401, "unauthorized")
             return self._error(401, "UNAUTHORIZED", request_id)
         candidate = supplied[7:] if supplied.startswith("Bearer ") else ""
         candidate_digest = hashlib.sha256(candidate.encode()).digest()
         if not self._key_valid or not hmac.compare_digest(candidate_digest, self._key_digest):
+            log_rejection(request_id, 401, "unauthorized")
             return self._error(401, "UNAUTHORIZED", request_id)
         if self.adapters is None:
+            log_rejection(request_id, 503, "not_ready")
             return self._error(503, "UNAVAILABLE", request_id)
         try:
             control = self._resolve_control(control)
         except ValueError:
+            log_rejection(request_id, 503, "not_ready")
             return self._error(503, "UNAVAILABLE", request_id)
         effective_limits = tighten(self.limits, dict(control.limits))
         parsed = self._validate(body, effective_limits)
         if parsed == "input_limit":
+            log_rejection(request_id, 413, "input_limit")
             return self._error(413, "INPUT_LIMIT", request_id)
         if parsed is None:
+            log_rejection(request_id, 400, self._validate_reason(body))
             return self._error(400, "INVALID_REQUEST", request_id)
         messages, max_tokens = parsed
 
@@ -673,10 +715,25 @@ class Gateway:
             fields.append(f"diagnostic={diagnostic_code}")
         LOGGER.warning(" ".join(fields))
 
+    def _validate_reason(self, body: Any) -> str:
+        """Derive the fixed rejection reason for a ``_validate`` failure.
+
+        The derivation is read-only and does not affect ``_validate``'s return
+        values.  It distinguishes a model mismatch, an unknown top-level field
+        and everything else, without ever rendering the body itself.
+        """
+        if not isinstance(body, dict):
+            return "invalid_request"
+        if set(body) - CHAT_BODY_FIELDS:
+            return "unknown_field"
+        if "model" in body and body["model"] != self.policy.model:
+            return "model_mismatch"
+        return "invalid_request"
+
     def _validate(self, body: Any, limits: ChatLimits | None = None):
         if limits is None:
             limits = self.limits
-        if not isinstance(body, dict) or set(body) - {"model", "messages", "stream", "max_tokens"}:
+        if not isinstance(body, dict) or set(body) - CHAT_BODY_FIELDS:
             return None
         if body.get("model") != self.policy.model or body.get("stream", False) is not False:
             return None

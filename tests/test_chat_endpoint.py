@@ -508,6 +508,147 @@ class LatencyDerivationTests(unittest.TestCase):
 
 
 class ChatErrorMappingTests(ChatEndpointTestBase):
+    def _assert_single_rejection(
+        self,
+        output: list[str],
+        status: int,
+        reason: str,
+        *forbidden: str,
+    ) -> None:
+        self.assertEqual(len(output), 1, output)
+        line = output[0]
+        self.assertIn("request_rejected request_id=req_", line)
+        self.assertIn(f"status={status}", line)
+        self.assertIn(f"reason={reason}", line)
+        for text in forbidden:
+            self.assertNotIn(text, line)
+
+    def test_content_type_rejection_logs_one_content_free_reason(self) -> None:
+        prompt = "REJECTION-PROMPT-MUST-NOT-BE-LOGGED"
+        with self.assertLogs("nasi_lemak.gateway", level="WARNING") as captured:
+            response = self.client.post(
+                "/chat",
+                content=json.dumps({"prompt": prompt}).encode(),
+                headers={**AUTH, "Content-Type": "text/plain"},
+            )
+        self.assertEqual(response.status_code, 400)
+        self._assert_single_rejection(captured.output, 400, "content_type", prompt)
+
+    def test_auth_header_rejection_logs_one_content_free_reason(self) -> None:
+        prompt = "REJECTION-PROMPT-MUST-NOT-BE-LOGGED"
+        with self.assertLogs("nasi_lemak.gateway", level="WARNING") as captured:
+            response = self.post({"prompt": prompt}, headers={})
+        self.assertEqual(response.status_code, 401)
+        self._assert_single_rejection(captured.output, 401, "auth_header", prompt)
+
+    def test_not_ready_rejection_logs_one_content_free_reason(self) -> None:
+        prompt = "REJECTION-PROMPT-MUST-NOT-BE-LOGGED"
+        gateway = Gateway(
+            app_key=TEST_KEY,
+            audit_store=SqliteAuditStore(
+                Path(self.tmp.name) / "unready-log.sqlite3"
+            ),
+            adapters=None,
+        )
+        client = TestClient(make_app(gateway=gateway))
+        self.addCleanup(client.close)
+
+        with self.assertLogs("nasi_lemak.gateway", level="WARNING") as captured:
+            response = client.post(
+                "/chat", json={"prompt": prompt}, headers=AUTH
+            )
+
+        self.assertEqual(response.status_code, 503)
+        self._assert_single_rejection(captured.output, 503, "not_ready", prompt)
+
+    def test_admission_full_rejection_logs_one_content_free_reason(self) -> None:
+        prompt = "REJECTION-PROMPT-MUST-NOT-BE-LOGGED"
+        app = make_app(gateway=self.gateway, max_concurrency=1)
+        headers = [
+            ("content-type", "application/json"),
+            ("authorization", "Bearer " + TEST_KEY),
+        ]
+
+        async def scenario() -> tuple[int, Any, list[str]]:
+            await app.state.sem.acquire()
+            try:
+                with self.assertLogs(
+                    "nasi_lemak.gateway", level="WARNING"
+                ) as captured:
+                    status, _, body = await asgi_request(
+                        app,
+                        headers=headers,
+                        body_parts=[json.dumps({"prompt": prompt}).encode()],
+                    )
+            finally:
+                app.state.sem.release()
+            return status, body, captured.output
+
+        status, body, output = asyncio.run(
+            asyncio.wait_for(scenario(), timeout=10)
+        )
+
+        self.assertEqual(status, 503)
+        self.assertEqual(json.loads(body)["error"]["code"], "UNAVAILABLE")
+        self._assert_single_rejection(
+            output, 503, "admission_full", prompt
+        )
+
+    def test_body_timeout_rejection_logs_one_content_free_reason(self) -> None:
+        prompt = "REJECTION-PROMPT-MUST-NOT-BE-LOGGED"
+        app = make_app(gateway=self.gateway, body_read_timeout=0.01)
+        headers = [
+            ("content-type", "application/json"),
+            ("authorization", "Bearer " + TEST_KEY),
+        ]
+
+        with self.assertLogs("nasi_lemak.gateway", level="WARNING") as captured:
+            status, _, body = asyncio.run(
+                asgi_request(
+                    app,
+                    headers=headers,
+                    body_parts=[json.dumps({"prompt": prompt}).encode()],
+                    receive_delay=0.05,
+                )
+            )
+
+        self.assertEqual(status, 503)
+        self.assertEqual(json.loads(body)["error"]["code"], "UNAVAILABLE")
+        self._assert_single_rejection(captured.output, 503, "body_timeout", prompt)
+
+    def test_body_too_large_rejection_logs_one_content_free_reason(self) -> None:
+        prompt = "REJECTION-PROMPT-MUST-NOT-BE-LOGGED"
+        client = TestClient(make_app(gateway=self.gateway, max_body_bytes=64))
+        self.addCleanup(client.close)
+
+        with self.assertLogs("nasi_lemak.gateway", level="WARNING") as captured:
+            response = client.post(
+                "/chat",
+                content=json.dumps({"prompt": prompt * 8}).encode(),
+                headers={**AUTH, "Content-Type": "application/json"},
+            )
+
+        self.assertEqual(response.status_code, 413)
+        self._assert_single_rejection(captured.output, 413, "body_too_large", prompt)
+
+    def test_invalid_json_rejection_logs_one_content_free_reason(self) -> None:
+        prompt = "REJECTION-PROMPT-MUST-NOT-BE-LOGGED"
+        with self.assertLogs("nasi_lemak.gateway", level="WARNING") as captured:
+            response = self.client.post(
+                "/chat",
+                content=('{"prompt": "' + prompt + '"').encode(),
+                headers={**AUTH, "Content-Type": "application/json"},
+            )
+        self.assertEqual(response.status_code, 400)
+        self._assert_single_rejection(captured.output, 400, "invalid_json", prompt)
+
+    def test_invalid_body_rejection_logs_one_content_free_reason(self) -> None:
+        prompt = "REJECTION-PROMPT-MUST-NOT-BE-LOGGED"
+        with self.assertLogs("nasi_lemak.gateway", level="WARNING") as captured:
+            response = self.post({"prompt": prompt, "extra": True})
+        self.assertEqual(response.status_code, 400)
+        self._assert_single_rejection(captured.output, 400, "invalid_body", prompt)
+
     def test_unavailable_pipeline_is_generic_503(self) -> None:
         gateway = Gateway(
             app_key=TEST_KEY,
