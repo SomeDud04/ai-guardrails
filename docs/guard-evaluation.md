@@ -132,10 +132,11 @@ expect about 25 to 30 minutes on 4 vCPU, with `progress:` lines on stderr:
 docker exec -i nasi-lemak-gateway-1 python -m nasi_lemak.guard_eval \
   --dataset - --execute --backend qwen3guard-local \
   --report /tmp/guard-eval-v2.json < evals/guards/multilingual-guard-lanes-v2.json
-docker cp nasi-lemak-gateway-1:/tmp/guard-eval-v2.json ./guard-eval-v2.json
+docker exec nasi-lemak-gateway-1 cat /tmp/guard-eval-v2.json > guard-eval-v2.json
 ```
 
-The container's `/tmp` does not survive a restart, so copy the report out first.
+The container's `/tmp` is a tmpfs: it does not survive a restart, so copy the
+report out first, and `docker cp` cannot read it.
 The loaded model uses about 2.4 GiB beside the gateway's own copy.
 
 `guard evaluation: FAIL` and exit status `1` only mean that at least one case did
