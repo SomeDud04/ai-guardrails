@@ -833,6 +833,14 @@ live but not ready, and the value is never echoed.
 The resolved values are read-only in the authenticated `/admin/events` payload
 under `operational`.
 
+Every chat request rejected before or at validation writes exactly one
+content-free line at WARNING on the `nasi_lemak.gateway` logger:
+`request_rejected request_id=<id> status=<code> reason=<reason>`, where `reason`
+is one fixed value from `REJECTION_REASONS` (for example `content_type`,
+`unauthorized`, `input_limit` or `model_mismatch`; anything unrecognised is
+rendered as `invalid_request`). Headers, API keys, bodies, model or field names,
+paths and exception text are never logged.
+
 - The gateway is localhost-only HTTP by default. **TLS ingress is required before
   any remote pilot.** The separate optional demo proxy is plain HTTP on a
   trusted LAN/VPN only and does not satisfy that requirement.

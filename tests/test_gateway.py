@@ -4,7 +4,13 @@ import unittest
 from pathlib import Path
 
 from nasi_lemak.diagnostics import GENERATION_TRUNCATED, SafeDiagnostics
-from nasi_lemak.gateway import Gateway, MemoryAdapters, Policy, make_demo_gateway
+from nasi_lemak.gateway import (
+    Gateway,
+    MemoryAdapters,
+    Policy,
+    log_rejection,
+    make_demo_gateway,
+)
 from nasi_lemak.generation import GenerationError, RealGatewayAdapters
 from nasi_lemak.scan_context import ScanContext
 
@@ -356,6 +362,80 @@ class GatewayTests(unittest.TestCase):
                     self.assertIn(diagnostic, line)
                 self.assertNotIn(prompt, line)
                 self.assertNotIn(reply, line)
+
+    def test_each_pre_validation_rejection_logs_one_content_free_reason(self):
+        prompt = "REJECTION-PROMPT-MUST-NOT-BE-LOGGED"
+        authenticated = {"Authorization": "Bearer " + self.key}
+        unready = Gateway(
+            self.key, Path(self.tmp.name) / "unready.sqlite3", adapters=None
+        )
+        cases = (
+            (
+                "unauthorized",
+                self.gateway,
+                {"Authorization": "Bearer wrong-key"},
+                request([{"role": "user", "content": prompt}]),
+                401,
+            ),
+            (
+                "not_ready",
+                unready,
+                authenticated,
+                request([{"role": "user", "content": prompt}]),
+                503,
+            ),
+            (
+                "model_mismatch",
+                self.gateway,
+                authenticated,
+                request([{"role": "user", "content": prompt}], model="other-model"),
+                400,
+            ),
+            (
+                "unknown_field",
+                self.gateway,
+                authenticated,
+                request([{"role": "user", "content": prompt}], tools=[]),
+                400,
+            ),
+            (
+                "invalid_request",
+                self.gateway,
+                authenticated,
+                {"model": "pilot-local", "messages": []},
+                400,
+            ),
+            (
+                "input_limit",
+                self.gateway,
+                authenticated,
+                request([{"role": "user", "content": "x" * 8193}]),
+                413,
+            ),
+        )
+        for reason, gateway, headers, body, status in cases:
+            with self.subTest(reason=reason):
+                with self.assertLogs(
+                    "nasi_lemak.gateway", level="WARNING"
+                ) as captured:
+                    result_status, _ = gateway.handle(
+                        "POST", "/v1/chat/completions", headers, body
+                    )
+                self.assertEqual(result_status, status)
+                self.assertEqual(len(captured.output), 1, captured.output)
+                line = captured.output[0]
+                self.assertIn("request_rejected request_id=req_", line)
+                self.assertIn(f"status={status}", line)
+                self.assertIn(f"reason={reason}", line)
+                self.assertNotIn(prompt, line)
+                self.assertNotIn("other-model", line)
+                self.assertNotIn("tools", line)
+
+    def test_unknown_rejection_reason_collapses_to_invalid_request(self):
+        with self.assertLogs("nasi_lemak.gateway", level="WARNING") as captured:
+            log_rejection("req_test", 400, "not-a-reason")
+        self.assertEqual(len(captured.output), 1, captured.output)
+        self.assertIn("reason=invalid_request", captured.output[0])
 
     def test_configured_system_prompt_never_reaches_guards_or_audit(self):
         prompt = "SYSTEM-PROMPT-MUST-STAY-INSIDE-GENERATION"

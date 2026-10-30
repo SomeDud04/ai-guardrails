@@ -53,7 +53,7 @@ from .export import (
     sha256_hex,
     utc_iso,
 )
-from .gateway import Gateway, Policy
+from .gateway import Gateway, Policy, log_rejection
 from .generation import (
     ENV_ALLOW_INSECURE_HTTP,
     ENV_API_KEY,
@@ -2044,23 +2044,28 @@ def make_app(
         content_type = request.headers.get("content-type", "")
         media_type = content_type.split(";", 1)[0].strip().lower()
         if media_type != "application/json":
+            log_rejection(request_id, 400, "content_type")
             return 400, _error_payload(request_id, "INVALID_REQUEST")
 
         auth_headers = request.headers.getlist("authorization")
         if len(auth_headers) != 1:
+            log_rejection(request_id, 401, "auth_header")
             return 401, _error_payload(request_id, "UNAUTHORIZED")
 
         if not request.app.state.config_ready:
+            log_rejection(request_id, 503, "not_ready")
             return 503, _error_payload(request_id, "UNAVAILABLE")
 
         gateway = request.app.state.gateway
         if not _gateway_static_ready(gateway):
+            log_rejection(request_id, 503, "not_ready")
             return 503, _error_payload(request_id, "UNAVAILABLE")
 
         sem = request.app.state.sem
         # Admission is checked without queueing.  ``acquire`` cannot yield when a
         # slot is free, so this check and acquisition are atomic on the loop.
         if sem.locked():
+            log_rejection(request_id, 503, "admission_full")
             return 503, _error_payload(request_id, "UNAVAILABLE")
         await sem.acquire()
 
@@ -2094,21 +2099,26 @@ def make_app(
                     request.app.state.body_read_timeout,
                 )
             except _BodyTimeout:
+                log_rejection(request_id, 503, "body_timeout")
                 return 503, _error_payload(request_id, "UNAVAILABLE")
             except _BodyTooLarge:
+                log_rejection(request_id, 413, "body_too_large")
                 return 413, _error_payload(request_id, "INPUT_LIMIT")
             except asyncio.CancelledError:
                 raise
             except Exception:
+                log_rejection(request_id, 400, "invalid_body")
                 return 400, _error_payload(request_id, "INVALID_REQUEST")
 
             body = _parse_json_object(body_bytes)
             if body is None:
+                log_rejection(request_id, 400, "invalid_json")
                 return 400, _error_payload(request_id, "INVALID_REQUEST")
 
             try:
                 chat_body = body_builder(body)
             except _ChatBodyError:
+                log_rejection(request_id, 400, "invalid_body")
                 return 400, _error_payload(request_id, "INVALID_REQUEST")
 
             headers = {"Authorization": auth_headers[0]}
