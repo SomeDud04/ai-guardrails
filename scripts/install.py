@@ -1386,6 +1386,9 @@ model: pilot-local
 token_budget: 256
 deny_phrases:
   - "synthetic denied phrase"
+# Optional: may only tighten the env chat limits (docs/chat-limits.md).
+limits:
+  default_reply_tokens: """ + PILOT_DEFAULT_REPLY_TOKENS + """
 """
     if path.exists():
         if platform_ops().is_symlink(path):

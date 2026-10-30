@@ -494,6 +494,14 @@ class EnvWriterTests(unittest.TestCase):
         ):
             self.assertIn(line, text)
 
+    def test_generated_test_policy_tightens_reply_budget_and_loads(self) -> None:
+        from nasi_lemak.policy import load_policy
+
+        policy = install.write_test_policy(self.project)
+        loaded = load_policy(policy)
+        self.assertEqual(loaded.limits, {"default_reply_tokens": 384})
+        self.assertEqual(loaded.model, "pilot-local")
+
     def test_fresh_test_policy_readable_by_runtime_but_credentials_protected(self) -> None:
         policy = install.write_test_policy(self.project)
         key = str(policy.resolve())
