@@ -74,7 +74,16 @@ paths:
         conversation limit and each required guard's tokenizer window without
         truncation. Missing configuration, adapters or audit readiness, request
         body timeout, and admission overload all return a generic 503. Errors
-        never contain raw input, exceptions, credentials or DSNs.
+        never contain raw input, exceptions, credentials or DSNs. Clients may
+        send `stream: true`: the gateway still runs one complete admission,
+        guarded generation and terminal audit, and only then emits the already
+        released, masked text as one-shot SSE (`text/event-stream`; one role/
+        content chunk, one finish chunk and `[DONE]`). No output is streamed
+        before the output guard has passed. `stream_options` must be an object;
+        `temperature` and `top_p` must be numbers within 0-2 and 0-1
+        respectively. These three fields are accepted and ignored: they are
+        never forwarded upstream. Every error, including with `stream: true`,
+        remains the JSON envelope below with its normal status.
       requestBody:
         required: true
         content:
@@ -83,11 +92,26 @@ paths:
               $ref: '#/components/schemas/ChatRequest'
       responses:
         '200':
-          description: Buffered, screened response after durable terminal audit
+          description: >-
+            Buffered, screened response after durable terminal audit. When the
+            request asked for `stream: true`, the same fully released content is
+            returned as one-shot SSE instead of JSON.
           content:
             application/json:
               schema:
                 $ref: '#/components/schemas/ChatResponse'
+            text/event-stream:
+              schema:
+                type: string
+              description: >-
+                Exactly three events, each terminated by a blank line:
+                `data: {"id","object":"chat.completion.chunk","created","model",
+                "choices":[{"index":0,"delta":{"role":"assistant","content":...},
+                "finish_reason":null}]}`; a second chunk with an empty delta and
+                `finish_reason: "stop"`; then `data: [DONE]`. The content is the
+                already-masked released text and is never re-read or re-masked.
+                Responses carry `Cache-Control: no-cache`. Non-200 outcomes stay
+                JSON even when streaming was requested.
         '400':
           description: >-
             INVALID_REQUEST - unsupported media type, malformed/duplicate-key
@@ -176,8 +200,25 @@ components:
           const: pilot-local
         stream:
           type: boolean
-          const: false
           default: false
+          description: >-
+            Accepted by the HTTP route. `true` selects one-shot SSE after the
+            same single guarded, audited completion; the gateway itself remains
+            strict and rejects it directly.
+        stream_options:
+          type: object
+          description: >-
+            Accepted and ignored when `stream: true`; a non-object is a 400.
+        temperature:
+          type: number
+          minimum: 0
+          maximum: 2
+          description: Accepted and ignored; never forwarded upstream.
+        top_p:
+          type: number
+          minimum: 0
+          maximum: 1
+          description: Accepted and ignored; never forwarded upstream.
         max_tokens:
           type: integer
           minimum: 1

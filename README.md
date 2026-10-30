@@ -126,9 +126,17 @@ Request rules:
 - Body is streamed and bounded by actual bytes, independent of
   `Content-Length`; the default ceiling is 64 KiB (configured maximum 4 MiB).
 - Invalid UTF-8, malformed JSON, duplicate keys, non-finite numbers, unknown
-  fields, a non-`pilot-local` model, `stream: true`, more than the configured
-  context-message limit (default 32), or invalid roles/content all return a
-  generic `400`.
+  fields, a non-`pilot-local` model, more than the configured context-message
+  limit (default 32), or invalid roles/content all return a generic `400`.
+- `POST /v1/chat/completions` accepts `stream: true` for OpenAI-compatible
+  agent clients. One complete admission, guarded completion and terminal audit
+  still run; only the already-masked released text is then sent as one-shot SSE
+  (`text/event-stream`, `Cache-Control: no-cache`): an assistant-content chunk,
+  a `finish_reason: stop` chunk and `[DONE]`. Nothing is emitted before the
+  output guard passes. `stream_options` (object) and in-range numeric
+  `temperature`/`top_p` are accepted and ignored, never forwarded upstream. Any
+  non-200 outcome stays the unchanged JSON error envelope. The gateway itself
+  remains strict: it still rejects `stream: true` when called directly.
 - One complete body-read deadline applies; timeouts and overload return `503`.
 - A separate, absolute server-owned chat work deadline starts when
   `Gateway.handle` is dispatched. `make_app(chat_work_timeout=...)` defaults to

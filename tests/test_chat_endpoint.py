@@ -17,6 +17,7 @@ import threading
 import unittest
 from pathlib import Path
 from typing import Any
+from unittest import mock
 
 from fastapi.testclient import TestClient
 
@@ -547,6 +548,219 @@ class ChatErrorMappingTests(ChatEndpointTestBase):
         self.assertEqual(json.loads(body)["error"]["code"], "UNAVAILABLE")
         self.assertEqual(self.gateway.audit_events(), [])
         self.assertEqual(self.adapters.generate_calls, 0)
+
+
+def _sse_data_frames(text: str) -> list[str]:
+    frames = []
+    for block in text.split("\n\n"):
+        if not block.strip():
+            continue
+        if not block.startswith("data: "):
+            raise AssertionError(f"not an SSE data frame: {block!r}")
+        frames.append(block[len("data: ") :])
+    return frames
+
+
+class StreamingRequestTests(ChatEndpointTestBase):
+    def post_v1(self, body: Any, *, headers: Any = None):
+        return self.client.post(
+            "/v1/chat/completions",
+            json=body,
+            headers=AUTH if headers is None else headers,
+        )
+
+    def streamed(self, body: Any = None, **extra: Any):
+        request_body = dict(V1_BODY if body is None else body)
+        request_body["stream"] = True
+        request_body.update(extra)
+        return self.post_v1(request_body)
+
+    def test_allowed_stream_emits_three_events_matching_plain_content(self) -> None:
+        plain = self.post_v1(V1_BODY)
+        self.assertEqual(plain.status_code, 200, plain.text)
+        plain_content = plain.json()["choices"][0]["message"]["content"]
+
+        response = self.streamed()
+
+        self.assertEqual(response.status_code, 200, response.text)
+        self.assertTrue(
+            response.headers["content-type"].startswith("text/event-stream")
+        )
+        self.assertEqual(response.headers["cache-control"], "no-cache")
+
+        frames = _sse_data_frames(response.text)
+        self.assertEqual(len(frames), 3)
+        self.assertEqual(frames[2], "[DONE]")
+
+        first = json.loads(frames[0])
+        self.assertEqual(first["object"], "chat.completion.chunk")
+        self.assertIsInstance(first["created"], int)
+        self.assertEqual(first["model"], "pilot-local")
+        self.assertEqual(first["choices"][0]["index"], 0)
+        self.assertEqual(first["choices"][0]["finish_reason"], None)
+        self.assertEqual(first["choices"][0]["delta"]["role"], "assistant")
+        # The released content is exactly the plain response's content.
+        self.assertEqual(
+            first["choices"][0]["delta"]["content"], plain_content
+        )
+
+        second = json.loads(frames[1])
+        self.assertEqual(second["id"], first["id"])
+        self.assertEqual(second["model"], first["model"])
+        self.assertEqual(second["created"], first["created"])
+        self.assertEqual(second["choices"][0]["delta"], {})
+        self.assertEqual(second["choices"][0]["finish_reason"], "stop")
+
+        # Plain and streamed requests release the same masked reply text.
+        self.assertEqual(
+            self.adapters.generated, "Synthetic local answer."
+        )
+        self.assertEqual(plain_content, "Synthetic local answer.")
+
+    def test_stream_content_matches_non_streaming_reply(self) -> None:
+        self.adapters.generated = "Release: person@example.com"
+        plain = self.post_v1(V1_BODY)
+        streamed = self.streamed()
+
+        self.assertEqual(plain.status_code, 200, plain.text)
+        self.assertEqual(streamed.status_code, 200, streamed.text)
+        frames = _sse_data_frames(streamed.text)
+        streamed_content = json.loads(frames[0])["choices"][0]["delta"]["content"]
+        self.assertEqual(
+            streamed_content,
+            plain.json()["choices"][0]["message"]["content"],
+        )
+        self.assertEqual(streamed_content, "Release: [EMAIL]")
+
+    def test_streaming_uses_one_guarded_completion_and_audit_sequence(self) -> None:
+        with mock.patch.object(
+            self.gateway, "handle", wraps=self.gateway.handle
+        ) as handle:
+            response = self.streamed()
+
+        self.assertEqual(response.status_code, 200, response.text)
+        self.assertEqual(handle.call_count, 1)
+        self.assertEqual(self.adapters.generate_calls, 1)
+        self.assertEqual(
+            [event["event_type"] for event in self.gateway.audit_events()],
+            ["request_started", "request_completed"],
+        )
+
+    def test_stream_options_and_sampling_params_are_ignored(self) -> None:
+        response = self.streamed(
+            stream_options={"include_usage": True},
+            temperature=0.7,
+            top_p=0.9,
+        )
+
+        self.assertEqual(response.status_code, 200, response.text)
+        self.assertEqual(len(_sse_data_frames(response.text)), 3)
+        self.assertEqual(self.adapters.generate_calls, 1)
+        self.assertEqual(
+            self.adapters.generate_inputs,
+            [[{"role": "user", "content": "Hello"}]],
+        )
+
+    def test_invalid_stream_options_and_sampling_params_are_400(self) -> None:
+        cases = [
+            {"stream_options": "x"},
+            {"stream_options": []},
+            {"temperature": 3},
+            {"temperature": -1},
+            {"temperature": True},
+            {"temperature": "0.5"},
+            {"top_p": 1.5},
+            {"top_p": -0.1},
+            {"top_p": False},
+        ]
+        for extra in cases:
+            with self.subTest(extra=extra):
+                response = self.streamed(**extra)
+                self.assertEqual(response.status_code, 400, response.text)
+                self.assertEqual(
+                    response.json()["error"]["code"], "INVALID_REQUEST"
+                )
+        self.assertEqual(self.adapters.generate_calls, 0)
+        self.assertEqual(self.gateway.audit_events(), [])
+
+    def test_unknown_keys_with_stream_are_still_400(self) -> None:
+        for extra in ({"tools": []}, {"policy": "unsafe"}, {"extra": True}):
+            with self.subTest(extra=extra):
+                response = self.streamed(**extra)
+                self.assertEqual(response.status_code, 400, response.text)
+                self.assertEqual(
+                    response.json()["error"]["code"], "INVALID_REQUEST"
+                )
+        self.assertEqual(self.adapters.generate_calls, 0)
+
+    def test_streaming_errors_match_non_streaming_json(self) -> None:
+        cases = [
+            (
+                "input_block",
+                {"attack_result": {"decision": "block"}},
+                V1_BODY,
+                None,
+                403,
+            ),
+            (
+                "output_block",
+                {"output_result": {"safe": False}},
+                V1_BODY,
+                None,
+                403,
+            ),
+            (
+                "over_limit",
+                {},
+                {
+                    "model": "pilot-local",
+                    "messages": [
+                        {"role": "user", "content": "x" * 9000}
+                    ],
+                },
+                None,
+                413,
+            ),
+            (
+                "unauthorized",
+                {},
+                V1_BODY,
+                {"Authorization": "Bearer wrong"},
+                401,
+            ),
+            (
+                "generation_failed",
+                {"generate_error": RuntimeError("synthetic failure")},
+                V1_BODY,
+                None,
+                503,
+            ),
+        ]
+        for name, adapter_state, body, headers, expected in cases:
+            with self.subTest(case=name):
+                self.adapters.attack_result = {"decision": "allow"}
+                self.adapters.output_result = {"safe": True}
+                self.adapters.generate_error = None
+                self.adapters.output_error = None
+                for attribute, value in adapter_state.items():
+                    setattr(self.adapters, attribute, value)
+                plain = self.post_v1(body, headers=headers)
+                streamed_body = {**body, "stream": True}
+                streamed = self.post_v1(streamed_body, headers=headers)
+
+                self.assertEqual(plain.status_code, expected, plain.text)
+                self.assertEqual(streamed.status_code, expected, streamed.text)
+                self.assertEqual(
+                    streamed.headers["content-type"], "application/json"
+                )
+                self.assertEqual(
+                    streamed.json()["error"]["code"],
+                    plain.json()["error"]["code"],
+                )
+                self.assertEqual(
+                    set(streamed.json()["error"]),
+                    set(plain.json()["error"]),
+                )
 
 
 async def asgi_request(

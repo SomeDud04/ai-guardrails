@@ -436,11 +436,11 @@ class RebaselineTests(unittest.TestCase):
         self.assertNotIn(CORPUS_ROOT.resolve(), REBASELINE.resolve().parents)
         self.assertEqual(REBASELINE.resolve().parent, (ROOT / "evals" / "owasp").resolve())
 
-    def test_only_llm06_002_is_recorded_as_not_holding(self):
+    def test_llm06_002_and_llm06_004_are_recorded_as_not_holding(self):
         not_holding = [
             row["id"] for row in self.map["rows"] if not row["holds_under_product_default"]
         ]
-        self.assertEqual(not_holding, ["LLM06-002"])
+        self.assertEqual(not_holding, ["LLM06-002", "LLM06-004"])
 
     def test_inverse_class_covers_every_expect_200_row_that_cannot_return_200(self):
         """The inverse class must be complete against the corpus, not just one row.
@@ -612,9 +612,9 @@ class ConformanceRunnerTests(unittest.TestCase):
         self.assertEqual(len(self.report["rows"]), 23)
         self.assertEqual(self.report["tallies"]["FAIL"], 0)
         self.assertEqual(self.report["tallies"]["ERROR"], 0)
-        self.assertEqual(self.report["tallies"]["PASS"], 22)
-        self.assertEqual(self.report["tallies"]["NOT-APPLICABLE-CONFIG"], 1)
-        self.assertEqual(self.report["pass_rate"]["denominator"], 22)
+        self.assertEqual(self.report["tallies"]["PASS"], 21)
+        self.assertEqual(self.report["tallies"]["NOT-APPLICABLE-CONFIG"], 2)
+        self.assertEqual(self.report["pass_rate"]["denominator"], 21)
         self.assertEqual(self.report["pass_rate"]["value"], 1.0)
 
         map_rows = {row["id"]: row for row in self.map["rows"]}
@@ -637,6 +637,13 @@ class ConformanceRunnerTests(unittest.TestCase):
                     )
         outcome_by_id = {row["id"]: row["outcome"] for row in self.report["rows"]}
         self.assertEqual(outcome_by_id["LLM06-002"], "NOT-APPLICABLE-CONFIG")
+        self.assertEqual(outcome_by_id["LLM06-004"], "NOT-APPLICABLE-CONFIG")
+        stream_row = next(row for row in self.report["rows"] if row["id"] == "LLM06-004")
+        stream_map_row = map_rows["LLM06-004"]
+        self.assertEqual(stream_row["observed_status"], 200)
+        self.assertIsNone(stream_row["observed_code"])
+        self.assertIn(stream_map_row["reason"], stream_row["reason"])
+        self.assertIn("one-shot SSE", stream_row["reason"])
 
     def test_marker_expansion_is_exact_and_raw_body_is_verbatim(self):
         records = {record["id"]: record for record in self.records}

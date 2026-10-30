@@ -31,7 +31,12 @@ from typing import Any
 
 from fastapi import FastAPI, Request
 from fastapi.exceptions import RequestValidationError
-from fastapi.responses import HTMLResponse, JSONResponse, Response
+from fastapi.responses import (
+    HTMLResponse,
+    JSONResponse,
+    Response,
+    StreamingResponse,
+)
 from starlette.exceptions import HTTPException as StarletteHTTPException
 
 from .admin_page import ADMIN_SECURITY_HEADERS, admin_html
@@ -1699,6 +1704,37 @@ def make_app(
             "messages": [{"role": "user", "content": prompt}],
         }
 
+    def _v1_chat_body(
+        state: dict[str, Any], body: dict[str, Any]
+    ) -> dict[str, Any]:
+        """Accept OpenAI streaming/sampling fields for the ``/v1`` route only.
+
+        ``Gateway._validate`` stays strict: this adapter strips the fields it
+        explicitly supports and leaves every other key (``tools``, content
+        arrays, unknown fields) for the gateway to reject.  ``temperature`` and
+        ``top_p`` are validated and discarded, never forwarded upstream.
+        """
+        accepted = dict(body)
+        if accepted.get("stream") is True:
+            state["streaming"] = True
+            del accepted["stream"]
+            if "stream_options" in accepted:
+                if not isinstance(accepted["stream_options"], dict):
+                    raise _ChatBodyError()
+                del accepted["stream_options"]
+        for key, upper in (("temperature", 2), ("top_p", 1)):
+            if key not in accepted:
+                continue
+            value = accepted[key]
+            if (
+                isinstance(value, bool)
+                or not isinstance(value, (int, float))
+                or not 0 <= value <= upper
+            ):
+                raise _ChatBodyError()
+            del accepted[key]
+        return accepted
+
     async def _serve_chat(
         request: Request,
         *,
@@ -1815,10 +1851,59 @@ def make_app(
 
     @app.post("/v1/chat/completions")
     async def chat_completions(request: Request):
+        state: dict[str, Any] = {}
         status, payload = await _serve_chat(
             request,
-            body_builder=lambda body: body,
+            body_builder=lambda body: _v1_chat_body(state, body),
         )
+        if state.get("streaming") and status == 200:
+            # The single guarded completion has already released this content:
+            # the output guard and terminal audit finished before these events
+            # exist.  Nothing is read or masked again here.
+            content: Any = ""
+            choices = payload.get("choices")
+            if isinstance(choices, list) and choices:
+                first = choices[0]
+                if isinstance(first, dict):
+                    message = first.get("message")
+                    if isinstance(message, dict):
+                        content = message.get("content", "")
+            if not isinstance(content, str):
+                content = ""
+            created = int(time.time())
+            envelope = {
+                "id": payload.get("id"),
+                "object": "chat.completion.chunk",
+                "created": created,
+                "model": payload.get("model"),
+            }
+            opening = {
+                **envelope,
+                "choices": [
+                    {
+                        "index": 0,
+                        "delta": {"role": "assistant", "content": content},
+                        "finish_reason": None,
+                    }
+                ],
+            }
+            closing = {
+                **envelope,
+                "choices": [
+                    {"index": 0, "delta": {}, "finish_reason": "stop"}
+                ],
+            }
+
+            def events():
+                yield "data: " + json.dumps(opening) + "\n\n"
+                yield "data: " + json.dumps(closing) + "\n\n"
+                yield "data: [DONE]\n\n"
+
+            return StreamingResponse(
+                events(),
+                media_type="text/event-stream",
+                headers={"Cache-Control": "no-cache"},
+            )
         return JSONResponse(payload, status_code=status)
 
     @app.post("/chat")

@@ -533,7 +533,7 @@ class EnforcementIntegrationTests(unittest.TestCase):
             ),
             (
                 "unknown_field",
-                {**base, "temperature": 0},
+                {**base, "seed": 1},
                 None,
                 400,
                 "INVALID_REQUEST",
@@ -552,15 +552,6 @@ class EnforcementIntegrationTests(unittest.TestCase):
             (
                 "policy_override",
                 {**base, "token_budget": 1},
-                None,
-                400,
-                "INVALID_REQUEST",
-                None,
-                None,
-            ),
-            (
-                "stream_unsupported",
-                {**base, "stream": True},
                 None,
                 400,
                 "INVALID_REQUEST",

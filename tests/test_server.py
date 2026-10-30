@@ -304,7 +304,7 @@ class StrictRequestTests(ServerTestBase):
             {"model": "not-the-alias", "messages": JSON_BODY["messages"]},
             {"model": "pilot-local", "messages": []},
             {"model": "pilot-local", "messages": [{"role": "user", "content": 5}]},
-            {"model": "pilot-local", "messages": [{"role": "user", "content": "hi"}], "stream": True},
+            {"model": "pilot-local", "messages": [{"role": "user", "content": "hi"}], "stream_options": {}},
         ]
         for body in cases:
             with self.subTest(body=body):

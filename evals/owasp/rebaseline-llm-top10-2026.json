@@ -211,14 +211,14 @@
       "id": "LLM06-004",
       "expect_status": 400,
       "expect_code": "INVALID_REQUEST",
-      "product_limit": "request_schema_validation (Gateway._validate: stream must be absent or false)",
-      "holds_under_product_default": true,
+      "product_limit": "server /v1/chat/completions one-shot SSE (E6): stream: true is served after the full guarded completion",
+      "holds_under_product_default": false,
       "counter_dependent": false,
       "budget_dependent": false,
       "requires_raw_body": false,
-      "observed_status": 400,
-      "observed_code": "INVALID_REQUEST",
-      "reason": "stream: true is rejected by the request shape check with the generic 400; the gateway does not stream."
+      "observed_status": 200,
+      "observed_code": null,
+      "reason": "stream: true is now accepted for OpenAI-compatible agent clients; the gateway still runs one bounded, fully guarded and audited completion and emits it as a single SSE content chunk, a stop chunk and [DONE] only after the output guard. Blocks and errors stay JSON. The authored 400 no longer reproduces."
     },
     {
       "id": "LLM06-005",

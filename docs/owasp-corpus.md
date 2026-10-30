@@ -117,7 +117,7 @@ the guard-API, hosted-guard and test-mode adapters.
 | LLM04-006 | 400 INVALID_REQUEST | `request_schema_validation`, unknown top-level `metadata` | Yes | Caller metadata cannot redirect generation. |
 | LLM06-002 | 400 INVALID_REQUEST | `limits.context_messages` (32) - **no limit fires** | **No** | The 17 messages exist only in `$raw_body`; the structured record has 16 because the schema caps at 16. The product admits 1..32 messages, so the verbatim body returns **200**. The authored 16-message bound no longer exists. |
 | LLM06-003 | 413 INPUT_LIMIT | `limits.context_budget` (8192) as `input_limit` | Yes, needs `$raw_body_repeat` | The 64512-byte content serializes to 64518 characters, over the budget. The 65 KiB branch produces a 65607-byte body, over the 65536-byte body limit, and also returns 413. |
-| LLM06-004 | 400 INVALID_REQUEST | `request_schema_validation`, `stream` must be absent or false | Yes | Streaming is unsupported. |
+| LLM06-004 | 400 INVALID_REQUEST | `/v1/chat/completions` one-shot SSE (E6) - **no 400 fires** | **No** | `stream: true` is accepted for OpenAI-compatible agent clients and returns **200** one-shot SSE after the full guarded, audited completion: one content chunk, a stop chunk and `[DONE]`, emitted only after the output guard. Blocks and errors stay JSON. The authored 400 no longer reproduces. |
 | LLM06-005 | 400 INVALID_REQUEST | `request_schema_validation`, unknown top-level `n` | Yes | One completion is always returned. |
 | LLM06-006 | 400 INVALID_REQUEST | `limits.max_reply_tokens` (4096) | Yes | Still 400, but because 100000 exceeds 4096, not the authored 256. Values in 257..4096 are now accepted. |
 | LLM06-007 | 413 INPUT_LIMIT | `Policy.token_budget` (512 units) | Yes, counter-dependent | Same mechanism as LLM01-019: 4097 characters clear the character budget and 4101 units exceed the token budget. A word counter returns 200. |
@@ -127,9 +127,10 @@ the guard-API, hosted-guard and test-mode adapters.
 | LLM06-011 | 413 INPUT_LIMIT | `Policy.token_budget` (512 units) | Yes, budget-dependent | 3509 conservative units and 561 words both exceed 512, so the counter does not change the outcome; a configured budget of 3509 units or more would return 200. |
 | LLM06-012 | 413 INPUT_LIMIT | Server body limit (65536 bytes) | Yes, needs `$raw_body_repeat` | A 1048647-byte body is refused before parsing. |
 
-`LLM06-002` is the only deterministic row whose expected outcome no longer
-reproduces. The corpus is frozen, so this job records the drift instead of
-editing the payload; the workbook and manifest must not be regenerated here.
+`LLM06-002` and `LLM06-004` are the only deterministic rows whose expected
+outcome no longer reproduces. The corpus is frozen, so this job records the
+drift instead of editing the payload; the workbook and manifest must not be
+regenerated here.
 
 ### The inverse class: expect-200 rows that do not return 200
 
