@@ -465,16 +465,34 @@ class EnvWriterTests(unittest.TestCase):
 
     def test_guarded_env_rewrites_policy_and_model_paths(self) -> None:
         install.write_guarded_compose_env(
-            self.state, self.project, "/old/policy.yaml", "/old/pg", "/old/lg"
+            self.state, self.project, "/old/policy.yaml", "/old/pg", "/old/lg", "/old/qg"
         )
         path = install.write_guarded_compose_env(
-            self.state, self.project, "/new/policy.yaml", "/new/pg", "/new/lg"
+            self.state, self.project, "/new/policy.yaml", "/new/pg", "/new/lg", "/new/qg"
         )
         text = path.read_text(encoding="utf-8")
         self.assertIn("PILOT_POLICY_FILE='/new/policy.yaml'", text)
         self.assertIn("PILOT_PROMPT_GUARD_MODEL_DIR='/new/pg'", text)
         self.assertIn("PILOT_LLAMA_GUARD_MODEL_DIR='/new/lg'", text)
+        self.assertIn("PILOT_QWEN_GUARD_MODEL_DIR='/new/qg'", text)
         self.assertNotIn("/old/", text)
+
+    def test_guarded_env_carries_qwen_and_reply_pilot_values(self) -> None:
+        path = install.write_guarded_compose_env(
+            self.state, self.project, "/p.yaml", "/pg", "/lg", "/qg"
+        )
+        text = path.read_text(encoding="utf-8")
+        for line in (
+            "PILOT_QWEN_GUARD_MODEL_CONTAINER_DIR='/models/qwen3guard-gen-0.6b'",
+            "NASI_LEMAK_QWEN3GUARD_INPUT_THRESHOLD='0.5'",
+            "NASI_LEMAK_QWEN3GUARD_OUTPUT_THRESHOLD='0.5'",
+            "NASI_LEMAK_QWEN3GUARD_WORKERS='1'",
+            "NASI_LEMAK_QWEN3GUARD_THREADS='4'",
+            "NASI_LEMAK_CHAT_DEFAULT_REPLY_TOKENS='384'",
+            "NASI_LEMAK_GENERATION_SYSTEM_PROMPT='Answer concisely, in at most about "
+            "200 words, unless the user asks for more detail.'",
+        ):
+            self.assertIn(line, text)
 
     def test_fresh_test_policy_readable_by_runtime_but_credentials_protected(self) -> None:
         policy = install.write_test_policy(self.project)
@@ -667,6 +685,7 @@ class ModeValidationTests(unittest.TestCase):
             "policy_file": None,
             "prompt_guard_dir": None,
             "llama_guard_dir": None,
+            "qwen_guard_dir": None,
             "interactive": False,
             "ack_test_unguarded": False,
             "allow_insecure_http": False,
@@ -687,6 +706,44 @@ class ModeValidationTests(unittest.TestCase):
                 prompt_guard_dir=str(self.project / "missing-pg"),
                 llama_guard_dir=str(self.project / "missing-lg"),
             ).plan()
+
+    def test_guarded_local_mode_requires_qwen_guard_dir(self) -> None:
+        policy, prompt_dir, llama_dir = self._guarded_paths()
+        with self.assertRaises(ValidationError) as ctx:
+            self._installer(
+                mode="guarded",
+                policy_file=policy,
+                prompt_guard_dir=prompt_dir,
+                llama_guard_dir=llama_dir,
+            )
+        self.assertIn("--qwen-guard-dir", str(ctx.exception))
+        with self.assertRaises(InstallError):
+            self._installer(
+                mode="guarded",
+                policy_file=policy,
+                prompt_guard_dir=prompt_dir,
+                llama_guard_dir=llama_dir,
+                qwen_guard_dir=str(self.project / "missing-qg"),
+            ).plan()
+
+    def test_guarded_plan_previews_qwen_and_reply_budget(self) -> None:
+        policy, prompt_dir, llama_dir = self._guarded_paths()
+        inst = self._installer(
+            mode="guarded",
+            policy_file=policy,
+            prompt_guard_dir=prompt_dir,
+            llama_guard_dir=llama_dir,
+            qwen_guard_dir=str(self.project / "qwen_guard"),
+        )
+        out = io.StringIO()
+        with redirect_stdout(out):
+            self.assertEqual(inst.plan(), 0)
+        self.assertIn("Qwen3Guard dir:", out.getvalue())
+        self.assertIn("Reply budget:      384 tokens", out.getvalue())
+
+    def test_parser_accepts_qwen_guard_dir(self) -> None:
+        args = install.build_parser().parse_args(["--qwen-guard-dir", "/models/qg"])
+        self.assertEqual(args.qwen_guard_dir, "/models/qg")
 
     def test_install_requires_ack_in_non_interactive_use(self) -> None:
         inst = self._installer(mode="test")
@@ -761,6 +818,7 @@ class ModeValidationTests(unittest.TestCase):
         llama_dir = self.project / "llama_guard"
         prompt_dir.mkdir(exist_ok=True)
         llama_dir.mkdir(exist_ok=True)
+        (self.project / "qwen_guard").mkdir(exist_ok=True)
         return str(policy), str(prompt_dir), str(llama_dir)
 
     def test_read_only_check_and_plan_do_not_repair_permissions(self) -> None:
@@ -770,6 +828,7 @@ class ModeValidationTests(unittest.TestCase):
             policy_file=policy,
             prompt_guard_dir=prompt_dir,
             llama_guard_dir=llama_dir,
+            qwen_guard_dir=str(self.project / "qwen_guard"),
         )
         before_chmod = list(self.ops.chmod_calls)
         before_chown = list(self.ops.chown_calls)
@@ -790,6 +849,7 @@ class ModeValidationTests(unittest.TestCase):
             policy_file=policy,
             prompt_guard_dir=prompt_dir,
             llama_guard_dir=llama_dir,
+            qwen_guard_dir=str(self.project / "qwen_guard"),
         )
         before_chmod = list(self.ops.chmod_calls)
         before_chown = list(self.ops.chown_calls)
@@ -814,6 +874,7 @@ class ModeValidationTests(unittest.TestCase):
             policy_file=policy,
             prompt_guard_dir=prompt_dir,
             llama_guard_dir=llama_dir,
+            qwen_guard_dir=str(self.project / "qwen_guard"),
             interactive=True,
             prompt_fn=lambda _: "no",
         )
@@ -894,6 +955,7 @@ class InstallFlowTests(unittest.TestCase):
             "policy_file": None,
             "prompt_guard_dir": None,
             "llama_guard_dir": None,
+            "qwen_guard_dir": str(self.project / "qwen_guard"),
             "interactive": True,
             "ack_test_unguarded": True,
             "allow_insecure_http": False,
@@ -989,6 +1051,7 @@ class InstallFlowTests(unittest.TestCase):
         (self.project / "policy.yaml").write_text("app_id: test\n", encoding="utf-8")
         (self.project / "prompt_guard").mkdir()
         (self.project / "llama_guard").mkdir()
+        (self.project / "qwen_guard").mkdir()
         runner2 = FakeRunner()
         runner2.add(["docker", "version"], CommandResult(0, "", ""))
         runner2.add(["docker", "compose", "version"], CommandResult(0, "", ""))
@@ -1068,6 +1131,7 @@ class InstallFlowTests(unittest.TestCase):
         (self.project / "policy.yaml").write_text("app_id: test\n", encoding="utf-8")
         (self.project / "prompt_guard").mkdir()
         (self.project / "llama_guard").mkdir()
+        (self.project / "qwen_guard").mkdir()
         runner2 = FakeRunner()
         runner2.add(["docker", "version"], CommandResult(0, "", ""))
         runner2.add(["docker", "compose", "version"], CommandResult(0, "", ""))

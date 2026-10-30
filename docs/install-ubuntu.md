@@ -372,13 +372,25 @@ sudo bash install.sh \
   --allow-insecure-http \
   --policy-file /absolute/path/policy.yaml \
   --prompt-guard-dir /absolute/path/prompt-guard-2 \
-  --llama-guard-dir /absolute/path/llama-guard-3
+  --llama-guard-dir /absolute/path/llama-guard-3 \
+  --qwen-guard-dir /absolute/path/qwen3guard-gen-0.6b
 ```
 
-The run is still interactive. The Prompt Guard 2 and Llama Guard 3 checkpoints
-are Meta models that the operator must obtain and license independently; the
-installer and images do not download weights and no arbitrary plugin support is
-implied. The same generation URL and existing keys are reused.
+The run is still interactive. Qwen3Guard-Gen-0.6B is the active guard for both
+the input and the output scan; the pilot overlay (`compose.pilot.yaml`) still
+mounts the Meta directories alongside it, so all three paths are required. The
+Prompt Guard 2, Llama Guard 3 and Qwen3Guard checkpoints must be obtained and
+licensed by the operator independently; the installer and images do not
+download weights and no arbitrary plugin support is implied. The same
+generation URL and existing keys are reused.
+
+The generated `.secrets/compose.pilot.env` also carries the pilot values
+measured on the 4-vCPU guard VM (see
+[the 2026-10-29 RCA](rca-2026-10-29-generation-truncation-503.md)): one Qwen3Guard
+worker with four threads, thresholds of 0.5, a default reply budget of 384
+tokens and a concise-answer instruction for the generation model. Edit that
+file and recreate the gateway to change them; a later installer rerun rewrites
+it from these defaults.
 
 A normal `git pull --ff-only` followed by a mode-matching rebuild keeps
 `.secrets/`, the operator policy and the database volume. It does not require a

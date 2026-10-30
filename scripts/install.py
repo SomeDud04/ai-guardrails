@@ -912,12 +912,28 @@ def write_test_compose_env(state_dir: Path, project_dir: Path) -> Path:
     return env_path
 
 
+# compose.pilot.yaml mounts Qwen3Guard-Gen at this fixed container directory and
+# runs it as the active guard; the Meta directories stay mounted alongside.
+QWEN_GUARD_CONTAINER_DIR = "/models/qwen3guard-gen-0.6b"
+# Pilot values measured on the 4-vCPU guard VM (docs/rca-2026-10-29-generation-
+# truncation-503.md): one guard worker with four threads, and replies short
+# enough for the CPU output scan to finish inside the work deadline.
+PILOT_QWEN_THRESHOLD = "0.5"
+PILOT_QWEN_WORKERS = "1"
+PILOT_QWEN_THREADS = "4"
+PILOT_DEFAULT_REPLY_TOKENS = "384"
+PILOT_GENERATION_SYSTEM_PROMPT = (
+    "Answer concisely, in at most about 200 words, unless the user asks for more detail."
+)
+
+
 def write_guarded_compose_env(
     state_dir: Path,
     project_dir: Path,
     policy_file: str,
     prompt_guard_dir: str,
     llama_guard_dir: str,
+    qwen_guard_dir: str,
 ) -> Path:
     env_path = state_dir / "compose.pilot.env"
     lines = [
@@ -925,6 +941,14 @@ def write_guarded_compose_env(
         _env_line("PILOT_POLICY_FILE", policy_file),
         _env_line("PILOT_PROMPT_GUARD_MODEL_DIR", prompt_guard_dir),
         _env_line("PILOT_LLAMA_GUARD_MODEL_DIR", llama_guard_dir),
+        _env_line("PILOT_QWEN_GUARD_MODEL_DIR", qwen_guard_dir),
+        _env_line("PILOT_QWEN_GUARD_MODEL_CONTAINER_DIR", QWEN_GUARD_CONTAINER_DIR),
+        _env_line("NASI_LEMAK_QWEN3GUARD_INPUT_THRESHOLD", PILOT_QWEN_THRESHOLD),
+        _env_line("NASI_LEMAK_QWEN3GUARD_OUTPUT_THRESHOLD", PILOT_QWEN_THRESHOLD),
+        _env_line("NASI_LEMAK_QWEN3GUARD_WORKERS", PILOT_QWEN_WORKERS),
+        _env_line("NASI_LEMAK_QWEN3GUARD_THREADS", PILOT_QWEN_THREADS),
+        _env_line("NASI_LEMAK_CHAT_DEFAULT_REPLY_TOKENS", PILOT_DEFAULT_REPLY_TOKENS),
+        _env_line("NASI_LEMAK_GENERATION_SYSTEM_PROMPT", PILOT_GENERATION_SYSTEM_PROMPT),
         _env_line("NASI_LEMAK_PROMPT_GUARD_THRESHOLD", "0.5"),
         _env_line("NASI_LEMAK_LLAMA_GUARD_CONTEXT_LIMIT", "4096"),
         _env_line("GUARD_MEM_LIMIT", "8g"),
@@ -2185,6 +2209,7 @@ class Installer:
         prompt_guard_dir: str | None,
         llama_guard_dir: str | None,
         interactive: bool,
+        qwen_guard_dir: str | None = None,
         ack_test_unguarded: bool,
         allow_insecure_http: bool,
         runner: CommandRunner,
@@ -2211,6 +2236,7 @@ class Installer:
         self.policy_file = _absolute_project_path(project_dir, policy_file)
         self.prompt_guard_dir = _absolute_project_path(project_dir, prompt_guard_dir)
         self.llama_guard_dir = _absolute_project_path(project_dir, llama_guard_dir)
+        self.qwen_guard_dir = _absolute_project_path(project_dir, qwen_guard_dir)
         self.interactive = interactive
         self.ack_test_unguarded = ack_test_unguarded
         self.allow_insecure_http = allow_insecure_http
@@ -2244,6 +2270,8 @@ class Installer:
                     raise ValidationError("guarded mode requires --prompt-guard-dir")
                 if not self.llama_guard_dir:
                     raise ValidationError("guarded mode requires --llama-guard-dir")
+                if not self.qwen_guard_dir:
+                    raise ValidationError("guarded mode requires --qwen-guard-dir")
         elif guard_api_config is not None or self.guard_backend != GUARD_BACKEND_LOCAL:
             raise ValidationError(
                 "--guard-backend api and --guard-api-config require guarded mode"
@@ -2291,6 +2319,8 @@ class Installer:
             raise InstallError("prompt guard model directory is not available")
         if not self.llama_guard_dir or not Path(self.llama_guard_dir).is_dir():
             raise InstallError("llama guard model directory is not available")
+        if not self.qwen_guard_dir or not Path(self.qwen_guard_dir).is_dir():
+            raise InstallError("qwen3guard model directory is not available")
 
     def _require_generation_settings(self) -> None:
         """Mutating installs require explicit upstream URL and exact model ID.
@@ -2346,6 +2376,15 @@ class Installer:
             else:
                 lines.append(f"  Prompt Guard dir:  {self.prompt_guard_dir}")
                 lines.append(f"  Llama Guard dir:   {self.llama_guard_dir}")
+                lines.append(f"  Qwen3Guard dir:    {self.qwen_guard_dir} (active guard)")
+                lines.append(
+                    f"  Qwen3Guard budget: {PILOT_QWEN_WORKERS} worker x "
+                    f"{PILOT_QWEN_THREADS} threads, threshold {PILOT_QWEN_THRESHOLD}"
+                )
+                lines.append(
+                    f"  Reply budget:      {PILOT_DEFAULT_REPLY_TOKENS} tokens "
+                    "with a concise-answer instruction"
+                )
         lines.append("  Config is rewritten from the values above on every mutating run.")
 
         lines.extend([
@@ -2486,6 +2525,7 @@ class Installer:
                     self.policy_file or "",
                     self.prompt_guard_dir or "",
                     self.llama_guard_dir or "",
+                    self.qwen_guard_dir or "",
                 )
                 compose_files = [
                     str(self.project_dir / "compose.yaml"),
@@ -2675,6 +2715,10 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--prompt-guard-dir", help="local Prompt Guard 2 directory (guarded mode)")
     parser.add_argument("--llama-guard-dir", help="local Llama Guard 3 directory (guarded mode)")
     parser.add_argument(
+        "--qwen-guard-dir",
+        help="local Qwen3Guard-Gen-0.6B directory, the active guard (guarded mode)",
+    )
+    parser.add_argument(
         "--ack-test-unguarded", action="store_true",
         help="acknowledge inactive guards in test mode",
     )
@@ -2698,7 +2742,8 @@ def _interactive_guarded_prompt(
     policy_file: str | None,
     prompt_guard_dir: str | None,
     llama_guard_dir: str | None,
-) -> tuple[str, str, str]:
+    qwen_guard_dir: str | None,
+) -> tuple[str, str, str, str]:
     """Prompt for guarded paths before constructor validation."""
     print()
     policy = input(f"Approved policy file [{policy_file or 'required'}]: ").strip()
@@ -2707,18 +2752,23 @@ def _interactive_guarded_prompt(
     prompt_dir = prompt_dir or (prompt_guard_dir or "")
     llama_dir = input(f"Llama Guard 3 directory [{llama_guard_dir or 'required'}]: ").strip()
     llama_dir = llama_dir or (llama_guard_dir or "")
+    qwen_dir = input(
+        f"Qwen3Guard-Gen-0.6B directory [{qwen_guard_dir or 'required'}]: "
+    ).strip()
+    qwen_dir = qwen_dir or (qwen_guard_dir or "")
     missing = [
         label
         for label, value in (
             ("--policy-file", policy),
             ("--prompt-guard-dir", prompt_dir),
             ("--llama-guard-dir", llama_dir),
+            ("--qwen-guard-dir", qwen_dir),
         )
         if not value
     ]
     if missing:
         raise InstallError("guarded mode requires " + ", ".join(missing))
-    return policy, prompt_dir, llama_dir
+    return policy, prompt_dir, llama_dir, qwen_dir
 
 
 
@@ -2780,8 +2830,14 @@ def main(argv: list[str] | None = None) -> int:
                         args.policy_file,
                         args.prompt_guard_dir,
                         args.llama_guard_dir,
+                        args.qwen_guard_dir,
                     )
-                    args.policy_file, args.prompt_guard_dir, args.llama_guard_dir = guarded_paths
+                    (
+                        args.policy_file,
+                        args.prompt_guard_dir,
+                        args.llama_guard_dir,
+                        args.qwen_guard_dir,
+                    ) = guarded_paths
             generation_url, generation_model = _interactive_prompt(
                 generation_url or "", generation_model or ""
             )
@@ -2808,6 +2864,7 @@ def main(argv: list[str] | None = None) -> int:
             policy_file=args.policy_file,
             prompt_guard_dir=args.prompt_guard_dir,
             llama_guard_dir=args.llama_guard_dir,
+            qwen_guard_dir=args.qwen_guard_dir,
             interactive=interactive,
             ack_test_unguarded=args.ack_test_unguarded,
             allow_insecure_http=allow_insecure,
