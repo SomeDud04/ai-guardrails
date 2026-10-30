@@ -5,9 +5,11 @@ runtime gateway.  ``mask_text`` is the production masking path and
 ``find_redactions`` exposes the same spans to the offline evaluator, so the
 evaluation cannot drift from the gateway with a cloned regex.
 
-The recognizers are deliberately narrow ASCII structured-format heuristics.
-They do not validate identity documents, phone reachability or email
-deliverability, and they do not detect semantic PII in free text.
+The recognizers are deliberately narrow structured-format heuristics.  They
+also accept a small reviewed set of Unicode dash/space separators in MyKad and
+phone groupings, but they do not validate identity documents, phone
+reachability or email deliverability, and they do not detect semantic PII in
+free text.
 
 ``POSTAL_ADDRESS`` recognises two bounded Malaysian single-line address shapes.
 The first requires a house/unit number, a Jalan/Jln, Lorong/Lrg, Persiaran or
@@ -37,8 +39,48 @@ MASK_TOKENS = {
 # Narrow reviewed repair: a period may terminate a sentence, but it may not
 # continue a domain/hyphenated suffix or start a double-dot suffix.
 _EMAIL = re.compile(r"(?<![\w.+-])[A-Z0-9._%+-]+@[A-Z0-9.-]+\.[A-Z]{2,}(?![\w-]|\.[\w.-])", re.I)
-_PHONE = re.compile(r"(?<!\w)(?:\+?60[ -]?|0)1[0-9](?:[ -]?\d){7,8}(?!\w)")
-_MYKAD = re.compile(r"(?<!\d)\d{6}-?\d{2}-?\d{4}(?!\d)")
+
+# Structural group separators.  MyKad groups accept exactly zero or one of the
+# reviewed dash/space variants; phone groups additionally accept a period
+# (``012.345.6789``) and an en dash.  Keeping the sets here preserves the
+# single-source-of-truth contract for the gateway and offline evaluator.
+_MYKAD_SEP = r"[ \u2013\u2014\u2212\u2011-]"
+_PHONE_SEP = r"[ .\u2013-]"
+
+# Optional Malaysian country code (the leading local zero is omitted) or the
+# local leading zero.
+_PHONE_CODE = rf"(?:\+?60{_PHONE_SEP}?|0)"
+
+
+def _phone_with_brackets(body: str) -> str:
+    """Allow one paired set of brackets around a phone prefix/area code."""
+
+    return rf"(?:\({body}\)|{body})"
+
+
+_PHONE_MOBILE = (
+    _phone_with_brackets(rf"{_PHONE_CODE}1\d")
+    + rf"(?:{_PHONE_SEP}?\d){{7,8}}"
+)
+# Full national landline lengths: 03 + 8 digits, 04/05/06/07/09 + 7 digits and
+# 08x + 6 digits.  The country-code forms use the same subscriber counts
+# without the leading zero.
+_PHONE_LANDLINE = "|".join(
+    _phone_with_brackets(rf"{_PHONE_CODE}{area}")
+    + rf"(?:{_PHONE_SEP}?\d){{{digits}}}"
+    for area, digits in (("3", 8), ("[45679]", 7), (r"8\d", 6))
+)
+# A hyphen-prefixed identifier such as ``INV-0312345678`` is not a landline, so
+# that boundary also rejects a preceding hyphen.  Mobile numbers keep the plain
+# word boundary: ``HP-012-345 6789`` must stay masked.  A trailing period followed
+# by a digit is left to a larger numeric literal (for example a decimal), and the
+# right word boundary prevents matching inside a longer run.
+_PHONE = re.compile(
+    rf"(?:(?<!\w)(?:{_PHONE_MOBILE})|(?<![\w-])(?:{_PHONE_LANDLINE}))(?!\w)(?!\.\d)"
+)
+_MYKAD = re.compile(
+    rf"(?<!\d)\d{{6}}{_MYKAD_SEP}?\d{{2}}{_MYKAD_SEP}?\d{{4}}(?!\d)"
+)
 
 # Postcode-bearing bounded Malaysian single-line address shape.  It requires a
 # house/unit number, a street keyword and a five-digit postcode, so bare
