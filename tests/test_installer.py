@@ -489,6 +489,9 @@ class EnvWriterTests(unittest.TestCase):
             "NASI_LEMAK_QWEN3GUARD_WORKERS='1'",
             "NASI_LEMAK_QWEN3GUARD_THREADS='4'",
             "NASI_LEMAK_CHAT_DEFAULT_REPLY_TOKENS='384'",
+            "NASI_LEMAK_CHAT_MAX_REPLY_TOKENS='512'",
+            "NASI_LEMAK_CHAT_CONTEXT_BUDGET='3000'",
+            "NASI_LEMAK_CHAT_MAX_CONCURRENCY='1'",
             "NASI_LEMAK_GENERATION_SYSTEM_PROMPT='Answer concisely, in at most about "
             "200 words, unless the user asks for more detail.'",
         ):

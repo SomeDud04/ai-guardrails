@@ -388,9 +388,12 @@ The generated `.secrets/compose.pilot.env` also carries the pilot values
 measured on the 4-vCPU guard VM (see
 [the 2026-10-29 RCA](rca-2026-10-29-generation-truncation-503.md)): one Qwen3Guard
 worker with four threads, thresholds of 0.5, a default reply budget of 384
-tokens and a concise-answer instruction for the generation model. Edit that
-file and recreate the gateway to change them; a later installer rerun rewrites
-it from these defaults.
+tokens with a 512-token maximum, a concise-answer instruction for the generation
+model, a 3000-unit context budget and one chat request at a time. A second
+simultaneous request gets an immediate 503 instead of queueing. Edit that file
+and run `up -d --force-recreate gateway` to change them, because a plain `up -d`
+may keep the running container; a later installer rerun rewrites it from these
+defaults.
 
 A normal `git pull --ff-only` followed by a mode-matching rebuild keeps
 `.secrets/`, the operator policy and the database volume. It does not require a

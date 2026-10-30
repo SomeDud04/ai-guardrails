@@ -922,6 +922,12 @@ PILOT_QWEN_THRESHOLD = "0.5"
 PILOT_QWEN_WORKERS = "1"
 PILOT_QWEN_THREADS = "4"
 PILOT_DEFAULT_REPLY_TOKENS = "384"
+PILOT_MAX_REPLY_TOKENS = "512"
+# The guard scans the whole selected history, so the history is bounded too: on
+# 4 vCPU a full 8192-unit context would pass the 60 s work deadline.
+PILOT_CONTEXT_BUDGET = "3000"
+# One guard worker serves one scan at a time.  Admitting more only queues them.
+PILOT_MAX_CONCURRENCY = "1"
 PILOT_GENERATION_SYSTEM_PROMPT = (
     "Answer concisely, in at most about 200 words, unless the user asks for more detail."
 )
@@ -948,6 +954,9 @@ def write_guarded_compose_env(
         _env_line("NASI_LEMAK_QWEN3GUARD_WORKERS", PILOT_QWEN_WORKERS),
         _env_line("NASI_LEMAK_QWEN3GUARD_THREADS", PILOT_QWEN_THREADS),
         _env_line("NASI_LEMAK_CHAT_DEFAULT_REPLY_TOKENS", PILOT_DEFAULT_REPLY_TOKENS),
+        _env_line("NASI_LEMAK_CHAT_MAX_REPLY_TOKENS", PILOT_MAX_REPLY_TOKENS),
+        _env_line("NASI_LEMAK_CHAT_CONTEXT_BUDGET", PILOT_CONTEXT_BUDGET),
+        _env_line("NASI_LEMAK_CHAT_MAX_CONCURRENCY", PILOT_MAX_CONCURRENCY),
         _env_line("NASI_LEMAK_GENERATION_SYSTEM_PROMPT", PILOT_GENERATION_SYSTEM_PROMPT),
         _env_line("NASI_LEMAK_PROMPT_GUARD_THRESHOLD", "0.5"),
         _env_line("NASI_LEMAK_LLAMA_GUARD_CONTEXT_LIMIT", "4096"),
@@ -2387,6 +2396,11 @@ class Installer:
                 lines.append(
                     f"  Reply budget:      {PILOT_DEFAULT_REPLY_TOKENS} tokens "
                     "with a concise-answer instruction"
+                )
+                lines.append(
+                    f"  Chat bounds:       max {PILOT_MAX_REPLY_TOKENS} reply tokens, "
+                    f"context {PILOT_CONTEXT_BUDGET}, "
+                    f"{PILOT_MAX_CONCURRENCY} request at a time"
                 )
         lines.append("  Config is rewritten from the values above on every mutating run.")
 
