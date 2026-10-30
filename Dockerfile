@@ -1,12 +1,18 @@
 # Nasi Lemak gateway image (multi-stage).
 #
 # Stage graph:
-#   base         runtime package with the tested ``server`` extra, fixed
+#   base         the tested ``server`` extra against a stub package, fixed
 #                non-root identity 10001:10001
 #   guards-deps  adds only the existing pinned ``guards`` extra (needs root pip)
-#   guards       opt-in guard-enabled runtime image; selected explicitly with
-#                ``docker build --target guards`` or the pilot Compose overlay
-#   server       default final stage: server extra only, no ML dependencies
+#   guards       opt-in guard-enabled runtime image with the real package;
+#                selected explicitly with ``docker build --target guards`` or
+#                the pilot Compose overlay
+#   server       default final stage: server extra and the real package, no ML
+#                dependencies
+#
+# The real ``nasi_lemak`` source is copied only into the two final stages.  A
+# code change therefore keeps every dependency layer, and only a change to
+# ``pyproject.toml`` downloads the wheels again.
 #
 # A plain ``docker build .`` or the default ``compose.yaml`` builds only the
 # final ``server`` stage.  The optional ML wheels are therefore not downloaded
@@ -27,6 +33,7 @@ ENV PYTHONDONTWRITEBYTECODE=1 \
     PYTHONUNBUFFERED=1 \
     PIP_DISABLE_PIP_VERSION_CHECK=1 \
     PIP_NO_CACHE_DIR=1 \
+    PIP_DEFAULT_TIMEOUT=120 \
     HF_HUB_OFFLINE=1 \
     TRANSFORMERS_OFFLINE=1 \
     HF_DATASETS_OFFLINE=1
@@ -41,11 +48,12 @@ WORKDIR /app
 # Explicit, minimal copies.  Never copy the whole workspace (tests, docs,
 # routing state, virtualenv, local secrets or database files).
 COPY --chown=10001:10001 pyproject.toml ./
-COPY --chown=10001:10001 nasi_lemak ./nasi_lemak
 
 # Installed while the base build stage is still root; the runtime stages below
-# drop back to UID/GID 10001.
-RUN python -m pip install --no-cache-dir --no-compile ".[server]"
+# drop back to UID/GID 10001.  The stub is only there so pip can resolve the
+# extras from pyproject.toml; each final stage replaces it with the real source.
+RUN mkdir nasi_lemak && touch nasi_lemak/__init__.py && \
+    python -m pip install --no-cache-dir --no-compile ".[server]"
 
 # Runtime stages inherit this non-root identity.  Do not run application
 # processes as root.
@@ -59,16 +67,24 @@ USER 10001:10001
 # torch is installed FIRST from the official CPU-only wheel index.  The default
 # PyPI Linux wheel for the pinned version is the ~2.5 GB CUDA build, which is
 # useless on this CPU-only guard VM.  The extra is installed afterwards from
-# the default index so its exact pins (transformers, jinja2) are unchanged.
+# the default index so its exact pins (transformers, jinja2) are unchanged.  The
+# two installs are separate layers so a failed second download keeps torch.
 FROM base AS guards-deps
 
 USER root
 
 RUN python -m pip install --no-cache-dir --no-compile \
-        torch==2.14.1 --index-url https://download.pytorch.org/whl/cpu && \
-    python -m pip install --no-cache-dir --no-compile ".[guards]"
+        torch==2.14.1 --index-url https://download.pytorch.org/whl/cpu
+
+RUN python -m pip install --no-cache-dir --no-compile ".[guards]"
 
 FROM guards-deps AS guards
+
+# ``build`` must go first: it holds the stub, whose later timestamp would stop
+# setuptools copying the real ``__init__.py`` over it.
+COPY --chown=10001:10001 nasi_lemak ./nasi_lemak
+RUN rm -rf build ./*.egg-info && \
+    python -m pip install --no-cache-dir --no-compile --no-deps --force-reinstall .
 
 USER 10001:10001
 
@@ -82,6 +98,12 @@ ENTRYPOINT ["uvicorn", "nasi_lemak.server:app", "--host", "0.0.0.0", "--port", "
 # Default final stage.  Keeping ``server`` last means a plain build (and the
 # default Compose file) never pulls the optional ML dependencies.
 FROM base AS server
+
+USER root
+
+COPY --chown=10001:10001 nasi_lemak ./nasi_lemak
+RUN rm -rf build ./*.egg-info && \
+    python -m pip install --no-cache-dir --no-compile --no-deps --force-reinstall .
 
 USER 10001:10001
 

@@ -641,8 +641,26 @@ class DockerfileTests(unittest.TestCase):
         guard_runtime = "\n".join(self.stages["guards"])
         self.assertIn("USER root", deps)
         self.assertIn('".[guards]"', deps)
-        self.assertNotIn("pip install", guard_runtime)
+        self.assertIn("--no-deps", guard_runtime)
         self.assertIn("USER 10001:10001", guard_runtime)
+
+    def test_code_change_keeps_every_dependency_layer(self):
+        for stage in ("base", "guards-deps"):
+            self.assertNotIn("nasi_lemak ./nasi_lemak", "\n".join(self.stages[stage]))
+        for stage in ("guards", "server"):
+            with self.subTest(stage=stage):
+                body = "\n".join(self.stages[stage])
+                self.assertIn("COPY --chown=10001:10001 nasi_lemak ./nasi_lemak", body)
+                # A leftover stub in build/ would ship an empty package.
+                self.assertIn("rm -rf build ./*.egg-info", body)
+                self.assertIn("--no-deps --force-reinstall .", body)
+
+    def test_ml_wheel_downloads_survive_a_stall(self):
+        self.assertIn("PIP_DEFAULT_TIMEOUT=120", "\n".join(self.stages["base"]))
+        installs = [
+            line for line in self.stages["guards-deps"] if line.startswith("RUN ")
+        ]
+        self.assertEqual(len(installs), 2)
 
     def test_final_runtime_images_drop_to_non_root(self):
         for stage in ("guards", "server"):
@@ -653,17 +671,18 @@ class DockerfileTests(unittest.TestCase):
                 self.assertIn('"--no-access-log"', body)
 
     def test_minimal_copy_allowlist_has_no_workspace_wildcard(self):
-        copies = [
+        copies = {
             line.strip()
-            for line in self.stages["base"]
+            for lines in self.stages.values()
+            for line in lines
             if line.lstrip().upper().startswith("COPY ")
-        ]
+        }
         self.assertEqual(
             copies,
-            [
+            {
                 "COPY --chown=10001:10001 pyproject.toml ./",
                 "COPY --chown=10001:10001 nasi_lemak ./nasi_lemak",
-            ],
+            },
         )
         self.assertNotIn("COPY . .", self.text)
 
