@@ -765,7 +765,6 @@ class ConfigurationTests(ControlPlaneTestBase):
             True,
             "2",
             2.0,
-            None,
         ):
             with self.subTest(control=value):
                 app = make_app(gateway=gateway(), control_concurrency=value)
