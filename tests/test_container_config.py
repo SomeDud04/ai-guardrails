@@ -42,6 +42,11 @@ BASE_ENV_KEYS = {
     "NASI_LEMAK_CHAT_CONTEXT_BUDGET",
     "NASI_LEMAK_CHAT_DEFAULT_REPLY_TOKENS",
     "NASI_LEMAK_CHAT_MAX_REPLY_TOKENS",
+    "NASI_LEMAK_CHAT_WORK_TIMEOUT",
+    "NASI_LEMAK_CHAT_MAX_CONCURRENCY",
+    "NASI_LEMAK_CONTROL_CONCURRENCY",
+    "NASI_LEMAK_MAX_BODY_BYTES",
+    "NASI_LEMAK_BODY_READ_TIMEOUT",
 }
 
 CHAT_LIMIT_ENV_KEYS = {
@@ -49,6 +54,14 @@ CHAT_LIMIT_ENV_KEYS = {
     "NASI_LEMAK_CHAT_CONTEXT_BUDGET",
     "NASI_LEMAK_CHAT_DEFAULT_REPLY_TOKENS",
     "NASI_LEMAK_CHAT_MAX_REPLY_TOKENS",
+}
+
+OPERATIONAL_ENV_KEYS = {
+    "NASI_LEMAK_CHAT_WORK_TIMEOUT",
+    "NASI_LEMAK_CHAT_MAX_CONCURRENCY",
+    "NASI_LEMAK_CONTROL_CONCURRENCY",
+    "NASI_LEMAK_MAX_BODY_BYTES",
+    "NASI_LEMAK_BODY_READ_TIMEOUT",
 }
 
 OVERLAY_ENV_KEYS = {
@@ -233,6 +246,19 @@ class ComposeConfigTests(unittest.TestCase):
             "NASI_LEMAK_CHAT_DEFAULT_REPLY_TOKENS=1024", self.chat_limits_text
         )
         self.assertIn("NASI_LEMAK_CHAT_MAX_REPLY_TOKENS=4096", self.chat_limits_text)
+
+    def test_operational_bounds_are_bare_pass_throughs(self):
+        gateway = self.base["services"]["gateway"]
+        gateway_env = _environment_map(gateway["environment"])
+        for name in OPERATIONAL_ENV_KEYS:
+            with self.subTest(name=name):
+                self.assertEqual(gateway_env[name], "")
+                self.assertIn(f"- {name}\n", self.base_text)
+                self.assertNotIn(f"{name}=", self.base_text)
+                self.assertNotIn(f"{name}=", self.pilot_text)
+        # The pilot example documents the two conservative starting points.
+        self.assertIn("# NASI_LEMAK_CHAT_WORK_TIMEOUT=30", self.pilot_example)
+        self.assertIn("# NASI_LEMAK_CHAT_MAX_CONCURRENCY=1", self.pilot_example)
 
     def test_base_secrets_require_absolute_file_interpolation(self):
         expected = {"db_admin_password", "audit_dsn", "app_key_digest"}
