@@ -440,6 +440,12 @@ textarea:focus-visible { outline-offset: -2px; }
 .chat-block p { margin: 0 0 var(--space-1); }
 .chat-block p:last-child { margin-bottom: 0; }
 .message .chat-block { margin-top: var(--space-2); }
+.guardrail-details { display: flex; flex-wrap: wrap; align-items: center; gap: var(--space-1); margin-top: var(--space-2); color: var(--muted); font-size: .72rem; }
+.guardrail-label { color: var(--muted-dim); font-weight: 650; letter-spacing: .02em; }
+.guardrail-chip { display: inline-block; border: 1px solid var(--line-strong); border-radius: 999px; background: var(--surface-raised); color: var(--text-soft); padding: 0 8px; line-height: 1.6; }
+.guardrail-chip[data-state="blocked"] { border-color: var(--amber); color: var(--amber); }
+.guardrail-chip[data-state="masked"] { border-color: var(--amber-line); color: var(--amber); }
+.guardrail-chip[data-state="off"], .guardrail-chip[data-state="not_run"] { border-style: dashed; background: transparent; color: var(--muted); }
 .policy-summary { margin: var(--space-2) 0 0; max-width: 88ch; color: var(--muted); font-size: .74rem; overflow-wrap: anywhere; }
 @media (max-width: 900px) {
   .review-layout { grid-template-columns: minmax(200px, 280px) minmax(0, 1fr); }
@@ -702,6 +708,12 @@ _WORKSPACE_JS = """
   var signedIn = false;
   var profile = null;
   var drafts = Object.create(null);
+  // Per-turn guardrail summaries, keyed by request id.  They come only from the
+  // live turn response, so they are kept for this page session and never stored;
+  // a reloaded transcript shows the saved Blocked/Failed labels instead.
+  var GUARDRAIL_TURN_LIMIT = 200;
+  var guardrailTurns = Object.create(null);
+  var guardrailOrder = [];
   var chatLimits = null;
   var selectedReplyTokens = null;
   var authChannel = null;
@@ -956,6 +968,8 @@ _WORKSPACE_JS = """
     signedIn = false;
     profile = null;
     drafts = Object.create(null);
+    guardrailTurns = Object.create(null);
+    guardrailOrder = [];
     logoutExpectedUid = null;
     policySummarySeq += 1;
     baselinePending = false;
@@ -1056,6 +1070,7 @@ _WORKSPACE_JS = """
     catch (error) { /* another tab is not required */ }
   }
 
+  var GUARDRAIL_CHECKS = { safe: "Safe", blocked: "Blocked", off: "Off", not_run: "Not run" };
   var BLOCK_DETAILS = {
     INPUT_GUARD_BLOCK: { stage: "input", title: "Prompt blocked", reason: "The prompt did not pass the input safety check." },
     INPUT_POLICY_BLOCK: { stage: "input", title: "Prompt blocked", reason: "The prompt contains content disallowed by policy." },
@@ -1095,6 +1110,69 @@ _WORKSPACE_JS = """
     box.appendChild(reason);
     box.appendChild(reference);
     container.appendChild(box);
+  }
+
+  function safeGuardrail(raw) {
+    if (!isObject(raw)) { return null; }
+    var inputCheck = GUARDRAIL_CHECKS[raw.input_check];
+    var outputCheck = GUARDRAIL_CHECKS[raw.output_check];
+    if (typeof inputCheck !== "string" || typeof outputCheck !== "string") { return null; }
+    if (typeof raw.input_pii_masked !== "boolean" ||
+        typeof raw.output_pii_masked !== "boolean") { return null; }
+    var latency = null;
+    if (typeof raw.latency_ms === "number" && isFinite(raw.latency_ms) && raw.latency_ms >= 0) {
+      latency = raw.latency_ms;
+    }
+    return {
+      inputState: raw.input_check,
+      outputState: raw.output_check,
+      inputMasked: raw.input_pii_masked,
+      outputMasked: raw.output_pii_masked,
+      latencyMs: latency
+    };
+  }
+
+  function rememberGuardrail(requestId, raw) {
+    var details = safeGuardrail(raw);
+    if (!details || typeof requestId !== "string" || !requestId) { return; }
+    if (!guardrailTurns[requestId]) { guardrailOrder.push(requestId); }
+    guardrailTurns[requestId] = details;
+    while (guardrailOrder.length > GUARDRAIL_TURN_LIMIT) {
+      delete guardrailTurns[guardrailOrder.shift()];
+    }
+  }
+
+  function appendGuardrailChip(row, text, state) {
+    var chip = document.createElement("span");
+    chip.className = "guardrail-chip";
+    chip.setAttribute("data-state", state);
+    chip.textContent = text;
+    row.appendChild(chip);
+  }
+
+  function guardrailSeconds(latencyMs) {
+    return (latencyMs / 1000).toFixed(1) + " s";
+  }
+
+  function appendGuardrailDetails(container, details) {
+    var row = document.createElement("div");
+    row.className = "guardrail-details";
+    row.setAttribute("aria-label", "Guardrail details for this turn");
+    var label = document.createElement("span");
+    label.className = "guardrail-label";
+    label.textContent = "Guardrail";
+    row.appendChild(label);
+    appendGuardrailChip(row, "Input: " + GUARDRAIL_CHECKS[details.inputState], details.inputState);
+    appendGuardrailChip(row, "Output: " + GUARDRAIL_CHECKS[details.outputState], details.outputState);
+    if (details.inputMasked) { appendGuardrailChip(row, "PII masked in prompt", "masked"); }
+    if (details.outputMasked) { appendGuardrailChip(row, "PII masked in reply", "masked"); }
+    if (!details.inputMasked && !details.outputMasked) {
+      appendGuardrailChip(row, "No PII masked", "none");
+    }
+    if (details.latencyMs !== null) {
+      appendGuardrailChip(row, guardrailSeconds(details.latencyMs), "timing");
+    }
+    container.appendChild(row);
   }
 
   function showChatBlock(block) {
@@ -3160,6 +3238,10 @@ _WORKSPACE_JS = """
       article.appendChild(body);
       var savedBlock = safeBlock(item.block, item.block && item.block.ref);
       if (savedBlock) { appendBlockNotice(article, savedBlock); }
+      if ((role === "assistant" || outcome === "blocked") &&
+          typeof item.request_id === "string" && guardrailTurns[item.request_id]) {
+        appendGuardrailDetails(article, guardrailTurns[item.request_id]);
+      }
       container.appendChild(article);
     }
   }
@@ -3396,6 +3478,7 @@ _WORKSPACE_JS = """
             : (isObject(errorBody.block) ? errorBody.block.ref : "")
         );
         showChatBlock(null);
+        rememberGuardrail(errorBody.turn_request_id, errorBody.guardrail);
         if (parsedBlock) {
           // The saved prompt renders the reason and reference inline.  Only
           // fall back to the global notice below if that saved copy is not
@@ -3409,6 +3492,7 @@ _WORKSPACE_JS = """
         kind = "denied";
       } else if (result.ok) {
         noticeText = contextNoticeText(result.data && result.data.context);
+        if (isObject(result.data)) { rememberGuardrail(result.data.id, result.data.guardrail); }
         message = "Answer received and saved.";
         kind = "ok";
       } else if (result.status === 409) {

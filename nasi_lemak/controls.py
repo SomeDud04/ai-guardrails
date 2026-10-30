@@ -12,6 +12,7 @@ from __future__ import annotations
 
 import hashlib
 import json
+import math
 from dataclasses import dataclass, field
 from typing import Any, Iterable
 
@@ -128,6 +129,64 @@ def settings_digest(
         payload, sort_keys=True, separators=(",", ":"), ensure_ascii=False
     )
     return hashlib.sha256(canonical.encode("utf-8")).hexdigest()
+
+
+def audit_latency_ms(result_sink: dict[str, Any]) -> int | None:
+    """Server latency derived from the two audit timestamps this request wrote.
+
+    Both values come from the same request's pipeline sink and are the audit
+    store's own ``timestamp`` column values.  Nothing is timed or estimated
+    here: when either stamp is absent (a stage that did not run) the field is
+    omitted rather than invented.
+    """
+    started = result_sink.get("audit_started_at")
+    terminal = result_sink.get("audit_terminal_at")
+    for value in (started, terminal):
+        if isinstance(value, bool) or not isinstance(value, (int, float)):
+            return None
+        if not math.isfinite(value):
+            return None
+    return int(round((terminal - started) * 1000))
+
+
+def guardrail_details(
+    result_sink: dict[str, Any], user_text: str, control: "GatewayControl"
+) -> dict[str, Any]:
+    """Fixed per-turn summary of what the guardrail did, for the person's own turn.
+
+    Every value comes from a fixed vocabulary, a boolean or the audit latency.
+    No classifier text, category, prompt or withheld output is included.  A
+    check the policy switched off reads ``off`` and one the turn never reached
+    reads ``not_run``, so neither can be mistaken for a passed check.
+    """
+    decision = result_sink.get("input_decision")
+    if not control.input_check_enabled:
+        input_check = "off"
+    elif decision in ("allow", "block"):
+        input_check = "safe" if decision == "allow" else "blocked"
+    else:
+        input_check = "not_run"
+    output_safe = result_sink.get("output_safe")
+    if not control.output_check_enabled:
+        output_check = "off"
+    elif isinstance(output_safe, bool):
+        output_check = "safe" if output_safe else "blocked"
+    else:
+        output_check = "not_run"
+    messages = result_sink.get("sanitized_messages")
+    masked_prompt = (
+        messages[-1].get("content") if isinstance(messages, list) and messages else None
+    )
+    details: dict[str, Any] = {
+        "input_check": input_check,
+        "output_check": output_check,
+        "input_pii_masked": isinstance(masked_prompt, str) and masked_prompt != user_text,
+        "output_pii_masked": result_sink.get("output_masked") is True,
+    }
+    latency = audit_latency_ms(result_sink)
+    if latency is not None:
+        details["latency_ms"] = latency
+    return details
 
 
 @dataclass(frozen=True)
