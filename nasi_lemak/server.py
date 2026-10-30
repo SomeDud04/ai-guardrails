@@ -23,6 +23,7 @@ import hmac
 import json
 import math
 import os
+import re
 import time
 import uuid
 from contextlib import asynccontextmanager
@@ -181,6 +182,16 @@ ENV_OUTPUT_GUARD_PROVIDER = f"{OUTPUT_GUARD_ENV_PREFIX}_PROVIDER"
 # Qwen3Guard output adapter.  No provider is inferred from a URL or model.
 INPUT_GUARD_PROVIDER_GROQ = "groq-prompt-guard"
 OUTPUT_GUARD_PROVIDER_CLOUDFLARE = "cloudflare-llama-guard"
+
+# Optional operational bounds.  An explicit ``make_app`` argument always wins;
+# otherwise these environment values apply, then the built-in defaults.  An
+# explicitly configured but invalid value is a configuration failure (live but
+# not ready), matching the chat-limit env contract.
+ENV_CHAT_WORK_TIMEOUT = "NASI_LEMAK_CHAT_WORK_TIMEOUT"
+ENV_CHAT_MAX_CONCURRENCY = "NASI_LEMAK_CHAT_MAX_CONCURRENCY"
+ENV_CONTROL_CONCURRENCY = "NASI_LEMAK_CONTROL_CONCURRENCY"
+ENV_MAX_BODY_BYTES = "NASI_LEMAK_MAX_BODY_BYTES"
+ENV_BODY_READ_TIMEOUT = "NASI_LEMAK_BODY_READ_TIMEOUT"
 
 ENV_POLICY_FILE = "NASI_LEMAK_POLICY_FILE"
 ENV_OPERATOR_KEY_DIGEST = "NASI_LEMAK_OPERATOR_KEY_DIGEST"
@@ -376,6 +387,62 @@ def _valid_positive_float(value: Any, maximum: float) -> bool:
         and math.isfinite(value)
         and 0 < value <= maximum
     )
+
+
+_OPERATIONAL_INT = re.compile(r"[1-9][0-9]*\Z")
+
+
+def _env_bounded_int(
+    environ: dict[str, str],
+    name: str,
+    *,
+    minimum: int,
+    maximum: int,
+) -> int | None:
+    """Read an optional bounded integer; ``None`` means unset.
+
+    An explicitly configured value that is malformed or out of range raises
+    :class:`ValueError`.  The caller turns that into a not-ready application
+    without echoing the value.
+    """
+    raw = environ.get(name)
+    if raw is None or (isinstance(raw, str) and raw.strip() == ""):
+        return None
+    if not isinstance(raw, str):
+        raise ValueError(name)
+    text = raw.strip()
+    if _OPERATIONAL_INT.fullmatch(text) is None:
+        raise ValueError(name)
+    try:
+        value = int(text, 10)
+    except (TypeError, ValueError):
+        raise ValueError(name) from None
+    if not minimum <= value <= maximum:
+        raise ValueError(name)
+    return value
+
+
+def _env_bounded_float(
+    environ: dict[str, str],
+    name: str,
+    *,
+    minimum: float,
+    maximum: float,
+) -> float | None:
+    """Read an optional bounded float; ``None`` means unset."""
+    raw = environ.get(name)
+    if raw is None or (isinstance(raw, str) and raw.strip() == ""):
+        return None
+    if not isinstance(raw, str):
+        raise ValueError(name)
+    text = raw.strip()
+    try:
+        value = float(text)
+    except (TypeError, ValueError):
+        raise ValueError(name) from None
+    if not math.isfinite(value) or not minimum <= value <= maximum:
+        raise ValueError(name)
+    return value
 
 
 def _adapters_ready(adapters: Any) -> bool:
@@ -1259,11 +1326,11 @@ def make_app(
     operator_key_digest: str | None = None,
     operator_reader: Any = None,
     export_log: Any = None,
-    max_body_bytes: int = DEFAULT_MAX_BODY_BYTES,
-    body_read_timeout: float = DEFAULT_BODY_READ_TIMEOUT,
-    max_concurrency: int = DEFAULT_MAX_CONCURRENCY,
-    control_concurrency: int = DEFAULT_CONTROL_CONCURRENCY,
-    chat_work_timeout: float = DEFAULT_CHAT_WORK_TIMEOUT,
+    max_body_bytes: int | None = None,
+    body_read_timeout: float | None = None,
+    max_concurrency: int | None = None,
+    control_concurrency: int | None = None,
+    chat_work_timeout: float | None = None,
     app_id: str = "nasi-lemak",
     environ: dict[str, str] | None = None,
     workspace_store: Any = None,
@@ -1290,19 +1357,142 @@ def make_app(
         chat_limits_ok = False
 
     numeric_ok = (
-        _valid_positive_int(max_body_bytes, MAX_CONFIGURED_BODY_BYTES)
-        and _valid_positive_float(body_read_timeout, MAX_CONFIGURED_BODY_READ_TIMEOUT)
-        and _valid_positive_int(max_concurrency, MAX_CONFIGURED_CONCURRENCY)
-        and _valid_positive_int(control_concurrency, MAX_CONFIGURED_CONTROL_CONCURRENCY)
-        and _valid_positive_float(chat_work_timeout, MAX_CONFIGURED_CHAT_WORK_TIMEOUT)
+        (
+            max_body_bytes is None
+            or _valid_positive_int(max_body_bytes, MAX_CONFIGURED_BODY_BYTES)
+        )
+        and (
+            body_read_timeout is None
+            or _valid_positive_float(body_read_timeout, MAX_CONFIGURED_BODY_READ_TIMEOUT)
+        )
+        and (
+            max_concurrency is None
+            or _valid_positive_int(max_concurrency, MAX_CONFIGURED_CONCURRENCY)
+        )
+        and (
+            control_concurrency is None
+            or _valid_positive_int(
+                control_concurrency, MAX_CONFIGURED_CONTROL_CONCURRENCY
+            )
+        )
+        and (
+            chat_work_timeout is None
+            or _valid_positive_float(
+                chat_work_timeout, MAX_CONFIGURED_CHAT_WORK_TIMEOUT
+            )
+        )
     )
+    # Resolve each operational bound: explicit argument > environment > default.
+    # An explicit invalid argument keeps the historical silent fallback to the
+    # safe default; an explicitly configured invalid environment value instead
+    # makes the app live but not ready, like the chat-limit env contract.
+    try:
+        env_body_limit = (
+            _env_bounded_int(
+                env,
+                ENV_MAX_BODY_BYTES,
+                minimum=1024,
+                maximum=MAX_CONFIGURED_BODY_BYTES,
+            )
+            if max_body_bytes is None
+            else None
+        )
+        env_read_timeout = (
+            _env_bounded_float(
+                env,
+                ENV_BODY_READ_TIMEOUT,
+                minimum=0.5,
+                maximum=MAX_CONFIGURED_BODY_READ_TIMEOUT,
+            )
+            if body_read_timeout is None
+            else None
+        )
+        env_concurrency = (
+            _env_bounded_int(
+                env,
+                ENV_CHAT_MAX_CONCURRENCY,
+                minimum=1,
+                maximum=MAX_CONFIGURED_CONCURRENCY,
+            )
+            if max_concurrency is None
+            else None
+        )
+        env_control_limit = (
+            _env_bounded_int(
+                env,
+                ENV_CONTROL_CONCURRENCY,
+                minimum=1,
+                maximum=MAX_CONFIGURED_CONTROL_CONCURRENCY,
+            )
+            if control_concurrency is None
+            else None
+        )
+        env_chat_timeout = (
+            _env_bounded_float(
+                env,
+                ENV_CHAT_WORK_TIMEOUT,
+                minimum=1.0,
+                maximum=MAX_CONFIGURED_CHAT_WORK_TIMEOUT,
+            )
+            if chat_work_timeout is None
+            else None
+        )
+        env_operational_ok = True
+    except ValueError:
+        env_body_limit = env_read_timeout = env_concurrency = None
+        env_control_limit = env_chat_timeout = None
+        env_operational_ok = False
+
+    def _resolve(
+        explicit: Any,
+        env_value: Any,
+        default: Any,
+        valid: Any,
+    ) -> Any:
+        if explicit is not None:
+            return explicit if valid(explicit) else default
+        if env_value is not None:
+            return env_value
+        return default
+
     # Invalid numeric configuration must not crash startup.  Use safe defaults
     # for the live-but-not-ready application; readiness and chat stay closed.
-    body_limit = max_body_bytes if _valid_positive_int(max_body_bytes, MAX_CONFIGURED_BODY_BYTES) else DEFAULT_MAX_BODY_BYTES
-    read_timeout = body_read_timeout if _valid_positive_float(body_read_timeout, MAX_CONFIGURED_BODY_READ_TIMEOUT) else DEFAULT_BODY_READ_TIMEOUT
-    concurrency = max_concurrency if _valid_positive_int(max_concurrency, MAX_CONFIGURED_CONCURRENCY) else DEFAULT_MAX_CONCURRENCY
-    control_limit = control_concurrency if _valid_positive_int(control_concurrency, MAX_CONFIGURED_CONTROL_CONCURRENCY) else DEFAULT_CONTROL_CONCURRENCY
-    chat_timeout = chat_work_timeout if _valid_positive_float(chat_work_timeout, MAX_CONFIGURED_CHAT_WORK_TIMEOUT) else DEFAULT_CHAT_WORK_TIMEOUT
+    body_limit = _resolve(
+        max_body_bytes,
+        env_body_limit,
+        DEFAULT_MAX_BODY_BYTES,
+        lambda value: _valid_positive_int(value, MAX_CONFIGURED_BODY_BYTES),
+    )
+    read_timeout = _resolve(
+        body_read_timeout,
+        env_read_timeout,
+        DEFAULT_BODY_READ_TIMEOUT,
+        lambda value: _valid_positive_float(
+            value, MAX_CONFIGURED_BODY_READ_TIMEOUT
+        ),
+    )
+    concurrency = _resolve(
+        max_concurrency,
+        env_concurrency,
+        DEFAULT_MAX_CONCURRENCY,
+        lambda value: _valid_positive_int(value, MAX_CONFIGURED_CONCURRENCY),
+    )
+    control_limit = _resolve(
+        control_concurrency,
+        env_control_limit,
+        DEFAULT_CONTROL_CONCURRENCY,
+        lambda value: _valid_positive_int(
+            value, MAX_CONFIGURED_CONTROL_CONCURRENCY
+        ),
+    )
+    chat_timeout = _resolve(
+        chat_work_timeout,
+        env_chat_timeout,
+        DEFAULT_CHAT_WORK_TIMEOUT,
+        lambda value: _valid_positive_float(
+            value, MAX_CONFIGURED_CHAT_WORK_TIMEOUT
+        ),
+    )
 
     runtime_writer_dsn = (
         _file_env("NASI_LEMAK_AUDIT_DSN", env) if audit_dsn is None else audit_dsn
@@ -1353,7 +1543,13 @@ def make_app(
     # live but not ready, and the header/admin surface must not imply either
     # supported safety posture.
     valid_mode = _mode_from_env(env)
-    config_ready = config_ready and numeric_ok and valid_mode != "" and chat_limits_ok
+    config_ready = (
+        config_ready
+        and numeric_ok
+        and env_operational_ok
+        and valid_mode != ""
+        and chat_limits_ok
+    )
 
     operator_state = _resolve_operator(
         env,
@@ -1375,11 +1571,12 @@ def make_app(
         audit_reader_dsn=_file_env(ENV_OPERATOR_AUDIT_DSN, env),
         chat_work_timeout=chat_timeout,
     )
-    if workspace_runtime.enabled and not chat_limits_ok:
+    if workspace_runtime.enabled and (not chat_limits_ok or not env_operational_ok):
         # The workspace has its own readiness component; make invalid shared
-        # limits close it as well, before any provider work can be dispatched.
+        # limits or operational bounds close it as well, before any provider
+        # work can be dispatched.
         workspace_runtime.ready = False
-        workspace_runtime.error = "chat limits configuration is invalid"
+        workspace_runtime.error = "configuration is invalid"
     if workspace_runtime.enabled:
         # Public ``/v1`` and ``/chat`` use the app gateway, not the workspace's
         # internal gateway.  Share the one fixed-code counter store so their
@@ -1456,6 +1653,14 @@ def make_app(
     app.state.control_concurrency = control_limit
     app.state.control_admission = _ControlPlaneAdmission(control_limit)
     app.state.chat_work_timeout = chat_timeout
+    # Read-only resolved operational bounds for the authenticated admin view.
+    app.state.operational = {
+        "chat_work_timeout": chat_timeout,
+        "max_concurrency": concurrency,
+        "control_concurrency": control_limit,
+        "max_body_bytes": body_limit,
+        "body_read_timeout": read_timeout,
+    }
     app.state.mode = configured_mode
     app.state.guards_active = guards_active
     # Retain a strong reference to every dispatched chat worker task so a
@@ -1628,6 +1833,7 @@ def make_app(
                 "digest": request.app.state.policy_digest,
             },
             "limits": request.app.state.limits_view,
+            "operational": request.app.state.operational,
             "health": "ready" if health else "not_ready",
         }
         return JSONResponse(payload, headers=ADMIN_SECURITY_HEADERS)

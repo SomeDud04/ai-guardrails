@@ -420,7 +420,6 @@ class ConfigurationTests(ChatDeadlineTestBase):
             float("inf"),
             server.MAX_CONFIGURED_CHAT_WORK_TIMEOUT + 1,
             "60",
-            None,
         )
         for value in invalid:
             with self.subTest(chat_work_timeout=value):

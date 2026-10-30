@@ -82,6 +82,15 @@ services:
       - NASI_LEMAK_CHAT_CONTEXT_BUDGET
       - NASI_LEMAK_CHAT_DEFAULT_REPLY_TOKENS
       - NASI_LEMAK_CHAT_MAX_REPLY_TOKENS
+      # Optional operational bounds.  Bare pass-through entries: no default is
+      # hardcoded here, an explicit make_app argument wins, and unset values
+      # keep the documented application defaults.  An explicitly configured
+      # invalid value makes the app live but not ready.
+      - NASI_LEMAK_CHAT_WORK_TIMEOUT
+      - NASI_LEMAK_CHAT_MAX_CONCURRENCY
+      - NASI_LEMAK_CONTROL_CONCURRENCY
+      - NASI_LEMAK_MAX_BODY_BYTES
+      - NASI_LEMAK_BODY_READ_TIMEOUT
     secrets:
       - audit_dsn
       - app_key_digest
