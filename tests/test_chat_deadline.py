@@ -343,24 +343,29 @@ class CancellationAndOverloadTests(ChatDeadlineTestBase):
     ) -> None:
         gate = threading.Event()
         self.adapters.generate_gate = gate
-        app = self.build_app(timeout=0.1)
+        # Long enough that the cancellations land before the deadline even when
+        # a loaded machine takes over a second to reach generation.
+        deadline = 3.0
+        app = self.build_app(timeout=deadline)
 
         async def scenario():
             sent: list[dict[str, Any]] = []
+            started_at = time.monotonic()
             first = asyncio.create_task(self.chat(app, sent_sink=sent))
             try:
                 await _wait_until(lambda: self.adapters.generate_started.is_set())
                 first.cancel()
                 await asyncio.sleep(0)
-                cancelled_at = time.monotonic()
                 first.cancel()
                 await asyncio.sleep(0)
                 self.assertFalse(first.done())
                 with self.assertRaises(asyncio.CancelledError):
-                    await asyncio.wait_for(first, timeout=2)
+                    await asyncio.wait_for(first, timeout=deadline + 5)
                 # The remembered cancellation was held until the original
                 # deadline instead of being converted into a 503 response.
-                self.assertGreaterEqual(time.monotonic() - cancelled_at, 0.05)
+                # Measured from the request start, because the time the worker
+                # takes to reach generation depends on machine load.
+                self.assertGreaterEqual(time.monotonic() - started_at, deadline * 0.9)
                 self.assertEqual(_response_starts(sent), [])
                 self.assertTrue(app.state.sem.locked())
             finally:
@@ -373,7 +378,7 @@ class CancellationAndOverloadTests(ChatDeadlineTestBase):
             recovered = await asyncio.wait_for(self.chat(app), timeout=3)
             self.assertEqual(recovered[0], 200, recovered[2])
 
-        asyncio.run(asyncio.wait_for(scenario(), timeout=10))
+        asyncio.run(asyncio.wait_for(scenario(), timeout=30))
 
     def test_overload_rejects_without_extra_dispatch_while_worker_runs(self) -> None:
         gate = threading.Event()
