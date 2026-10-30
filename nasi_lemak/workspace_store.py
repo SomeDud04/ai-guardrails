@@ -51,7 +51,7 @@ from .controls import block_detail
 from .workspace_governance import AlertAdminMixin, PolicyAdminMixin
 
 SCHEMA_PATH = Path(__file__).with_name("workspace_schema.sql")
-SCHEMA_VERSION = 3
+SCHEMA_VERSION = 4
 # Version 2 adds outcome/request_id/error_code to ws_messages. Runtime stores
 # open with ``migrate=False`` and therefore require an explicit provisioning
 # step (CLI slice) rather than silently altering a live database.
@@ -60,6 +60,16 @@ _SCHEMA_V2_ALTERS = (
     "CHECK (outcome IN ('allowed', 'blocked', 'failed'))",
     "ALTER TABLE ws_messages ADD COLUMN request_id TEXT",
     "ALTER TABLE ws_messages ADD COLUMN error_code TEXT",
+)
+_SCHEMA_V4_ALTERS = (
+    "ALTER TABLE ws_policy_profile_revisions ADD COLUMN context_messages INTEGER "
+    "CHECK (context_messages IS NULL OR context_messages > 0)",
+    "ALTER TABLE ws_policy_profile_revisions ADD COLUMN context_budget INTEGER "
+    "CHECK (context_budget IS NULL OR context_budget > 0)",
+    "ALTER TABLE ws_policy_profile_revisions ADD COLUMN default_reply_tokens INTEGER "
+    "CHECK (default_reply_tokens IS NULL OR default_reply_tokens > 0)",
+    "ALTER TABLE ws_policy_profile_revisions ADD COLUMN max_reply_tokens INTEGER "
+    "CHECK (max_reply_tokens IS NULL OR max_reply_tokens > 0)",
 )
 
 SESSION_TTL_SECONDS = 8 * 60 * 60
@@ -243,6 +253,20 @@ def _schema_v3_statements() -> list[str]:
         for statement in _schema_statements()
         if statement.upper().startswith(prefixes)
     ]
+
+
+def _alter_added_column(statement: str) -> str | None:
+    """Return the column name added by an ``ALTER TABLE ... ADD COLUMN`` statement."""
+
+    parts = statement.split()
+    upper = [p.upper() for p in parts]
+    try:
+        add_index = upper.index("ADD")
+        if add_index + 1 < len(parts) and upper[add_index + 1] == "COLUMN":
+            return parts[add_index + 2].strip()
+        return parts[add_index + 1].strip()
+    except (ValueError, IndexError):
+        return None
 
 
 # ---------------------------------------------------------------------------
@@ -575,6 +599,19 @@ class WorkspaceStore(PolicyAdminMixin, AlertAdminMixin):
         return f"{type(self).__name__}(backend={self._backend.dialect})"
 
     # -- schema ----------------------------------------------------------
+    @staticmethod
+    def _column_exists(db: _Db, table: str, column: str) -> bool:
+        if db.dialect == "postgres":
+            row = db.query_one(
+                "SELECT 1 FROM information_schema.columns "
+                "WHERE table_name = ? AND column_name = ?",
+                (table, column),
+            )
+            return row is not None
+        # SQLite
+        rows = db.query(f"PRAGMA table_info({table})")
+        return any(str(row.get("name")).lower() == column.lower() for row in rows)
+
     def _ensure_schema(self, db: _Db) -> None:
         db.execute(
             """
@@ -590,7 +627,7 @@ class WorkspaceStore(PolicyAdminMixin, AlertAdminMixin):
             version = int(current)
             if version == SCHEMA_VERSION:
                 return
-            if version not in (1, 2):
+            if version not in (1, 2, 3):
                 raise WorkspaceConfigError("unsupported workspace schema version")
             if version == 1:
                 # Preserve the original v1 -> v2 data migration, then add the
@@ -598,7 +635,18 @@ class WorkspaceStore(PolicyAdminMixin, AlertAdminMixin):
                 # untouched.
                 for statement in _SCHEMA_V2_ALTERS:
                     db.execute(statement)
-            for statement in _schema_v3_statements():
+            if version in (1, 2):
+                for statement in _schema_v3_statements():
+                    db.execute(statement)
+            # v4 adds optional per-profile chat-limit columns to revisions.
+            # The v3 migration script above may already create them on a fresh
+            # schema file, so skip alters for columns that already exist.
+            for statement in _SCHEMA_V4_ALTERS:
+                column = _alter_added_column(statement)
+                if column and self._column_exists(
+                    db, "ws_policy_profile_revisions", column
+                ):
+                    continue
                 db.execute(statement)
             db.execute(
                 "UPDATE ws_schema_migrations SET version = ? WHERE version = ?",

@@ -19,6 +19,7 @@ from typing import Any
 
 from fastapi import FastAPI, Request
 
+from .limits import ChatLimits, tighten
 from .workspace_http import (
     _BodyProblem,
     _body_fields,
@@ -114,6 +115,27 @@ def _scope_query(scope_type: str, scope_id: str | None) -> tuple[str, str | None
     return scope_type, scope_id
 
 
+def _add_limits_ceiling(result: Any, chat_limits: ChatLimits | None) -> Any:
+    """Attach raw profile limits and the server effective ceiling to responses."""
+
+    if not isinstance(result, dict) or not isinstance(chat_limits, ChatLimits):
+        return result
+    ceiling = chat_limits.public()
+    if "settings" in result and isinstance(result["settings"], dict):
+        result["settings"]["ceiling"] = ceiling
+        result["limits"] = dict(result["settings"].get("limits", {}))
+    if "items" in result and isinstance(result["items"], list):
+        for item in result["items"]:
+            if isinstance(item, dict) and isinstance(item.get("settings"), dict):
+                item["settings"]["ceiling"] = ceiling
+                item["limits"] = dict(item["settings"].get("limits", {}))
+    if "is_default" in result:
+        raw_limits = dict(result.get("limits", {}))
+        result["ceiling"] = ceiling
+        result["effective_limits"] = tighten(chat_limits, raw_limits).public()
+    return result
+
+
 def register_admin_policy_routes(app: FastAPI, runtime: Any) -> None:
     async def admin_context(request: Request):
         guard = _request_guard(request, runtime)
@@ -133,6 +155,12 @@ def register_admin_policy_routes(app: FastAPI, runtime: Any) -> None:
     def secure_mutation(request: Request, source: str | None):
         return _cookie_mutation_guard(request, source)
 
+    def with_limits(result: Any) -> Any:
+        # ``runtime.chat_limits`` is the server effective limits resolved from
+        # the env and startup policy, i.e. the ceiling a profile may only
+        # tighten.  When no gateway limits are available, results are unchanged.
+        return _add_limits_ceiling(result, getattr(runtime, "chat_limits", None))
+
     # -- policy profiles -------------------------------------------------
     @app.get("/workspace/api/admin/policy/profiles")
     async def admin_policy_profiles(request: Request):
@@ -150,7 +178,7 @@ def register_admin_policy_routes(app: FastAPI, runtime: Any) -> None:
             )
         except Exception as exc:
             return _store_error(request, exc)
-        return _ok(result)
+        return _ok(with_limits(result))
 
     @app.post("/workspace/api/admin/policy/profiles")
     async def admin_create_policy_profile(request: Request):
@@ -170,6 +198,7 @@ def register_admin_policy_routes(app: FastAPI, runtime: Any) -> None:
                     "output_check_enabled",
                     "input_masks",
                     "output_masks",
+                    "limits",
                 },
                 {"name"},
             )
@@ -182,12 +211,13 @@ def register_admin_policy_routes(app: FastAPI, runtime: Any) -> None:
                 output_check_enabled=body.get("output_check_enabled", True),
                 input_masks=body.get("input_masks"),
                 output_masks=body.get("output_masks"),
+                limits=body.get("limits"),
             )
         except _BodyProblem as exc:
             return _ws_error(request, "INVALID_REQUEST", exc.status)
         except Exception as exc:
             return _store_error(request, exc)
-        return _ok(result, 201)
+        return _ok(with_limits(result), 201)
 
     @app.get("/workspace/api/admin/policy/profiles/{profile_id}/history")
     async def admin_policy_profile_history(request: Request, profile_id: str):
@@ -206,7 +236,7 @@ def register_admin_policy_routes(app: FastAPI, runtime: Any) -> None:
             )
         except Exception as exc:
             return _store_error(request, exc)
-        return _ok(result)
+        return _ok(with_limits(result))
 
     @app.get("/workspace/api/admin/policy/profiles/{profile_id}")
     async def admin_policy_profile(request: Request, profile_id: str):
@@ -219,7 +249,7 @@ def register_admin_policy_routes(app: FastAPI, runtime: Any) -> None:
             )
         except Exception as exc:
             return _store_error(request, exc)
-        return _ok(result)
+        return _ok(with_limits(result))
 
     @app.post("/workspace/api/admin/policy/profiles/{profile_id}/revise")
     async def admin_revise_policy_profile(request: Request, profile_id: str):
@@ -239,6 +269,7 @@ def register_admin_policy_routes(app: FastAPI, runtime: Any) -> None:
                     "output_check_enabled",
                     "input_masks",
                     "output_masks",
+                    "limits",
                 },
                 {"expected_revision"},
             )
@@ -252,12 +283,13 @@ def register_admin_policy_routes(app: FastAPI, runtime: Any) -> None:
                 output_check_enabled=body.get("output_check_enabled", True),
                 input_masks=body.get("input_masks"),
                 output_masks=body.get("output_masks"),
+                limits=body.get("limits"),
             )
         except _BodyProblem as exc:
             return _ws_error(request, "INVALID_REQUEST", exc.status)
         except Exception as exc:
             return _store_error(request, exc)
-        return _ok(result)
+        return _ok(with_limits(result))
 
     @app.post("/workspace/api/admin/policy/profiles/{profile_id}/rollback")
     async def admin_rollback_policy_profile(request: Request, profile_id: str):
@@ -286,7 +318,7 @@ def register_admin_policy_routes(app: FastAPI, runtime: Any) -> None:
             return _ws_error(request, "INVALID_REQUEST", exc.status)
         except Exception as exc:
             return _store_error(request, exc)
-        return _ok(result)
+        return _ok(with_limits(result))
 
     @app.get("/workspace/api/admin/policy/audit")
     async def admin_policy_audit(request: Request):
@@ -431,7 +463,7 @@ def register_admin_policy_routes(app: FastAPI, runtime: Any) -> None:
             )
         except Exception as exc:
             return _store_error(request, exc)
-        return _ok(result)
+        return _ok(with_limits(result))
 
     # -- block alerts -----------------------------------------------------
     @app.get("/workspace/api/admin/alerts/summary")

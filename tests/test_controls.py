@@ -61,10 +61,24 @@ class GatewayControlValueTests(unittest.TestCase):
             {"revision": ""},
             {"revision": "x" * 129},
             {"sources": (("workspace", "workspace", "id", 0),)},
+            {"limits": (("max_reply_tokens", 0),)},
+            {"limits": (("max_reply_tokens", True),)},
+            {"limits": (("unknown_field", 100),)},
+            {"limits": (("default_reply_tokens", 200), ("max_reply_tokens", 100))},
+            {"limits": [("max_reply_tokens", 100)]},
         ):
             with self.subTest(kwargs=kwargs):
                 with self.assertRaises(ValueError):
                     GatewayControl(**kwargs)
+
+    def test_limits_are_sorted_and_digest_includes_them(self):
+        control = GatewayControl(
+            limits=(("max_reply_tokens", 100), ("context_messages", 8))
+        )
+        self.assertEqual(control.limits, (("context_messages", 8), ("max_reply_tokens", 100)))
+        self.assertNotEqual(control.digest, GatewayControl().digest)
+        no_limits = GatewayControl()
+        self.assertEqual(no_limits.limits, ())
 
     def test_block_details_are_fixed_for_known_reasons_only(self):
         self.assertEqual(
@@ -356,6 +370,74 @@ class GatewayControlEnforcementTests(unittest.TestCase):
             if index % 3 != 1:
                 self.assertNotIn("user%d@example.com" % index, response)
         self.assertEqual(len(adapters.generation_inputs), 30)
+
+    def test_profile_limits_tighten_request_validation(self):
+        gateway, adapters, key = self._gateway("limits-tighten.sqlite3")
+        adapters.generated = "short reply"
+        tight = GatewayControl(limits=(("max_reply_tokens", 100),))
+        status, body = gateway.handle(
+            "POST",
+            "/v1/chat/completions",
+            {"Authorization": "Bearer " + key},
+            {**self._body(), "max_tokens": 200},
+            control=tight,
+        )
+        self.assertEqual((status, body["error"]["code"]), (400, "INVALID_REQUEST"))
+
+        status, body = gateway.handle(
+            "POST",
+            "/v1/chat/completions",
+            {"Authorization": "Bearer " + key},
+            self._body(),
+            control=tight,
+        )
+        self.assertEqual(status, 200)
+        self.assertEqual(adapters.generate_options[-1], ("pilot-local", 100))
+
+    def test_profile_limits_above_server_ceiling_are_clamped(self):
+        gateway, adapters, key = self._gateway("limits-clamp.sqlite3")
+        adapters.generated = "short reply"
+        above = GatewayControl(limits=(("max_reply_tokens", 10000),))
+        status, body = gateway.handle(
+            "POST",
+            "/v1/chat/completions",
+            {"Authorization": "Bearer " + key},
+            {**self._body(), "max_tokens": 5000},
+            control=above,
+        )
+        self.assertEqual(status, 400)
+        status, body = gateway.handle(
+            "POST",
+            "/v1/chat/completions",
+            {"Authorization": "Bearer " + key},
+            {**self._body(), "max_tokens": 4096},
+            control=above,
+        )
+        self.assertEqual(status, 200)
+
+    def test_profile_context_limits_tighten_request_validation(self):
+        gateway, adapters, key = self._gateway("context-limits.sqlite3")
+        adapters.generated = "reply"
+        tight = GatewayControl(
+            limits=(("context_messages", 2), ("context_budget", 10))
+        )
+        too_many = [{"role": "user", "content": "x"}] * 3
+        status, body = gateway.handle(
+            "POST",
+            "/v1/chat/completions",
+            {"Authorization": "Bearer " + key},
+            {"model": "pilot-local", "messages": too_many},
+            control=tight,
+        )
+        self.assertEqual(status, 400)
+        status, body = gateway.handle(
+            "POST",
+            "/v1/chat/completions",
+            {"Authorization": "Bearer " + key},
+            {"model": "pilot-local", "messages": [{"role": "user", "content": "x" * 11}]},
+            control=tight,
+        )
+        self.assertEqual((status, body["error"]["code"]), (413, "INPUT_LIMIT"))
 
 
 if __name__ == "__main__":

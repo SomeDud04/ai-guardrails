@@ -101,13 +101,17 @@ def _settings_payload(
     output_check_enabled: bool,
     input_masks: tuple[str, ...],
     output_masks: tuple[str, ...],
+    limits: dict[str, int] | None = None,
 ) -> dict[str, Any]:
-    return {
+    payload = {
         "input_check_enabled": input_check_enabled,
         "input_masks": list(input_masks),
         "output_check_enabled": output_check_enabled,
         "output_masks": list(output_masks),
     }
+    if limits:
+        payload["limits"] = dict(sorted(limits.items()))
+    return payload
 
 
 def settings_digest(
@@ -115,14 +119,20 @@ def settings_digest(
     output_check_enabled: bool,
     input_masks: Iterable[str] | None,
     output_masks: Iterable[str] | None,
+    limits: dict[str, int] | None = None,
 ) -> str:
-    """Stable digest of one profile revision's settings only."""
+    """Stable digest of one profile revision's settings only.
+
+    The digest includes a ``limits`` entry only when at least one limit is set,
+    so existing limits-free revisions keep their historical digest value.
+    """
 
     payload = _settings_payload(
         bool(input_check_enabled),
         bool(output_check_enabled),
         normalize_masks(input_masks),
         normalize_masks(output_masks),
+        limits,
     )
     canonical = json.dumps(
         payload, sort_keys=True, separators=(",", ":"), ensure_ascii=False
@@ -145,9 +155,12 @@ class GatewayControl:
     output_masks: tuple[str, ...] = MASK_TYPES
     revision: str = DEFAULT_REVISION
     sources: tuple[tuple[str, str, str, int], ...] = ()
+    limits: tuple[tuple[str, int], ...] = ()
     digest: str = field(init=False)
 
     def __post_init__(self) -> None:
+        from .limits import LIMIT_FIELDS
+
         for name, value in (
             ("input_check_enabled", self.input_check_enabled),
             ("output_check_enabled", self.output_check_enabled),
@@ -169,11 +182,40 @@ class GatewayControl:
             "sources",
             tuple(_canonical_source(source) for source in self.sources),
         )
+        limits_dict: dict[str, int] | None = None
+        if self.limits:
+            if not isinstance(self.limits, tuple):
+                raise ValueError("control limits are invalid")
+            parsed: dict[str, int] = {}
+            for item in self.limits:
+                if (
+                    not isinstance(item, tuple)
+                    or len(item) != 2
+                    or not isinstance(item[0], str)
+                    or isinstance(item[1], bool)
+                    or not isinstance(item[1], int)
+                    or item[1] <= 0
+                ):
+                    raise ValueError("control limits are invalid")
+                if item[0] not in LIMIT_FIELDS:
+                    raise ValueError("control limits are invalid")
+                parsed[item[0]] = item[1]
+            if len(parsed) != len(self.limits):
+                raise ValueError("control limits are invalid")
+            if (
+                "default_reply_tokens" in parsed
+                and "max_reply_tokens" in parsed
+                and parsed["default_reply_tokens"] > parsed["max_reply_tokens"]
+            ):
+                raise ValueError("control limits are invalid")
+            limits_dict = dict(sorted(parsed.items()))
+            object.__setattr__(self, "limits", tuple(limits_dict.items()))
         payload = _settings_payload(
             self.input_check_enabled,
             self.output_check_enabled,
             self.input_masks,
             self.output_masks,
+            limits_dict,
         )
         payload["revision"] = self.revision
         payload["sources"] = [list(source) for source in self.sources]

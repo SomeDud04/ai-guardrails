@@ -47,6 +47,10 @@ Any later workspace profile layer, when configured, applies after this shared
 tightening step and cannot widen it. `/admin` shows the effective value, the env
 ceiling and the winning source (`env` or `policy`) read-only.
 
+The full order is env ceiling → startup policy `limits` → workspace profile
+`limits`. Each layer can only tighten the value it inherits; a profile value
+above the server value is clamped, not applied as an increase.
+
 The context budget and the operator policy `token_budget` both apply separately.
 They are not reduced to a numeric minimum because they use different units:
 `token_budget` is the adapter/tokenizer counter budget (default 512, ceiling

@@ -824,6 +824,160 @@ class AccountLifecycleHTTPTests(WorkspaceHTTPBase):
         self.assertEqual(deleted.json()["status"], "deleted")
 
 
+class AdminProfileLimitsHTTPTests(WorkspaceHTTPBase):
+    CEILING = {
+        "context_messages": 32,
+        "context_budget": 8192,
+        "default_reply_tokens": 1024,
+        "max_reply_tokens": 4096,
+    }
+
+    def _admin_token(self) -> str:
+        return self.login("root.admin")
+
+    def _profiles_url(self) -> str:
+        return "/workspace/api/admin/policy/profiles"
+
+    def _create(self, token: str, **body: object):
+        payload = {"name": "limits profile"}
+        payload.update(body)
+        return self.client.post(
+            self._profiles_url(), json=payload, headers=self.auth(token)
+        )
+
+    def test_profile_limits_are_returned_with_the_server_ceiling(self) -> None:
+        token = self._admin_token()
+        limits = {"context_messages": 8, "context_budget": 4096}
+        created = self._create(token, name="tight", limits=limits)
+        self.assertEqual(created.status_code, 201, created.text)
+        profile = created.json()
+        self.assertEqual(profile["limits"], limits)
+        self.assertEqual(profile["settings"]["limits"], limits)
+        self.assertEqual(profile["settings"]["ceiling"], self.CEILING)
+        profile_url = f"{self._profiles_url()}/{profile['id']}"
+
+        listed = self.client.get(self._profiles_url(), headers=self.auth(token))
+        self.assertEqual(listed.status_code, 200, listed.text)
+        item = next(
+            entry for entry in listed.json()["items"] if entry["id"] == profile["id"]
+        )
+        self.assertEqual(item["limits"], limits)
+        self.assertEqual(item["settings"]["ceiling"], self.CEILING)
+
+        fetched = self.client.get(profile_url, headers=self.auth(token))
+        self.assertEqual(fetched.status_code, 200, fetched.text)
+        self.assertEqual(fetched.json()["limits"], limits)
+        self.assertEqual(fetched.json()["settings"]["ceiling"], self.CEILING)
+
+        history = self.client.get(
+            f"{profile_url}/history", headers=self.auth(token)
+        )
+        self.assertEqual(history.status_code, 200, history.text)
+        revision = history.json()["items"][0]
+        self.assertEqual(revision["limits"], limits)
+        self.assertEqual(revision["settings"]["ceiling"], self.CEILING)
+
+        revised = self.client.post(
+            f"{profile_url}/revise",
+            json={
+                "expected_revision": profile["revision"],
+                "limits": {"max_reply_tokens": 512},
+            },
+            headers=self.auth(token),
+        )
+        self.assertEqual(revised.status_code, 200, revised.text)
+        self.assertEqual(revised.json()["limits"], {"max_reply_tokens": 512})
+        self.assertEqual(revised.json()["settings"]["ceiling"], self.CEILING)
+
+        rolled_back = self.client.post(
+            f"{profile_url}/rollback",
+            json={
+                "target_revision": profile["revision"],
+                "expected_revision": revised.json()["revision"],
+            },
+            headers=self.auth(token),
+        )
+        self.assertEqual(rolled_back.status_code, 200, rolled_back.text)
+        self.assertEqual(rolled_back.json()["limits"], limits)
+        self.assertEqual(rolled_back.json()["settings"]["ceiling"], self.CEILING)
+
+    def test_a_profile_without_limits_reports_an_empty_mapping(self) -> None:
+        token = self._admin_token()
+        created = self._create(token, name="defaults")
+        self.assertEqual(created.status_code, 201, created.text)
+        self.assertEqual(created.json()["limits"], {})
+        self.assertEqual(created.json()["settings"]["limits"], {})
+        self.assertEqual(created.json()["settings"]["ceiling"], self.CEILING)
+
+    def test_invalid_limits_are_rejected_on_create_and_revise(self) -> None:
+        token = self._admin_token()
+        invalid = (
+            {"context_messages": 0},
+            {"context_messages": True},
+            {"unknown_limit": 1},
+            {"default_reply_tokens": 2048, "max_reply_tokens": 1024},
+        )
+        for limits in invalid:
+            created = self._create(token, name="bad", limits=limits)
+            self.assert_error(created, 400, "INVALID_REQUEST")
+        self.assertEqual(
+            self.store.list_policy_profiles(self.admin["id"])["items"], []
+        )
+
+        profile = self._create(token, name="valid")
+        self.assertEqual(profile.status_code, 201, profile.text)
+        profile_url = f"{self._profiles_url()}/{profile.json()['id']}"
+        for limits in invalid:
+            revised = self.client.post(
+                f"{profile_url}/revise",
+                json={
+                    "expected_revision": profile.json()["revision"],
+                    "limits": limits,
+                },
+                headers=self.auth(token),
+            )
+            self.assert_error(revised, 400, "INVALID_REQUEST")
+
+    def test_effective_preview_clamps_limits_to_the_ceiling(self) -> None:
+        token = self._admin_token()
+        created = self._create(
+            token,
+            name="wide",
+            limits={"context_messages": 100, "max_reply_tokens": 2048},
+        )
+        self.assertEqual(created.status_code, 201, created.text)
+        assigned = self.client.post(
+            "/workspace/api/admin/policy/assignments",
+            json={
+                "scope_type": "user",
+                "scope_id": self.alice["id"],
+                "profile_id": created.json()["id"],
+            },
+            headers=self.auth(token),
+        )
+        self.assertEqual(assigned.status_code, 200, assigned.text)
+        preview = self.client.get(
+            "/workspace/api/admin/policy/effective",
+            params={"user_id": self.alice["id"]},
+            headers=self.auth(token),
+        )
+        self.assertEqual(preview.status_code, 200, preview.text)
+        body = preview.json()
+        self.assertEqual(
+            body["limits"], {"context_messages": 100, "max_reply_tokens": 2048}
+        )
+        self.assertEqual(body["ceiling"], self.CEILING)
+        self.assertEqual(
+            body["effective_limits"],
+            {
+                "context_messages": 32,
+                "context_budget": 8192,
+                "default_reply_tokens": 1024,
+                "max_reply_tokens": 2048,
+            },
+        )
+
+
 @unittest.skipUnless(
     os.environ.get("TEST_WORKSPACE_DSN"),
     "TEST_WORKSPACE_DSN not set; no database contacted",

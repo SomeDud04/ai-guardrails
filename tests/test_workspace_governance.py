@@ -26,6 +26,7 @@ from nasi_lemak.workspace_store import (
     WorkspaceStorageError,
     WorkspaceStore,
     _Cipher,
+    _SCHEMA_V4_ALTERS,
     _hash_password,
     _schema_statements,
     _schema_v3_statements,
@@ -397,6 +398,100 @@ class PolicyAdminTests(GovernanceTestBase):
         self.assertEqual(stored["revision"], profile["revision"])
         self.assertEqual(stored["settings"]["input_masks"], ["POSTAL_ADDRESS"])
 
+    def test_limits_free_digest_matches_historical_value(self):
+        profile = self._profile("No limits")
+        self.assertEqual(
+            profile["settings_digest"],
+            settings_digest(True, True, MASK_TYPES, MASK_TYPES),
+        )
+        self.assertEqual(profile["settings"]["limits"], {})
+
+    def test_profile_limits_are_validated_and_persisted(self):
+        valid = self.store.create_policy_profile(
+            self.admin["id"],
+            "Tight",
+            limits={"max_reply_tokens": 512, "context_messages": 16},
+        )
+        self.assertEqual(
+            valid["settings"]["limits"],
+            {"max_reply_tokens": 512, "context_messages": 16},
+        )
+        self.assertNotEqual(
+            valid["settings_digest"],
+            settings_digest(True, True, MASK_TYPES, MASK_TYPES),
+        )
+
+        invalid_limits = (
+            {"max_reply_tokens": 0},
+            {"max_reply_tokens": -1},
+            {"max_reply_tokens": True},
+            {"max_reply_tokens": "512"},
+            {"unknown": 100},
+            {"default_reply_tokens": 200, "max_reply_tokens": 100},
+        )
+        for limits in invalid_limits:
+            with self.subTest(limits=limits):
+                with self.assertRaises(ValueError):
+                    self.store.create_policy_profile(
+                        self.admin["id"], "Bad limits", limits=limits
+                    )
+
+        revised = self.store.revise_policy_profile(
+            self.admin["id"],
+            valid["id"],
+            valid["revision"],
+            limits={"max_reply_tokens": 256},
+        )
+        self.assertEqual(revised["settings"]["limits"], {"max_reply_tokens": 256})
+
+    def test_effective_policy_and_control_include_limits(self):
+        profile = self.store.create_policy_profile(
+            self.admin["id"],
+            "User tight",
+            limits={"max_reply_tokens": 300},
+        )
+        self.store.assign_policy_profile(
+            self.admin["id"], "user", self.alice["id"], profile["id"]
+        )
+        effective = self.store.resolve_effective_policy(
+            self.admin["id"], self.alice["id"]
+        )
+        self.assertEqual(effective["limits"], {"max_reply_tokens": 300})
+        control = self.store.resolve_gateway_control(self.alice["id"])
+        self.assertEqual(control.limits, (("max_reply_tokens", 300),))
+
+        history = self.store.list_policy_profile_revisions(
+            self.admin["id"], profile["id"]
+        )["items"]
+        self.assertEqual(history[0]["settings"]["limits"], {"max_reply_tokens": 300})
+
+    def test_corrupt_limit_column_or_digest_fails_closed(self):
+        profile = self.store.create_policy_profile(
+            self.admin["id"], "Limitful", limits={"max_reply_tokens": 300}
+        )
+        self.store.assign_policy_profile(
+            self.admin["id"], "workspace", None, profile["id"]
+        )
+        self._exec(
+            "UPDATE ws_policy_profile_revisions SET max_reply_tokens = -1 "
+            "WHERE profile_id = ?",
+            (profile["id"],),
+        )
+        with self.assertRaises(WorkspaceStorageError):
+            self.store.resolve_effective_policy(self.admin["id"], self.alice["id"])
+
+        self._exec(
+            "UPDATE ws_policy_profile_revisions SET max_reply_tokens = ? "
+            "WHERE profile_id = ?",
+            (300, profile["id"]),
+        )
+        self._exec(
+            "UPDATE ws_policy_profile_revisions SET digest = ? WHERE profile_id = ?",
+            ("0" * 64, profile["id"]),
+        )
+        with self.assertRaises(WorkspaceStorageError):
+            self.store.resolve_effective_policy(self.admin["id"], self.alice["id"])
+
 
 class AssignmentInheritanceTests(GovernanceTestBase):
     def test_default_workspace_department_user_relaxing_and_clear(self) -> None:
@@ -668,7 +763,13 @@ class CorruptionFailClosedTests(GovernanceTestBase):
 
 
 class MigrationTests(GovernanceTestBase):
-    def test_v2_to_v3_preserves_encrypted_conversation_and_reopen_is_idempotent(self) -> None:
+    def _limit_columns(self, path: Path) -> set[str]:
+        rows = self._raw_rows(
+            path, "PRAGMA table_info(ws_policy_profile_revisions)"
+        )
+        return {str(row["name"]).lower() for row in rows}
+
+    def test_v2_to_v4_preserves_encrypted_conversation_and_reopen_is_idempotent(self) -> None:
         v2_path = Path(self._tmp.name) / "legacy-v2.db"
         now = self.clock.value
         cipher = _Cipher(self.key)
@@ -772,6 +873,26 @@ class MigrationTests(GovernanceTestBase):
             "ws_alert_state",
         ):
             self.assertIn(name, tables)
+        self.assertEqual(
+            self._limit_columns(v2_path),
+            {
+                "id",
+                "profile_id",
+                "revision",
+                "input_check_enabled",
+                "output_check_enabled",
+                "input_masks",
+                "output_masks",
+                "context_messages",
+                "context_budget",
+                "default_reply_tokens",
+                "max_reply_tokens",
+                "digest",
+                "rollback_of",
+                "created_by",
+                "created_at",
+            },
+        )
 
         reopened = WorkspaceStore(
             str(v2_path),
@@ -801,6 +922,83 @@ class MigrationTests(GovernanceTestBase):
             ),
             [{"count": 2}],
         )
+
+    def test_v3_to_v4_adds_limit_columns_and_keeps_existing_profiles(self) -> None:
+        v3_path = Path(self._tmp.name) / "legacy-v3.db"
+        # Create a fresh v4 store, then downgrade to v3 by dropping limit
+        # columns and rewriting the migration row.
+        fresh = WorkspaceStore(
+            str(v3_path),
+            encryption_key=self.key,
+            clock=self.clock,
+            migrate=True,
+        )
+        admin = fresh.bootstrap_admin(
+            username="v3.admin",
+            password=GOOD_PASSWORD,
+            full_name="V3 Admin",
+            department_name="IT",
+        )
+        profile = fresh.create_policy_profile(admin["id"], "Legacy v3")
+        fresh.close()
+
+        conn = sqlite3.connect(v3_path)
+        try:
+            for column in (
+                "context_messages",
+                "context_budget",
+                "default_reply_tokens",
+                "max_reply_tokens",
+            ):
+                conn.execute(
+                    f"ALTER TABLE ws_policy_profile_revisions DROP COLUMN {column}"
+                )
+            conn.execute(
+                "UPDATE ws_schema_migrations SET version = 3 WHERE version = ?",
+                (SCHEMA_VERSION,),
+            )
+            conn.commit()
+        finally:
+            conn.close()
+
+        self.assertNotIn("max_reply_tokens", self._limit_columns(v3_path))
+
+        migrated = WorkspaceStore(
+            str(v3_path),
+            encryption_key=self.key,
+            clock=self.clock,
+            migrate=True,
+        )
+        self.assertTrue(migrated.ready())
+        self.assertEqual(
+            self._migration_rows(v3_path), [{"version": SCHEMA_VERSION}]
+        )
+        self.assertIn("max_reply_tokens", self._limit_columns(v3_path))
+        # Existing limits-free revision still verifies.
+        stored = migrated.get_policy_profile(admin["id"], profile["id"])
+        self.assertEqual(stored["settings"]["limits"], {})
+
+    def test_v3_database_is_not_ready_until_migrated(self) -> None:
+        conn = sqlite3.connect(self.path)
+        try:
+            for column in (
+                "context_messages",
+                "context_budget",
+                "default_reply_tokens",
+                "max_reply_tokens",
+            ):
+                conn.execute(
+                    f"ALTER TABLE ws_policy_profile_revisions DROP COLUMN {column}"
+                )
+            conn.execute(
+                "UPDATE ws_schema_migrations SET version = 3 WHERE version = ?",
+                (SCHEMA_VERSION,),
+            )
+            conn.commit()
+        finally:
+            conn.close()
+
+        self.assertFalse(self.store.ready())
 
     @staticmethod
     def _migration_rows(path: Path) -> list[dict]:

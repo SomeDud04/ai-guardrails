@@ -21,7 +21,7 @@ from .controls import GatewayControl, block_detail
 from .diagnostics import SIGNAL_CODES, record_signal
 from .generation import GenerationError, conservative_byte_budget
 from .guards import GuardInputLimit
-from .limits import LIMIT_FIELDS, ChatLimits
+from .limits import LIMIT_FIELDS, ChatLimits, tighten
 from .pii import mask_text
 from .scan_context import ScanContext
 
@@ -458,18 +458,19 @@ class Gateway:
         candidate_digest = hashlib.sha256(candidate.encode()).digest()
         if not self._key_valid or not hmac.compare_digest(candidate_digest, self._key_digest):
             return self._error(401, "UNAUTHORIZED", request_id)
-        parsed = self._validate(body)
-        if parsed == "input_limit":
-            return self._error(413, "INPUT_LIMIT", request_id)
-        if parsed is None:
-            return self._error(400, "INVALID_REQUEST", request_id)
-        messages, max_tokens = parsed
         if self.adapters is None:
             return self._error(503, "UNAVAILABLE", request_id)
         try:
             control = self._resolve_control(control)
         except ValueError:
             return self._error(503, "UNAVAILABLE", request_id)
+        effective_limits = tighten(self.limits, dict(control.limits))
+        parsed = self._validate(body, effective_limits)
+        if parsed == "input_limit":
+            return self._error(413, "INPUT_LIMIT", request_id)
+        if parsed is None:
+            return self._error(400, "INVALID_REQUEST", request_id)
+        messages, max_tokens = parsed
 
         def _sink(name: str, value: Any) -> None:
             if result_sink is not None:
@@ -498,7 +499,7 @@ class Gateway:
             return self._error(503, "UNAVAILABLE", request_id)
         serialized = serialize_messages(messages)
         try:
-            if conservative_byte_budget(serialized) > self.limits.context_budget:
+            if conservative_byte_budget(serialized) > effective_limits.context_budget:
                 raise _InputLimit()
             count = self.adapters.count_tokens(serialized)
             if isinstance(count, bool) or not isinstance(count, int) or count < 0:
@@ -671,20 +672,22 @@ class Gateway:
             fields.append(f"diagnostic={diagnostic_code}")
         LOGGER.warning(" ".join(fields))
 
-    def _validate(self, body: Any):
+    def _validate(self, body: Any, limits: ChatLimits | None = None):
+        if limits is None:
+            limits = self.limits
         if not isinstance(body, dict) or set(body) - {"model", "messages", "stream", "max_tokens"}:
             return None
         if body.get("model") != self.policy.model or body.get("stream", False) is not False:
             return None
-        max_tokens = body.get("max_tokens", self.limits.default_reply_tokens)
+        max_tokens = body.get("max_tokens", limits.default_reply_tokens)
         if (
             isinstance(max_tokens, bool)
             or not isinstance(max_tokens, int)
-            or not 1 <= max_tokens <= self.limits.max_reply_tokens
+            or not 1 <= max_tokens <= limits.max_reply_tokens
         ):
             return None
         messages = body.get("messages")
-        if not isinstance(messages, list) or not 1 <= len(messages) <= self.limits.context_messages:
+        if not isinstance(messages, list) or not 1 <= len(messages) <= limits.context_messages:
             return None
         clean = []
         for message in messages:
@@ -697,7 +700,7 @@ class Gateway:
         serialized = serialize_messages(clean)
         # Finite memory bound before the conservative-unit budget check that
         # runs after the audit start.  The configured budget is authoritative.
-        if len(serialized) > self.limits.context_budget:
+        if len(serialized) > limits.context_budget:
             return "input_limit"
         return clean, max_tokens
 

@@ -5,8 +5,10 @@ release for the opt-in `/workspace` surface. It does not replace the startup
 YAML policy in [docs/policy.example.yaml](policy.example.yaml), which remains a
 single server-side file enforced for every request. Administrator policy
 profiles apply only to workspace turns and can change only two model-safety
-toggles and the selected PII masks. They cannot edit the startup policy, the
-legacy direct OpenAI-compatible API, authentication, limits or audit ordering.
+toggles, the selected PII masks, and an optional tightening of four chat limits.
+They cannot edit the startup policy, the legacy direct OpenAI-compatible API,
+authentication, or audit ordering, and they can never raise a chat limit above
+the server ceiling.
 
 ## Before an existing deployment is upgraded
 
@@ -109,9 +111,10 @@ least specific to most specific:
 
 The most specific assignment supplies the complete settings object. This is a
 full-profile override, not a field-by-field merge: a user profile with input
-masking disabled does not inherit the department's input mask list. `sources`
-in the effective-policy result shows the explicit lineage, and `source` shows
-the winning entry.
+masking disabled does not inherit the department's input mask list, and its
+`limits` mapping replaces the department's mapping rather than merging with it.
+`sources` in the effective-policy result shows the explicit lineage, and
+`source` shows the winning entry.
 
 With no matching assignment, the defaults are: both model checks enabled and
 all three masks (`EMAIL`, `MY_PHONE`, `MYKAD`). The preview reports
@@ -137,12 +140,23 @@ An authenticated user with the persisted `admin` role may create profiles that:
 - select any subset of `EMAIL`, `MY_PHONE` and `MYKAD` for input masking;
 - select any subset for output masking;
 - select no masks (an empty list), which is the explicit no-masking
-  relaxation.
+  relaxation;
+- tighten any of the four chat limits (`context_messages`, `context_budget`,
+  `default_reply_tokens`, `max_reply_tokens`) for that profile. An omitted
+  field keeps the server value, and an empty `limits` mapping means no profile
+  tightening.
 
-These toggles are independent. Disabling the input classifier does not disable
-input PII masking, the literal deny phrases, request validation or limits.
-Disabling output masking does not disable the output classifier or the output
-deny-phrase check. Disabling both classifiers does not disable any of the
+The server ceiling for those limits is resolved once at startup: the
+environment values (or their built-in defaults), then the optional top-level
+`limits` mapping in the startup policy. A profile value may only tighten that
+ceiling; a value above it is clamped to the ceiling and is never an increase.
+Administrators cannot change the environment, the startup policy or the
+ceiling itself.
+
+These toggles and limits are independent. Disabling the input classifier does
+not disable input PII masking, the literal deny phrases, request validation or
+limits. Disabling output masking does not disable the output classifier or the
+output deny-phrase check. Disabling both classifiers does not disable any of the
 following, which remain unconditional:
 
 - application-key authentication and workspace session checks;
@@ -264,6 +278,13 @@ Invalid input returns a generic `400`; missing rows `404`; a non-admin or
 cross-origin cookie write `403`; a stale optimistic-concurrency version `409`;
 and storage/busy/unavailable conditions `503`. Error bodies never include SQL,
 DSNs, keys or raw exception text.
+
+Profile responses carry the profile's raw `limits` mapping (empty when the
+profile tightens nothing) and `settings.ceiling`, the server effective limits
+that a profile may only tighten. Create, revise and rollback accept an optional
+`limits` object; invalid values are a generic `400`. The effective preview
+additionally returns `ceiling` and `effective_limits`, i.e. the profile's
+`limits` clamped to that ceiling.
 
 ## Upgrading an existing schema-2 deployment
 
@@ -516,6 +537,32 @@ Keep the database dump and key backup. If verification fails, keep the DSN for
 a safe retry. Because an old image does not accept schema 3, a code rollback
 requires restoring the pre-migration database backup (and stopping the new
 gateway); it is not enough to point Compose back at the old image.
+
+## Upgrading an existing schema-3 deployment
+
+Schema 4 adds four nullable columns (`context_messages`, `context_budget`,
+`default_reply_tokens`, `max_reply_tokens`) to `ws_policy_profile_revisions`.
+The change is additive: existing revisions keep their empty limits. An older
+image does not accept schema 4, so migrate before starting the new gateway and
+keep the same env-file/overlay chain throughout.
+
+1. Preserve VM-only patches before `git pull`, exactly as in step 1 of the
+   schema-2 procedure above.
+2. Stop only the gateway and back up the workspace database and the Fernet key
+   as in step 2. Leave PostgreSQL running and never use `down -v`.
+3. Build the new gateway image.
+4. Run the packaged `workspace_cli init` against the actual workspace database
+   with the operator migration DSN and the same key. The same command upgrades
+   schema 3 in place; it only adds the four nullable columns and does not reset
+   users, conversations, profiles or the administrator account.
+5. Reapply the packaged `nasi_lemak/workspace_roles.sql` grants to that same
+   database.
+6. Restart only the gateway and verify readiness, an existing login, an
+   existing conversation, the policy/alert panels and one new workspace turn.
+
+Keep the database dump and key backup; a code rollback alone is not sufficient
+once the schema is migrated. Never point the runtime
+`NASI_LEMAK_WORKSPACE_DSN_FILE` at the migration DSN.
 
 ## Verification status and limits
 

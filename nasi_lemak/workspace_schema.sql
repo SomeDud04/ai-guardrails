@@ -110,6 +110,8 @@ CREATE TABLE IF NOT EXISTS ws_policy_profiles (
 -- Append-only revisions.  A rollback creates a new row copying the selected
 -- old settings; old rows are never updated or deleted.  Mask columns hold a
 -- canonical comma-separated subset of EMAIL,MY_PHONE,MYKAD (empty = none).
+-- Limit columns are optional per-profile tightenings of the server-wide chat
+-- limits; NULL means the profile does not tighten that field.
 CREATE TABLE IF NOT EXISTS ws_policy_profile_revisions (
     id TEXT PRIMARY KEY,
     profile_id TEXT NOT NULL REFERENCES ws_policy_profiles(id) ON DELETE CASCADE,
@@ -120,6 +122,14 @@ CREATE TABLE IF NOT EXISTS ws_policy_profile_revisions (
         CHECK (output_check_enabled IN (0, 1)),
     input_masks TEXT NOT NULL,
     output_masks TEXT NOT NULL,
+    context_messages INTEGER
+        CHECK (context_messages IS NULL OR context_messages > 0),
+    context_budget INTEGER
+        CHECK (context_budget IS NULL OR context_budget > 0),
+    default_reply_tokens INTEGER
+        CHECK (default_reply_tokens IS NULL OR default_reply_tokens > 0),
+    max_reply_tokens INTEGER
+        CHECK (max_reply_tokens IS NULL OR max_reply_tokens > 0),
     digest TEXT NOT NULL,
     rollback_of INTEGER,
     created_by TEXT NOT NULL REFERENCES ws_users(id) ON DELETE RESTRICT,

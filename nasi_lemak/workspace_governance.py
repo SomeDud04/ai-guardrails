@@ -33,6 +33,7 @@ from .controls import (
     normalize_masks,
     settings_digest,
 )
+from .limits import LIMIT_FIELDS
 
 DEFAULT_PAGE = 50
 MAX_PAGE = 100
@@ -137,16 +138,52 @@ def _mask_selection(value: Any, field: str) -> tuple[str, ...]:
     return normalize_masks(value)
 
 
+def _limit_settings(value: Any) -> dict[str, int]:
+    """Accept an optional per-profile limits mapping.
+
+    Each field may be omitted or ``None`` (use the server effective limit) or
+    a positive integer.  Unknown keys, booleans, non-integers and a profile
+    ``default_reply_tokens`` above its own ``max_reply_tokens`` are rejected.
+    """
+
+    if value is None:
+        return {}
+    if (
+        isinstance(value, (str, bytes, bytearray))
+        or isinstance(value, bool)
+        or not isinstance(value, dict)
+    ):
+        raise ValueError("limits are invalid")
+    parsed: dict[str, int] = {}
+    for name, raw in value.items():
+        if name not in LIMIT_FIELDS:
+            raise ValueError("limits are invalid")
+        if raw is None:
+            continue
+        if isinstance(raw, bool) or not isinstance(raw, int) or raw <= 0:
+            raise ValueError("limits are invalid")
+        parsed[name] = raw
+    if (
+        "default_reply_tokens" in parsed
+        and "max_reply_tokens" in parsed
+        and parsed["default_reply_tokens"] > parsed["max_reply_tokens"]
+    ):
+        raise ValueError("limits are invalid")
+    return parsed
+
+
 def _settings(
     input_check_enabled: Any,
     output_check_enabled: Any,
     input_masks: Any,
     output_masks: Any,
-) -> tuple[bool, bool, tuple[str, ...], tuple[str, ...], str, str, str]:
+    limits: Any = None,
+) -> tuple[bool, bool, tuple[str, ...], tuple[str, ...], str, str, str, dict[str, int]]:
     input_enabled = _require_bool(input_check_enabled, "input check setting")
     output_enabled = _require_bool(output_check_enabled, "output check setting")
     input_selection = _mask_selection(input_masks, "input masks")
     output_selection = _mask_selection(output_masks, "output masks")
+    limit_values = _limit_settings(limits)
     return (
         input_enabled,
         output_enabled,
@@ -155,8 +192,13 @@ def _settings(
         masks_to_text(input_selection),
         masks_to_text(output_selection),
         settings_digest(
-            input_enabled, output_enabled, input_selection, output_selection
+            input_enabled,
+            output_enabled,
+            input_selection,
+            output_selection,
+            limit_values,
         ),
+        limit_values,
     )
 
 
@@ -186,6 +228,19 @@ def _stored_masks(row: dict[str, Any], field: str) -> list[str]:
     return list(parsed)
 
 
+def _stored_limit(row: dict[str, Any], field: str) -> int | None:
+    """Accept a nullable positive integer limit; reject booleans and coercion."""
+
+    value = row.get(field)
+    if value is None:
+        return None
+    if isinstance(value, bool) or not isinstance(value, int):
+        raise _errors().WorkspaceStorageError("stored policy settings are invalid")
+    if value <= 0:
+        raise _errors().WorkspaceStorageError("stored policy settings are invalid")
+    return value
+
+
 def _settings_from_row(row: dict[str, Any]) -> dict[str, Any]:
     """Validate one immutable revision row before any enforcement use.
 
@@ -197,11 +252,22 @@ def _settings_from_row(row: dict[str, Any]) -> dict[str, Any]:
     output_enabled = _stored_bool(row, "output_check_enabled")
     input_masks = _stored_masks(row, "input_masks")
     output_masks = _stored_masks(row, "output_masks")
+    limits = {
+        name: value
+        for name in LIMIT_FIELDS
+        if (value := _stored_limit(row, name)) is not None
+    }
+    if (
+        "default_reply_tokens" in limits
+        and "max_reply_tokens" in limits
+        and limits["default_reply_tokens"] > limits["max_reply_tokens"]
+    ):
+        raise _errors().WorkspaceStorageError("stored policy settings are invalid")
     digest = row.get("digest")
     if not isinstance(digest, str) or _DIGEST_RE.fullmatch(digest) is None:
         raise _errors().WorkspaceStorageError("stored policy settings are invalid")
     expected = settings_digest(
-        input_enabled, output_enabled, input_masks, output_masks
+        input_enabled, output_enabled, input_masks, output_masks, limits
     )
     if not hmac.compare_digest(digest, expected):
         raise _errors().WorkspaceStorageError("stored policy settings are invalid")
@@ -210,6 +276,7 @@ def _settings_from_row(row: dict[str, Any]) -> dict[str, Any]:
         "output_check_enabled": output_enabled,
         "input_masks": input_masks,
         "output_masks": output_masks,
+        "limits": limits,
     }
 
 
@@ -379,8 +446,9 @@ class PolicyAdminMixin:
         row = db.query_one(
             """
             SELECT profile_id, revision, input_check_enabled,
-                   output_check_enabled, input_masks, output_masks, digest,
-                   rollback_of, created_by, created_at
+                   output_check_enabled, input_masks, output_masks,
+                   context_messages, context_budget, default_reply_tokens,
+                   max_reply_tokens, digest, rollback_of, created_by, created_at
             FROM ws_policy_profile_revisions
             WHERE profile_id = ?
             ORDER BY revision DESC LIMIT 1
@@ -400,8 +468,9 @@ class PolicyAdminMixin:
         row = db.query_one(
             """
             SELECT profile_id, revision, input_check_enabled,
-                   output_check_enabled, input_masks, output_masks, digest,
-                   rollback_of, created_by, created_at
+                   output_check_enabled, input_masks, output_masks,
+                   context_messages, context_budget, default_reply_tokens,
+                   max_reply_tokens, digest, rollback_of, created_by, created_at
             FROM ws_policy_profile_revisions
             WHERE profile_id = ? AND revision = ?
             """,
@@ -421,6 +490,7 @@ class PolicyAdminMixin:
         output_check_enabled: bool,
         input_masks: str,
         output_masks: str,
+        limits: dict[str, int],
         digest: str,
         actor_id: str,
         now: float,
@@ -430,9 +500,10 @@ class PolicyAdminMixin:
             """
             INSERT INTO ws_policy_profile_revisions(
                 id, profile_id, revision, input_check_enabled,
-                output_check_enabled, input_masks, output_masks, digest,
-                rollback_of, created_by, created_at
-            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                output_check_enabled, input_masks, output_masks,
+                context_messages, context_budget, default_reply_tokens,
+                max_reply_tokens, digest, rollback_of, created_by, created_at
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
             """,
             (
                 str(uuid.uuid4()),
@@ -442,6 +513,10 @@ class PolicyAdminMixin:
                 1 if output_check_enabled else 0,
                 input_masks,
                 output_masks,
+                limits.get("context_messages"),
+                limits.get("context_budget"),
+                limits.get("default_reply_tokens"),
+                limits.get("max_reply_tokens"),
                 digest,
                 rollback_of,
                 actor_id,
@@ -483,6 +558,7 @@ class PolicyAdminMixin:
         output_check_enabled: bool = True,
         input_masks: Any = MASK_TYPES,
         output_masks: Any = MASK_TYPES,
+        limits: Any = None,
     ) -> dict[str, Any]:
         clean_name = _require_text(name, "profile name", maximum=PROFILE_NAME_MAX)
         name_key = clean_name.casefold()
@@ -494,8 +570,13 @@ class PolicyAdminMixin:
             input_text,
             output_text,
             digest,
+            limit_values,
         ) = _settings(
-            input_check_enabled, output_check_enabled, input_masks, output_masks
+            input_check_enabled,
+            output_check_enabled,
+            input_masks,
+            output_masks,
+            limits,
         )
         now = self._now()
         with self._backend.transaction() as db:
@@ -522,6 +603,7 @@ class PolicyAdminMixin:
                 output_check_enabled=output_enabled,
                 input_masks=input_text,
                 output_masks=output_text,
+                limits=limit_values,
                 digest=digest,
                 actor_id=actor_id,
                 now=now,
@@ -550,7 +632,9 @@ class PolicyAdminMixin:
             sql = (
                 "SELECT p.id, p.name, p.version, p.created_by, p.created_at, "
                 "p.updated_at, r.revision AS revision, r.input_check_enabled, "
-                "r.output_check_enabled, r.input_masks, r.output_masks, r.digest "
+                "r.output_check_enabled, r.input_masks, r.output_masks, "
+                "r.context_messages, r.context_budget, r.default_reply_tokens, "
+                "r.max_reply_tokens, r.digest "
                 "FROM ws_policy_profiles AS p "
                 "JOIN ws_policy_profile_revisions AS r ON r.profile_id = p.id "
                 "AND r.revision = (SELECT MAX(r2.revision) "
@@ -598,8 +682,9 @@ class PolicyAdminMixin:
             params: list[Any] = [profile["id"]]
             sql = (
                 "SELECT revision, input_check_enabled, output_check_enabled, "
-                "input_masks, output_masks, digest, rollback_of, created_by, "
-                "created_at FROM ws_policy_profile_revisions "
+                "input_masks, output_masks, context_messages, context_budget, "
+                "default_reply_tokens, max_reply_tokens, digest, rollback_of, "
+                "created_by, created_at FROM ws_policy_profile_revisions "
                 "WHERE profile_id = ?"
             )
             if after is not None:
@@ -640,6 +725,7 @@ class PolicyAdminMixin:
         output_check_enabled: bool = True,
         input_masks: Any = MASK_TYPES,
         output_masks: Any = MASK_TYPES,
+        limits: Any = None,
     ) -> dict[str, Any]:
         expected = _require_int(expected_revision, "expected revision")
         (
@@ -650,8 +736,13 @@ class PolicyAdminMixin:
             input_text,
             output_text,
             digest,
+            limit_values,
         ) = _settings(
-            input_check_enabled, output_check_enabled, input_masks, output_masks
+            input_check_enabled,
+            output_check_enabled,
+            input_masks,
+            output_masks,
+            limits,
         )
         now = self._now()
         with self._backend.transaction() as db:
@@ -676,6 +767,7 @@ class PolicyAdminMixin:
                 output_check_enabled=output_enabled,
                 input_masks=input_text,
                 output_masks=output_text,
+                limits=limit_values,
                 digest=digest,
                 actor_id=actor_id,
                 now=now,
@@ -711,7 +803,7 @@ class PolicyAdminMixin:
             if current != expected:
                 raise _errors().Conflict("policy profile changed")
             old = self._revision_row(db, profile["id"], target)
-            _settings_from_row(old)
+            old_limits = _settings_from_row(old)["limits"]
             new_revision = current + 1
             applied = db.execute(
                 "UPDATE ws_policy_profiles SET version = ?, updated_at = ? "
@@ -728,6 +820,7 @@ class PolicyAdminMixin:
                 output_check_enabled=bool(int(old["output_check_enabled"])),
                 input_masks=old["input_masks"],
                 output_masks=old["output_masks"],
+                limits=old_limits,
                 digest=old["digest"],
                 actor_id=actor_id,
                 now=now,
@@ -895,7 +988,8 @@ class PolicyAdminMixin:
                 "a.profile_revision, a.version, a.created_by, a.updated_by, "
                 "a.created_at, a.updated_at, p.name AS profile_name, "
                 "r.input_check_enabled, r.output_check_enabled, r.input_masks, "
-                "r.output_masks, r.digest "
+                "r.output_masks, r.context_messages, r.context_budget, "
+                "r.default_reply_tokens, r.max_reply_tokens, r.digest "
                 "FROM ws_policy_assignments AS a "
                 "JOIN ws_policy_profiles AS p ON p.id = a.profile_id "
                 "JOIN ws_policy_profile_revisions AS r "
@@ -974,7 +1068,8 @@ class PolicyAdminMixin:
                 "a.profile_revision, a.version, a.created_by, a.updated_by, "
                 "a.created_at, a.updated_at, p.name AS profile_name, "
                 "r.input_check_enabled, r.output_check_enabled, r.input_masks, "
-                "r.output_masks, r.digest "
+                "r.output_masks, r.context_messages, r.context_budget, "
+                "r.default_reply_tokens, r.max_reply_tokens, r.digest "
                 "FROM ws_policy_assignments AS a "
                 "JOIN ws_policy_profiles AS p ON p.id = a.profile_id "
                 "JOIN ws_policy_profile_revisions AS r "
@@ -1004,7 +1099,8 @@ class PolicyAdminMixin:
                 "a.profile_revision, a.version, a.created_by, a.updated_by, "
                 "a.created_at, a.updated_at, p.name AS profile_name, "
                 "r.input_check_enabled, r.output_check_enabled, r.input_masks, "
-                "r.output_masks, r.digest "
+                "r.output_masks, r.context_messages, r.context_budget, "
+                "r.default_reply_tokens, r.max_reply_tokens, r.digest "
                 "FROM ws_policy_assignments AS a "
                 "JOIN ws_policy_profiles AS p ON p.id = a.profile_id "
                 "JOIN ws_policy_profile_revisions AS r "
@@ -1060,7 +1156,9 @@ class PolicyAdminMixin:
                 SELECT a.scope_type, a.scope_key, a.profile_id,
                        a.profile_revision, p.name AS profile_name,
                        r.input_check_enabled, r.output_check_enabled,
-                       r.input_masks, r.output_masks, r.digest
+                       r.input_masks, r.output_masks,
+                       r.context_messages, r.context_budget,
+                       r.default_reply_tokens, r.max_reply_tokens, r.digest
                 FROM ws_policy_assignments AS a
                 JOIN ws_policy_profiles AS p ON p.id = a.profile_id
                 JOIN ws_policy_profile_revisions AS r
@@ -1111,6 +1209,7 @@ class PolicyAdminMixin:
                     "output_check_enabled": True,
                     "input_masks": list(MASK_TYPES),
                     "output_masks": list(MASK_TYPES),
+                    "limits": {},
                 }
                 revision = "default"
                 control_sources = ()
@@ -1124,6 +1223,7 @@ class PolicyAdminMixin:
                 output_masks=tuple(settings["output_masks"]),
                 revision=revision,
                 sources=control_sources,
+                limits=tuple(sorted(settings.get("limits", {}).items())),
             )
             return {
                 "user_id": target["id"],
@@ -1163,6 +1263,7 @@ class PolicyAdminMixin:
                 )
                 for source in data["sources"]
             ),
+            limits=tuple(sorted(data.get("limits", {}).items())),
         )
 
 
