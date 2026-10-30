@@ -256,8 +256,8 @@ class ComposeConfigTests(unittest.TestCase):
                 self.assertIn(f"- {name}\n", self.base_text)
                 self.assertNotIn(f"{name}=", self.base_text)
                 self.assertNotIn(f"{name}=", self.pilot_text)
-        # The pilot example documents the two conservative starting points.
-        self.assertIn("# NASI_LEMAK_CHAT_WORK_TIMEOUT=30", self.pilot_example)
+        # The pilot example documents the conservative starting points.
+        self.assertIn("# NASI_LEMAK_CHAT_WORK_TIMEOUT=60", self.pilot_example)
         self.assertIn("# NASI_LEMAK_CHAT_MAX_CONCURRENCY=1", self.pilot_example)
 
     def test_base_secrets_require_absolute_file_interpolation(self):
