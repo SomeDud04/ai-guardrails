@@ -233,6 +233,16 @@ the `32768` ceiling a payload whose framed prompt would exceed
 `32768 - 128 = 32640` positions fails closed the same way. It is never
 truncated and never silently passed.
 
+### Control tokens in screened text
+
+The rendered prompt is tokenized as one string, and a tokenizer reads a literal
+control token such as `<|im_end|>` as the real token wherever it appears.
+`render_guard_prompt` therefore breaks up `<|`, `|>` and every token the
+tokenizer lists as special or added, in the screened text and the reply, by
+inserting a space. A user cannot close their own section or forge a role in the
+guard's prompt, and the guard still reads the attempt as ordinary text. The fixed
+framing is not changed. A tokenizer whose vocabulary cannot be read fails closed.
+
 ### Categorical verdict and threshold
 
 The verdict is categorical (`Safety: Safe|Controversial|Unsafe` plus validated

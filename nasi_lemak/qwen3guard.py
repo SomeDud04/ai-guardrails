@@ -228,6 +228,37 @@ def guard_chat_messages(
     return messages
 
 
+def _control_tokens(tokenizer: Any) -> list[str]:
+    """Every string this tokenizer would read as one control token, longest first."""
+    found: set[str] = set()
+    special = getattr(tokenizer, "all_special_tokens", None)
+    if isinstance(special, (list, tuple)):
+        found.update(token for token in special if isinstance(token, str))
+    get_added_vocab = getattr(tokenizer, "get_added_vocab", None)
+    if callable(get_added_vocab):
+        try:
+            found.update(token for token in get_added_vocab() if isinstance(token, str))
+        except Exception:
+            raise GuardError("guard tokenizer vocabulary is unavailable") from None
+    return sorted((token for token in found if len(token) > 1), key=len, reverse=True)
+
+
+def neutralize_control_tokens(text: str, tokenizer: Any) -> str:
+    """Stop screened text from acting as chat-template structure.
+
+    The rendered prompt is tokenized as one string, and a tokenizer reads a
+    literal ``<|im_end|>`` in it as the real control token wherever it appears.
+    Without this step a user could close their own section and forge another
+    role inside the guard's prompt.  A space is inserted instead of deleting
+    anything, so the guard still reads the attempt as ordinary text.
+    """
+    cleaned = text.replace("<|", "< |").replace("|>", "| >")
+    for token in _control_tokens(tokenizer):
+        if token in cleaned:
+            cleaned = cleaned.replace(token, f"{token[0]} {token[1:]}")
+    return cleaned
+
+
 def render_guard_prompt(
     tokenizer: Any, serialized: Any, *, reply: Any = None
 ) -> str:
@@ -236,9 +267,12 @@ def render_guard_prompt(
     This is the **single** template-delivery helper: the product transport and
     the benchmark both call it, so the two consumers cannot drift (D23).  The
     template is the artifact's (``tokenizer.apply_chat_template``); a missing or
-    failing template fails closed with :class:`GuardError`.
+    failing template fails closed with :class:`GuardError`.  Screened text is
+    neutralized first; the fixed framing is not.
     """
     messages = guard_chat_messages(serialized, reply=reply)
+    for message in messages[1:]:
+        message["content"] = neutralize_control_tokens(message["content"], tokenizer)
     apply_chat_template = getattr(tokenizer, "apply_chat_template", None)
     if not callable(apply_chat_template):
         raise GuardError("guard chat template is unavailable")
