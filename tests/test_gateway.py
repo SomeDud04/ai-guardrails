@@ -225,6 +225,37 @@ class GatewayTests(unittest.TestCase):
         status, body = self.gateway.handle("POST", "/v1/chat/completions", None, request())
         self.assertEqual(status, 401)
 
+    def _allow(self, **categories):
+        self.gateway.policy = Policy(**categories)
+
+    def test_input_block_passes_when_the_policy_allows_every_category(self):
+        self._allow(input_allow_categories=("Copyright Violation",))
+        self.adapters.attack_result = {
+            "decision": "block",
+            "categories": ["Copyright Violation"],
+        }
+        self.assertEqual(self.call(request())[0], 200)
+
+    def test_input_block_holds_for_a_mixed_or_empty_category_list(self):
+        self._allow(input_allow_categories=("Copyright Violation",))
+        for categories in (["Copyright Violation", "Violent"], [], None):
+            with self.subTest(categories=categories):
+                self.adapters.attack_result = {
+                    "decision": "block",
+                    "categories": categories,
+                }
+                self.assertEqual(self.call(request())[0], 403)
+
+    def test_each_lane_uses_its_own_allow_list(self):
+        self._allow(input_allow_categories=("Violent",))
+        self.adapters.output_result = {"safe": False, "categories": ["Violent"]}
+        self.assertEqual(self.call(request())[0], 403)
+
+        self._allow(output_allow_categories=("Violent",))
+        self.assertEqual(self.call(request())[0], 200)
+        self.adapters.attack_result = {"decision": "block", "categories": ["Violent"]}
+        self.assertEqual(self.call(request())[0], 403)
+
     def test_policy_digest_cannot_be_overridden(self):
         with self.assertRaises((TypeError, ValueError)):
             Policy(version="v", digest="client-controlled")

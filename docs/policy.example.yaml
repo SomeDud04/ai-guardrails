@@ -23,3 +23,12 @@ model: pilot-local
 token_budget: 256
 deny_phrases:
   - "synthetic denied phrase"
+
+# Optional: guard categories this policy allows on each lane.  Omit it to block
+# every category.  Each name must match the guard's category list exactly.
+# Jailbreak cannot be allowed.  Measure the change with docs/guard-evaluation.md
+# before relying on it.
+# guard:
+#   input_allow_categories:
+#     - Politically Sensitive Topics
+#   output_allow_categories: []

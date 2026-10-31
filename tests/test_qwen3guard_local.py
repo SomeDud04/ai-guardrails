@@ -384,7 +384,7 @@ class VerdictLaneTests(LocalTransportTestCase):
         allowing = self._guard(model_kwargs={"output": SAFE_INPUT})
         self.assertEqual(allowing.scan_attack("hello"), {"decision": "allow"})
         blocking = self._guard(model_kwargs={"output": UNSAFE_INPUT_JAILBREAK})
-        self.assertEqual(blocking.scan_attack("hello"), {"decision": "block"})
+        self.assertEqual(blocking.scan_attack("hello")["decision"], "block")
 
     def test_local_output_lane_uses_the_response_contract(self) -> None:
         guard = self._guard(model_kwargs={"output": SAFE_INPUT})
@@ -393,6 +393,13 @@ class VerdictLaneTests(LocalTransportTestCase):
 
 
 class TransportParityTests(LocalTransportTestCase):
+    def test_a_block_reports_the_verdict_categories(self) -> None:
+        guard = self._guard(model_kwargs={"output": UNSAFE})
+        self.assertTrue(guard.scan_attack("hello")["categories"])
+        result = guard.scan_response([{"role": "user", "content": "hello"}], "reply")
+        self.assertFalse(result["safe"])
+        self.assertTrue(result["categories"])
+
     def test_local_verdict_matches_the_shared_parser(self) -> None:
         messages = [{"role": "user", "content": "hello"}]
         for verdict in (SAFE, UNSAFE, CONTROVERSIAL):
@@ -411,16 +418,16 @@ class TransportParityTests(LocalTransportTestCase):
         self.assertEqual(default.scan_attack("hello"), {"decision": "allow"})
 
         unsafe = self._guard(model_kwargs={"output": UNSAFE})
-        self.assertEqual(unsafe.scan_attack("hello"), {"decision": "block"})
+        self.assertEqual(unsafe.scan_attack("hello")["decision"], "block")
 
         controversial = self._guard(model_kwargs={"output": CONTROVERSIAL})
-        self.assertEqual(controversial.scan_attack("hello"), {"decision": "block"})
+        self.assertEqual(controversial.scan_attack("hello")["decision"], "block")
 
         # At a zero floor even Safe blocks: the comparison is fail-closed.
         zero = self._guard(
             input_threshold=0.0, model_kwargs={"output": SAFE}
         )
-        self.assertEqual(zero.scan_attack("hello"), {"decision": "block"})
+        self.assertEqual(zero.scan_attack("hello")["decision"], "block")
 
     def test_a_threshold_above_the_categorical_ceiling_is_invalid(self) -> None:
         for value in (0.5001, 1.0, -0.1, float("nan"), True, "0.5"):
@@ -440,9 +447,8 @@ class TransportParityTests(LocalTransportTestCase):
         guard = self._guard(
             output_threshold=0.0, model_kwargs={"output": SAFE}
         )
-        self.assertEqual(
-            guard.scan_response([{"role": "user", "content": "hello"}], "reply"),
-            {"safe": False},
+        self.assertFalse(
+            guard.scan_response([{"role": "user", "content": "hello"}], "reply")["safe"]
         )
 
 

@@ -128,12 +128,13 @@ def log_rejection(request_id: str, status: int, reason: str) -> None:
 class Policy:
     """Immutable activated policy.
 
-    There are deliberately no knobs for PII masking, guard verdict handling or
-    audit ordering: those controls are unconditional in ``Gateway``.  A policy
-    only selects the public app identity, version, alias, token budget, the
-    bounded literal deny-phrase list and an optional set of chat-limit
-    tightening values.  ``limits`` is ``None`` when the policy file omitted the
-    key, and a flat mapping of field name to positive integer otherwise.
+    There are deliberately no knobs for PII masking or audit ordering: those
+    controls are unconditional in ``Gateway``.  A policy only selects the public
+    app identity, version, alias, token budget, the bounded literal deny-phrase
+    list, an optional set of chat-limit tightening values and the guard
+    categories it allows on each lane.  ``limits`` is ``None`` when the policy
+    file omitted the key, and a flat mapping of field name to positive integer
+    otherwise.  Both allow lists are empty unless the policy names categories.
     """
 
     version: str = "synthetic-0.1"
@@ -142,6 +143,8 @@ class Policy:
     app_id: str = "synthetic-app"
     deny_phrases: tuple[str, ...] = ()
     limits: dict[str, int] | None = None
+    input_allow_categories: tuple[str, ...] = ()
+    output_allow_categories: tuple[str, ...] = ()
     # Derived once at construction, never serialized, hashed or exposed.  They
     # are excluded from equality so policy identity stays the raw configured
     # fields.  Matching uses the union of both canonical forms: (a) deletes
@@ -279,6 +282,11 @@ class Policy:
             # Only a policy that actually has the optional key changes the
             # digest, so existing five-key files and audit rows stay comparable.
             canonical_document["limits"] = dict(self.limits)
+        if self.input_allow_categories or self.output_allow_categories:
+            canonical_document["guard"] = {
+                "input_allow_categories": sorted(self.input_allow_categories),
+                "output_allow_categories": sorted(self.output_allow_categories),
+            }
         canonical = json.dumps(
             canonical_document,
             sort_keys=True,
@@ -286,6 +294,20 @@ class Policy:
             ensure_ascii=False,
         )
         return hashlib.sha256(canonical.encode("utf-8")).hexdigest()
+
+
+def _policy_allows(result: dict[str, Any], allowed: tuple[str, ...]) -> bool:
+    """True when every category behind a block is one the policy allows.
+
+    A block that names no category stays a block.
+    """
+    categories = result.get("categories")
+    return (
+        bool(allowed)
+        and isinstance(categories, (list, tuple))
+        and bool(categories)
+        and all(category in allowed for category in categories)
+    )
 
 
 class MemoryAdapters:
@@ -581,7 +603,9 @@ class Gateway:
                     result = self.adapters.scan_attack(serialized)
                 if not isinstance(result, dict) or result.get("decision") not in ("allow", "block"):
                     raise ValueError("invalid attack result")
-                if result["decision"] == "block":
+                if result["decision"] == "block" and not _policy_allows(
+                    result, self.policy.input_allow_categories
+                ):
                     _sink("input_decision", "block")
                     _audit_sink("request_blocked", "blocked", "POLICY_BLOCK")
                     return self._blocked(request_id, "INPUT_GUARD_BLOCK")
@@ -650,8 +674,11 @@ class Gateway:
                     result = self.adapters.scan_output(output)
                 if not isinstance(result, dict) or not isinstance(result.get("safe"), bool):
                     raise ValueError("invalid output result")
-                _sink("output_safe", result["safe"])
-                if not result["safe"]:
+                safe = result["safe"] or _policy_allows(
+                    result, self.policy.output_allow_categories
+                )
+                _sink("output_safe", safe)
+                if not safe:
                     _audit_sink("request_blocked", "blocked", "POLICY_BLOCK")
                     return self._blocked(request_id, "OUTPUT_GUARD_BLOCK")
             # The complete buffered output is checked before any release.

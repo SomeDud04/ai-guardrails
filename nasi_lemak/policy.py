@@ -15,6 +15,7 @@ from pathlib import Path
 from typing import Any
 
 from .gateway import Policy
+from .qwen3guard import CATEGORY_VALUES
 
 MAX_POLICY_FILE_BYTES = 32 * 1024
 # The canonical document is a flat mapping with one list.  A small explicit
@@ -25,7 +26,8 @@ MAX_COLLECTION_DEPTH = 8
 _REQUIRED_KEYS = frozenset(
     {"app_id", "version", "model", "token_budget", "deny_phrases"}
 )
-_OPTIONAL_KEYS = frozenset({"limits"})
+_OPTIONAL_KEYS = frozenset({"limits", "guard"})
+_GUARD_KEYS = frozenset({"input_allow_categories", "output_allow_categories"})
 _ALLOWED_KEYS = _REQUIRED_KEYS | _OPTIONAL_KEYS
 
 
@@ -109,12 +111,25 @@ def _strict_load(yaml: Any, text: str) -> Any:
         raise PolicyError("policy YAML is invalid") from None
 
 
+def _allow_list(section: dict[str, Any], key: str) -> tuple[str, ...]:
+    """Validate one lane's list.  ``Jailbreak`` is not listed, so it stays blocked."""
+    values = section.get(key, [])
+    if (
+        not isinstance(values, list)
+        or len(set(map(str, values))) != len(values)
+        or not all(value in CATEGORY_VALUES for value in values)
+    ):
+        raise PolicyError("policy guard categories are invalid")
+    return tuple(values)
+
+
 def load_policy(path: str | Path | None) -> Policy:
     """Read and validate one complete policy file.
 
     The returned object is immutable and its digest covers the app identity,
     version, public model alias, token budget, literal deny phrases and, when
-    the optional ``limits`` mapping is present, that mapping in canonical order.
+    the optional ``limits`` mapping is present, that mapping in canonical order,
+    plus any guard categories the policy allows.
     Any failure raises :class:`PolicyError` with a fixed generic message; file
     contents and paths are never echoed.
     """
@@ -134,6 +149,9 @@ def load_policy(path: str | Path | None) -> Policy:
     if "limits" in loaded and not isinstance(loaded["limits"], dict):
         # ``limits:`` with a null or sequence value is not a flat mapping.
         raise PolicyError("policy limits are invalid")
+    guard = loaded.get("guard", {})
+    if not isinstance(guard, dict) or not set(guard) <= _GUARD_KEYS:
+        raise PolicyError("policy guard categories are invalid")
 
     try:
         return Policy(
@@ -143,6 +161,8 @@ def load_policy(path: str | Path | None) -> Policy:
             app_id=loaded["app_id"],
             deny_phrases=loaded["deny_phrases"],
             limits=loaded["limits"] if "limits" in loaded else None,
+            input_allow_categories=_allow_list(guard, "input_allow_categories"),
+            output_allow_categories=_allow_list(guard, "output_allow_categories"),
         )
     except (TypeError, ValueError):
         raise PolicyError("policy configuration is invalid") from None

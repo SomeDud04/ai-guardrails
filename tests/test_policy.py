@@ -131,6 +131,33 @@ class PolicyLoaderTests(unittest.TestCase):
         )
         self.assertIsNone(policy.limits)
 
+    def test_guard_allow_lists_load_and_change_the_digest(self) -> None:
+        policy = load_policy(
+            _write_policy(
+                self.root / "guard.yaml",
+                guard={"input_allow_categories": ["Copyright Violation"]},
+            )
+        )
+        self.assertEqual(policy.input_allow_categories, ("Copyright Violation",))
+        self.assertEqual(policy.output_allow_categories, ())
+        baseline = load_policy(_write_policy(self.root / "baseline.yaml"))
+        self.assertNotEqual(policy.digest, baseline.digest)
+
+    def test_invalid_guard_allow_lists_are_rejected(self) -> None:
+        for index, guard in enumerate(
+            (
+                {"input_allow_categories": ["Jailbreak"]},
+                {"output_allow_categories": ["Not a category"]},
+                {"input_allow_categories": ["Violent", "Violent"]},
+                {"input_allow_categories": "Violent"},
+                {"unknown": []},
+                ["Violent"],
+                None,
+            )
+        ):
+            with self.subTest(guard=guard), self.assertRaises(PolicyError):
+                load_policy(_write_policy(self.root / f"bad-{index}.yaml", guard=guard))
+
     def test_optional_limits_are_validated_and_included_in_digest(self) -> None:
         policy = load_policy(
             _write_policy(

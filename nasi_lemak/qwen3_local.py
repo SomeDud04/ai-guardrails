@@ -421,21 +421,18 @@ class Qwen3GuardLocal:
         serialized: str,
         *,
         scan_context: Any = None,
-    ) -> dict[str, str]:
+    ) -> dict[str, Any]:
         """Classify one complete serialized input; fail closed on any error."""
 
         def _scan() -> Any:
             return self._verdict(serialized, lane=LANE_INPUT)
 
         verdict = self._run_scan(serialized, _scan, scan_context)
-        decision = (
-            "block"
-            if verdict_blocks(verdict, self._input_threshold)
-            else "allow"
-        )
-        return {"decision": decision}
+        if verdict_blocks(verdict, self._input_threshold):
+            return {"decision": "block", "categories": list(verdict.categories)}
+        return {"decision": "allow"}
 
-    def scan_response(self, messages: Any, output: Any) -> dict[str, bool]:
+    def scan_response(self, messages: Any, output: Any) -> dict[str, Any]:
         """Classify the complete masked context plus the buffered output."""
         conversation = validate_conversation(messages, output)
         reply = conversation[-1]["content"]
@@ -444,7 +441,9 @@ class Qwen3GuardLocal:
             verdict = self._verdict(
                 serialized, lane=LANE_RESPONSE, reply=reply
             )
-        return {"safe": not verdict_blocks(verdict, self._output_threshold)}
+        if verdict_blocks(verdict, self._output_threshold):
+            return {"safe": False, "categories": list(verdict.categories)}
+        return {"safe": True}
 
     def _run_scan(
         self, serialized: Any, scan: Any, scan_context: Any
