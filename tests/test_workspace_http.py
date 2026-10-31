@@ -540,8 +540,16 @@ class LoginAndAdminTests(WorkspaceHTTPBase):
         )
         self.assertEqual(set(payload["policy"]), {"version", "digest", "token_budget"})
         self.assertEqual(
-            set(payload["guards"]), {"mode", "active", "framing_version"}
+            set(payload["guards"]),
+            {
+                "mode",
+                "active",
+                "framing_version",
+                "input_allow_categories",
+                "output_allow_categories",
+            },
         )
+        self.assertEqual(payload["guards"]["input_allow_categories"], [])
         self.assertEqual(payload["guards"]["mode"], self.app.state.mode)
         self.assertEqual(payload["guards"]["active"], self.app.state.guards_active)
         self.assertEqual(payload["guards"]["framing_version"], FRAMING_VERSION)

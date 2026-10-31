@@ -1314,6 +1314,12 @@ def register_workspace_routes(app: FastAPI, runtime: WorkspaceRuntime) -> None:
                 "mode": getattr(state, "mode", None),
                 "active": getattr(state, "guards_active", None),
                 "framing_version": FRAMING_VERSION,
+                "input_allow_categories": list(
+                    getattr(policy, "input_allow_categories", ())
+                ),
+                "output_allow_categories": list(
+                    getattr(policy, "output_allow_categories", ())
+                ),
             },
             "chat_limits": chat_limits,
             "limits": getattr(state, "limits_view", None),

@@ -5374,6 +5374,8 @@ _WORKSPACE_JS = """
     appendSettingRow("Guard mode", guards.mode);
     appendSettingRow("Guards active", guards.active);
     appendSettingRow("Guard framing version", guards.framing_version);
+    appendSettingRow("Allowed input categories", (guards.input_allow_categories || []).join(", ") || "None");
+    appendSettingRow("Allowed output categories", (guards.output_allow_categories || []).join(", ") || "None");
     var chatLimits = isObject(data.chat_limits) ? data.chat_limits : {};
     for (var chatKey in chatLimits) {
       if (!Object.prototype.hasOwnProperty.call(chatLimits, chatKey)) { continue; }
