@@ -157,6 +157,7 @@ ENV_MAX_BODY_BYTES = "NASI_LEMAK_MAX_BODY_BYTES"
 ENV_BODY_READ_TIMEOUT = "NASI_LEMAK_BODY_READ_TIMEOUT"
 
 ENV_POLICY_FILE = "NASI_LEMAK_POLICY_FILE"
+ENV_TLS_TERMINATED_AT_PROXY = "NASI_LEMAK_TLS_TERMINATED_AT_PROXY"
 ENV_OPERATOR_KEY_DIGEST = "NASI_LEMAK_OPERATOR_KEY_DIGEST"
 ENV_OPERATOR_AUDIT_DSN = "NASI_LEMAK_OPERATOR_AUDIT_DSN"
 
@@ -612,6 +613,22 @@ def _guard_backend(env: dict[str, str]) -> str:
         return ""
     backend = backend.strip().lower()
     return backend if backend in GUARD_BACKENDS else ""
+
+
+class _TlsTerminatedAtProxy:
+    """Report HTTPS to the app when the operator says nginx terminates TLS.
+
+    This is a deployment setting, not a request header: a client cannot turn it
+    on, and ``X-Forwarded-Proto`` stays untrusted.
+    """
+
+    def __init__(self, app: Any) -> None:
+        self.app = app
+
+    async def __call__(self, scope: Any, receive: Any, send: Any) -> None:
+        if scope["type"] == "http":
+            scope = {**scope, "scheme": "https"}
+        await self.app(scope, receive, send)
 
 
 def _mode_from_env(env: dict[str, str]) -> str:
@@ -1511,6 +1528,8 @@ def make_app(
     app.state.sem = asyncio.Semaphore(concurrency)
     app.state.control_concurrency = control_limit
     app.state.control_admission = _ControlPlaneAdmission(control_limit)
+    if str(env.get(ENV_TLS_TERMINATED_AT_PROXY, "")).strip().lower() == "true":
+        app.add_middleware(_TlsTerminatedAtProxy)
     app.state.chat_work_timeout = chat_timeout
     # Read-only resolved operational bounds for the authenticated admin view.
     app.state.operational = {

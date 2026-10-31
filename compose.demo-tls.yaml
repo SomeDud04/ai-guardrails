@@ -1,0 +1,38 @@
+# Optional HTTPS overlay for the demo ingress.  Apply it AFTER compose.demo.yaml:
+#
+#   docker compose ... -f compose.demo.yaml -f compose.demo-tls.yaml config
+#
+# Port 8080 then speaks HTTPS only.  The certificate and key stay on the host,
+# are mounted read-only, and must be readable by nginx's UID 101.  See
+# docs/demo-access.md.  The gateway keeps its 127.0.0.1:8000 publication, and it
+# treats every request as HTTPS because nginx is its only LAN-facing route.
+
+services:
+  nginx:
+    volumes:
+      - type: bind
+        source: ./deploy/nginx-demo-tls.conf
+        target: /etc/nginx/nginx.conf
+        read_only: true
+        bind:
+          create_host_path: false
+      - type: bind
+        source: ${DEMO_TLS_CERT_FILE:?Set DEMO_TLS_CERT_FILE to an absolute certificate path}
+        target: /run/demo-tls/cert.pem
+        read_only: true
+        bind:
+          create_host_path: false
+      - type: bind
+        source: ${DEMO_TLS_KEY_FILE:?Set DEMO_TLS_KEY_FILE to an absolute private-key path}
+        target: /run/demo-tls/key.pem
+        read_only: true
+        bind:
+          create_host_path: false
+    healthcheck:
+      # Liveness of the listener only; the certificate is not validated here.
+      test: ["CMD", "nc", "-z", "127.0.0.1", "8080"]
+
+  gateway:
+    environment:
+      NASI_LEMAK_TLS_TERMINATED_AT_PROXY: "true"
+      NASI_LEMAK_WORKSPACE_ALLOW_HTTP: "false"

@@ -2136,6 +2136,7 @@ class Installer:
         for env_name, overlay in (
             ("compose.workspace.env", "compose.workspace.yaml"),
             ("compose.demo.env", "compose.demo.yaml"),
+            ("compose.demo-tls.env", "compose.demo-tls.yaml"),
         ):
             env_path = self.state_dir / env_name
             if env_path.is_file():

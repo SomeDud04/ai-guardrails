@@ -20,7 +20,7 @@ from fastapi.testclient import TestClient
 
 from nasi_lemak.audit import SqliteAuditStore
 from nasi_lemak.gateway import Gateway, MemoryAdapters
-from nasi_lemak.server import make_app
+from nasi_lemak.server import _TlsTerminatedAtProxy, make_app
 
 TEST_KEY = "test-app-key"
 AUTH = {"Authorization": "Bearer " + TEST_KEY}
@@ -804,6 +804,35 @@ class ConcurrencyAndReadinessTests(ServerTestBase):
             self.assertEqual(json.loads(body)["status"], "ready")
 
         asyncio.run(asyncio.wait_for(scenario(), timeout=10))
+
+
+class TlsTerminatedAtProxyTests(unittest.TestCase):
+    def _seen_scheme(self, scope_type: str = "http") -> str:
+        seen: dict[str, Any] = {}
+
+        async def app(scope: Any, _receive: Any, _send: Any) -> None:
+            seen.update(scope)
+
+        wrapped = _TlsTerminatedAtProxy(app)
+        asyncio.run(wrapped({"type": scope_type, "scheme": "http"}, None, None))
+        return seen["scheme"]
+
+    def test_http_requests_are_reported_as_https(self) -> None:
+        self.assertEqual(self._seen_scheme(), "https")
+
+    def test_lifespan_scope_is_left_alone(self) -> None:
+        self.assertEqual(self._seen_scheme("lifespan"), "http")
+
+    def test_middleware_is_installed_only_when_configured(self) -> None:
+        for env, expected in (
+            ({}, False),
+            ({"NASI_LEMAK_TLS_TERMINATED_AT_PROXY": "false"}, False),
+            ({"NASI_LEMAK_TLS_TERMINATED_AT_PROXY": "true"}, True),
+        ):
+            with self.subTest(env=env):
+                app = make_app(environ=env)
+                names = [item.cls for item in app.user_middleware]
+                self.assertEqual(_TlsTerminatedAtProxy in names, expected)
 
 
 if __name__ == "__main__":

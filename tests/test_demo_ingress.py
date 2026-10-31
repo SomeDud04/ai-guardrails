@@ -302,5 +302,32 @@ class InstallDocumentationTests(unittest.TestCase):
         self.assertIn("no\ninstaller flag", self.text)
 
 
+class TlsOverlayTests(unittest.TestCase):
+    def setUp(self) -> None:
+        self.conf = (ROOT / "deploy" / "nginx-demo-tls.conf").read_text(encoding="utf-8")
+        self.plain = NGINX.read_text(encoding="utf-8")
+
+    def test_tls_conf_listens_only_with_tls(self) -> None:
+        self.assertIn("listen 8080 ssl;", self.conf)
+        self.assertNotIn("listen 8080;", self.conf)
+        self.assertIn("ssl_protocols TLSv1.2 TLSv1.3;", self.conf)
+
+    def test_tls_conf_keeps_the_plain_proxy_settings(self) -> None:
+        start = self.plain.index("http {")
+        end = self.plain.index("    server {")
+        self.assertIn(self.plain[start:end], self.conf)
+
+    def test_overlay_mounts_key_material_read_only_and_requires_paths(self) -> None:
+        if yaml is None:
+            self.skipTest("PyYAML is not installed")
+        overlay = yaml.safe_load((ROOT / "compose.demo-tls.yaml").read_text(encoding="utf-8"))
+        volumes = overlay["services"]["nginx"]["volumes"]
+        self.assertTrue(all(volume["read_only"] for volume in volumes))
+        sources = [volume["source"] for volume in volumes[1:]]
+        self.assertTrue(all(":?" in source for source in sources))
+        env = overlay["services"]["gateway"]["environment"]
+        self.assertEqual(env["NASI_LEMAK_WORKSPACE_ALLOW_HTTP"], "false")
+
+
 if __name__ == "__main__":
     unittest.main()

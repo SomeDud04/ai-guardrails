@@ -293,6 +293,39 @@ Leave the gateway, database, `nasi_lemark_db` volume and `.secrets` files alone.
 Never run `docker compose down -v`: it deletes the audit database volume. Do not
 run even plain `down` as part of this demo rollback.
 
+## Optional HTTPS
+
+Plain HTTP lets anyone watching the LAN read chat keys, login sessions and
+prompts. Turn this on before any real data goes through port 8080. It is off
+until you add the overlay.
+
+1. Put a certificate and key on the VM outside the repository. For a trusted LAN
+   a self-signed pair is enough, and browsers will warn until you trust it:
+
+   ```bash
+   sudo install -d -m 0755 /etc/nasi-lemak/tls
+   sudo openssl req -x509 -newkey rsa:2048 -nodes -days 365 \
+     -keyout /etc/nasi-lemak/tls/key.pem -out /etc/nasi-lemak/tls/cert.pem \
+     -subj "/CN=VM_LAN_IP" -addext "subjectAltName=IP:VM_LAN_IP"
+   sudo chown 101:101 /etc/nasi-lemak/tls/key.pem
+   sudo chmod 0400 /etc/nasi-lemak/tls/key.pem
+   ```
+
+2. Create `.secrets/compose.demo-tls.env` with these two lines:
+
+   ```text
+   DEMO_TLS_CERT_FILE=/etc/nasi-lemak/tls/cert.pem
+   DEMO_TLS_KEY_FILE=/etc/nasi-lemak/tls/key.pem
+   ```
+
+3. Add `--env-file .secrets/compose.demo-tls.env` and `-f compose.demo-tls.yaml`
+   after the demo entries in your Compose chain, then recreate `gateway` and
+   `nginx`. The installer adds them on a rerun when that env file exists.
+
+Port 8080 then accepts HTTPS only, so clients use `https://VM_LAN_IP:8080`. A
+self-signed certificate must be trusted by `nasi-chat` and `curl` too. The
+gateway stays reachable over plain HTTP on the VM's own `127.0.0.1:8000`.
+
 ## Known limits
 
 - The customer demo guards remain inactive in test mode, the existing warning
