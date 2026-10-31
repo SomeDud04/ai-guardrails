@@ -123,9 +123,9 @@ DEFAULT_PROMPT_GUARD_THRESHOLD = 0.5
 #: the parser as if it were a lane.
 SLOT_LANES = {"input": LANE_INPUT, "output": LANE_RESPONSE}
 
-#: Versioned fixed framing sent with every guard call. It is part of the
-#: product contract (taxonomy plus verdict shape), so its token cost is paid on
-#: every request and is reported separately from the payload.  Both names
+#: Versioned fixed framing sent with every output-lane guard call. It is part of
+#: the product contract (taxonomy plus verdict shape), so its token cost is paid
+#: on each of those calls and is reported separately from the payload.  Both names
 #: resolve to the shared framing object, preserving its exact bytes.
 PROMPT_FRAMING_VERSION = FRAMING_VERSION
 PROMPT_FRAMING = GUARD_FRAMING

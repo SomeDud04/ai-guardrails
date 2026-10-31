@@ -146,9 +146,11 @@ input attack slot and the output slot; `scan_attack` compares the verdict with
 the input threshold and `scan_response` with the output threshold.
 
 Prompts are delivered through the artifact's own chat template, not a plain
-framing concatenation: the input lane sends `system: GUARD_FRAMING` plus
-`user: <serialized>`, and the output lane appends the buffered reply as the
-`assistant` turn. One shared helper (`render_guard_prompt`) applies
+framing concatenation: the input lane sends `user: <serialized>` alone, and the
+output lane sends `system: GUARD_FRAMING`, `user: <serialized>` and the buffered
+reply as the `assistant` turn. The input lane carries no framing because the
+framing cut jailbreak detection; `docs/guard-evaluation.md` has the numbers. One
+shared helper (`render_guard_prompt`) applies
 `tokenizer.apply_chat_template(tokenize=False, add_generation_prompt=True)` for
 both the product and the benchmark, so the measured delivery cannot drift from
 the deployed one. A missing or failing template is a `GuardError` (fail closed);
@@ -216,10 +218,11 @@ transport therefore fails closed at two independent points:
 ### One-call long input
 
 Long input is screened in **one call**. There is no window split and no
-truncation, because the 432-unit fixed framing is paid on every call and
-splitting multiplies the dominant fixed cost. The budget is a payload budget;
+truncation, because the 432-unit fixed framing is paid on every output call and
+splitting would multiply the dominant fixed cost. The budget is a payload budget;
 the complete template-delivered prompt (framing, template wrapper and payload)
-is checked separately against the model window:
+is checked separately against the model window. The figures below are the output
+lane; an input scan costs the same without the framing:
 
 ```
 default: 8192 payload + 432 framing + 128 verdict reserve = 8752

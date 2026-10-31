@@ -37,18 +37,20 @@ rejected from the runtime class/head.  Any surprise is a ``GuardError``, never
 an allow.
 
 The prompt delivery is the shared contract: ``render_guard_prompt`` applies the
-artifact's own chat template to ``guard_chat_messages`` (system framing plus the
-serialized text, plus the assistant reply on the output lane).  A missing or
-failing chat template is a ``GuardError``; there is no plain-text fallback.  The
+artifact's own chat template to ``guard_chat_messages`` (the serialized text
+alone on the input lane; system framing, serialized text and assistant reply on
+the output lane).  A missing or failing chat template is a ``GuardError``; there
+is no plain-text fallback.  The
 rendered prompt is tokenized with ``add_special_tokens=False`` and
 ``truncation=False``, because the template's special tokens are literal text in
 the rendered string.
 
 Long input is one call, never a window split and never truncated.  The fixed
-framing is paid on every call, so splitting multiplies the dominant fixed cost.
-At the default 8192-token payload budget a full input costs 8192 + 432 framing
-units in one forward pass, inside the 32768-position window minus the 128-token
-verdict reserve (8192 + 432 + 128 = 8752).  The budget is a payload budget: the
+framing is paid on every output call, so splitting would multiply the dominant
+fixed cost.  At the default 8192-token payload budget a full output scan costs
+8192 + 432 framing units in one forward pass, inside the 32768-position window
+minus the 128-token verdict reserve (8192 + 432 + 128 = 8752); an input scan
+costs the same without the framing.  The budget is a payload budget: the
 framed prompt is checked separately against the physical window.  An input above
 the configured budget, or a framed prompt that does not fit the window with the
 verdict reserve, fails closed with ``INPUT_LIMIT`` and nothing is released.

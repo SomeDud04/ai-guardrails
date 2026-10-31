@@ -474,19 +474,13 @@ class TransportParityTests(LocalTransportTestCase):
 class TemplateDeliveryTests(LocalTransportTestCase):
     """The artifact's chat template is the one delivery for both lanes."""
 
-    def test_input_lane_uses_system_and_user_with_generation_prompt(self) -> None:
+    def test_input_lane_sends_only_the_user_turn_with_generation_prompt(self) -> None:
         tokenizer = _ToyTokenizer()
         guard = self._guard(tokenizer=tokenizer)
         self.assertEqual(guard.scan_attack("user: hello"), {"decision": "allow"})
         self.assertEqual(len(tokenizer.template_calls), 1)
         messages, tokenize, add_generation_prompt, _ = tokenizer.template_calls[0]
-        self.assertEqual(
-            messages,
-            [
-                {"role": "system", "content": GUARD_FRAMING},
-                {"role": "user", "content": "user: hello"},
-            ],
-        )
+        self.assertEqual(messages, [{"role": "user", "content": "user: hello"}])
         self.assertFalse(tokenize)
         self.assertTrue(add_generation_prompt)
 
@@ -994,11 +988,9 @@ class LongInputTests(LocalTransportTestCase):
             self.assertFalse(truncation)
 
     def test_at_the_maximum_ceiling_the_longest_inputs_are_unscreenable(self) -> None:
-        framing_words = len(GUARD_FRAMING.split())
-        # Payload is under the MAX budget, but payload + framing + 128-token
-        # verdict reserve exceeds the 32768-position window by one token.
-        words = (WINDOW - VERDICT_MAX_TOKENS) - framing_words
-        at_ceiling = self._payload(words)
+        # Payload is under the MAX budget, but payload + template + 128-token
+        # verdict reserve exceeds the 32768-position window.
+        at_ceiling = self._payload(WINDOW - VERDICT_MAX_TOKENS)
         guard = self._guard(long_input=MAX_LONG_INPUT_TOKENS)
         self.assertLessEqual(guard.count_tokens(at_ceiling), MAX_LONG_INPUT_TOKENS)
         with self.assertRaises(GuardInputLimit):
@@ -1007,6 +999,19 @@ class LongInputTests(LocalTransportTestCase):
 
         short = self._payload(8)
         self.assertEqual(guard.scan_attack(short), {"decision": "allow"})
+
+    def test_only_the_output_lane_pays_for_the_framing_in_the_window(self) -> None:
+        # This length fits the input lane; only the output lane's framing puts
+        # it past the window.
+        window = 1024
+        words = window - VERDICT_MAX_TOKENS - len(GUARD_FRAMING.split())
+        context = [{"role": "user", "content": " ".join(["word"] * words)}]
+        guard = self._guard(model_kwargs={"window": window})
+        self.assertEqual(
+            guard.scan_attack(serialize_messages(context)), {"decision": "allow"}
+        )
+        with self.assertRaises(GuardInputLimit):
+            guard.scan_response(context, "reply")
 
     def test_framed_prompt_beyond_a_smaller_window_fails_closed(self) -> None:
         guard = self._guard(model_kwargs={"window": 1024})
