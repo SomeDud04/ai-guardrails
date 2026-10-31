@@ -33,6 +33,7 @@ from nasi_lemak.diagnostics import (
 )
 from nasi_lemak.gateway import Gateway
 from nasi_lemak.generation import GenerationError
+from nasi_lemak.qwen3guard import FRAMING_VERSION
 from nasi_lemak.server import make_app
 from nasi_lemak.workspace_http import ENV_ALLOW_HTTP, ENV_ENABLED, _LoginLimiter
 from nasi_lemak.workspace_http import load_workspace_runtime
@@ -458,6 +459,57 @@ class LoginAndAdminTests(WorkspaceHTTPBase):
             self.client.get("/workspace/api/review/conversations", headers=self.auth(admin_token)),
             403,
             "FORBIDDEN",
+        )
+
+    def test_admin_settings_are_read_only_and_redacted(self) -> None:
+        path = "/workspace/api/admin/settings"
+        self.assert_error(self.client.get(path), 401, "UNAUTHORIZED")
+        alice_token = self.login()
+        self.assert_error(
+            self.client.get(path, headers=self.auth(alice_token)), 403, "FORBIDDEN"
+        )
+        admin_token = self.login("root.admin")
+        self.assert_error(
+            self.client.get(path + "?user_id=" + self.alice["id"],
+                            headers=self.auth(admin_token)),
+            400,
+            "INVALID_REQUEST",
+        )
+        response = self.client.get(path, headers=self.auth(admin_token))
+        self.assertEqual(response.status_code, 200, response.text)
+        payload = response.json()
+        self.assertEqual(
+            set(payload),
+            {"model", "policy", "guards", "chat_limits", "limits", "operational"},
+        )
+        self.assertEqual(set(payload["policy"]), {"version", "digest", "token_budget"})
+        self.assertEqual(
+            set(payload["guards"]), {"mode", "active", "framing_version"}
+        )
+        self.assertEqual(payload["guards"]["mode"], self.app.state.mode)
+        self.assertEqual(payload["guards"]["active"], self.app.state.guards_active)
+        self.assertEqual(payload["guards"]["framing_version"], FRAMING_VERSION)
+        self.assertEqual(payload["limits"], self.app.state.limits_view)
+        self.assertEqual(payload["operational"], self.app.state.operational)
+        for key in (
+            "context_messages",
+            "context_budget",
+            "default_reply_tokens",
+            "max_reply_tokens",
+            "max_prompt_chars",
+        ):
+            self.assertIsInstance(payload["chat_limits"][key], int)
+        # The response must never disclose a configured credential, storage
+        # location or password.  The policy digest is explicitly public.
+        internal_key = getattr(self.app.state.workspace, "_internal_key", "")
+        self.assertIsInstance(internal_key, str)
+        for secret in (self.key, self.db_path, LEGACY_KEY, PASSWORD, internal_key):
+            if secret:
+                self.assertNotIn(secret, response.text)
+        self.assertNotIn("postgresql://", response.text)
+        # Read-only: the mutation surface on this path stays absent.
+        self.assertEqual(
+            self.client.post(path, headers=self.auth(admin_token)).status_code, 405
         )
 
 

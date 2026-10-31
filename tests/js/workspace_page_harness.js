@@ -197,6 +197,7 @@ function createApp(options) {
   };
   const windowListeners = Object.create(null);
   const location = {
+    origin: "https://guardrail.example",
     pathname: (options && options.pathname) || "/workspace",
     search: "",
     hash: "",
@@ -1428,6 +1429,65 @@ async function scenarioAdmin() {
   await settle();
   assert(app.callsMatching("/workspace/api/admin").some((call) => call.status === 503) === false,
     "sequential admin loading must not exhaust control admission");
+  app.elementFor("admin-tab-settings").dispatch("click");
+  await settle();
+  assert(app.elementFor("admin-tab-settings").getAttribute("aria-selected") === "true",
+    "the settings tab must be selected");
+  assert(app.elementFor("admin-access-panel").hidden === true,
+    "opening settings must hide the access panel");
+  assert(app.elementFor("admin-settings-panel").hidden === false,
+    "opening settings must show the settings panel");
+  const settingsCall = app.lastMatching("/workspace/api/admin/settings");
+  assert(settingsCall, "settings request missing");
+  assert(settingsCall.options.method === "GET", "settings must be a read-only GET");
+  assert(settingsCall.options.body === undefined, "settings must not send a body");
+  settingsCall.respond(
+    {
+      model: "qwen2.5-0.5b-instruct",
+      policy: { version: "policy-1", digest: "a".repeat(64), token_budget: 4096 },
+      guards: { mode: "guarded", active: true, framing_version: "nasi-lemak-guard-framing-v2" },
+      chat_limits: {
+        context_messages: 20, context_budget: 16000,
+        default_reply_tokens: 512, max_reply_tokens: 1024, max_prompt_chars: 16000,
+      },
+      limits: {
+        context_messages: { effective: 20, ceiling: 20, source: "env" },
+        max_reply_tokens: { effective: 1024, ceiling: 1024, source: "policy" },
+      },
+      operational: {
+        chat_work_timeout: 70, max_concurrency: 8, control_concurrency: 2,
+        max_body_bytes: 1048576, body_read_timeout: 10,
+      },
+    },
+    200
+  );
+  await settle();
+  const settingsText = app.elementFor("settings-summary").textContent;
+  assert(
+    settingsText.indexOf("qwen2.5-0.5b-instruct") >= 0 &&
+      settingsText.indexOf("policy-1") >= 0 &&
+      settingsText.indexOf("nasi-lemak-guard-framing-v2") >= 0 &&
+      settingsText.indexOf("effective 20") >= 0 &&
+      settingsText.indexOf("chat_work_timeout") >= 0,
+    "settings values must render as text"
+  );
+  const curlSnippet = app.elementFor("settings-curl").value;
+  const chatSnippet = app.elementFor("settings-nasi-chat").value;
+  assert(curlSnippet.indexOf("https://guardrail.example/chat") >= 0,
+    "the curl snippet must use the page origin");
+  assert(curlSnippet.indexOf("Bearer $NASI_LEMAK_API_KEY") >= 0,
+    "the curl snippet must use the literal placeholder");
+  assert(curlSnippet.indexOf("Content-Type: application/json") >= 0,
+    "the curl snippet must declare JSON");
+  assert(chatSnippet.indexOf('NASI_GATEWAY_TOKEN="$NASI_LEMAK_API_KEY"') >= 0,
+    "the nasi-chat snippet must use the real token variable and placeholder");
+  assert(chatSnippet.indexOf("--base-url https://guardrail.example") >= 0,
+    "the nasi-chat snippet must use the page origin");
+  assert(chatSnippet.indexOf("--prompt") >= 0, "the nasi-chat snippet must include a prompt");
+  app.elementFor("admin-tab-access").dispatch("click");
+  await settle();
+  assert(app.elementFor("admin-access-panel").hidden === false,
+    "selecting access must restore the access panel");
   assert(app.elementFor("department-list").textContent.indexOf("Human Resources") >= 0,
     "department list did not render");
   assert(app.elementFor("user-list").textContent.indexOf("Ada Admin") >= 0, "user list did not render");

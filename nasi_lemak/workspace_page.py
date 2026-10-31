@@ -394,6 +394,10 @@ textarea:focus-visible { outline-offset: -2px; }
 .admin-table-row .cell-actions { display: flex; flex-wrap: wrap; gap: var(--space-1); align-content: center; justify-content: flex-start; }
 .admin-table-row .cell-actions button { min-height: 28px; padding: 0 6px; font-size: .7rem; white-space: nowrap; }
 .admin-table-empty { margin: 0; padding: var(--space-3); color: var(--muted-dim); font-size: .78rem; }
+.settings-snippet { display: grid; gap: var(--space-1); margin-bottom: var(--space-3); }
+.settings-snippet label { color: var(--muted); font-size: .74rem; }
+.settings-snippet .settings-code { width: 100%; min-height: 72px; margin: 0; padding: var(--space-2); border: 1px solid var(--line); border-radius: var(--radius); background: var(--surface); color: var(--text-soft); font-family: ui-monospace, SFMono-Regular, Consolas, monospace; font-size: .74rem; resize: vertical; }
+.settings-snippet button { justify-self: start; }
 .admin-inline { display: inline-flex; align-items: center; gap: var(--space-1); color: var(--text-soft); font-size: .76rem; }
 .admin-details { border: 1px solid var(--line); border-radius: var(--radius); background: var(--panel); padding: var(--space-2) var(--space-3); }
 .admin-details > summary { cursor: pointer; color: var(--text-soft); font-size: .8rem; font-weight: 600; }
@@ -657,6 +661,19 @@ _WORKSPACE_JS = """
   var adminPoliciesPanel = byId("admin-policies-panel");
   var adminAlertsPanel = byId("admin-alerts-panel");
   var adminAccessPanel = byId("admin-access-panel");
+  var adminTabSettings = byId("admin-tab-settings");
+  var adminSettingsPanel = byId("admin-settings-panel");
+  var adminSettings = null;
+  var adminSettingsLoaded = false;
+  var adminSettingsLoading = false;
+  var adminSettingsSeq = 0;
+  var settingsSummary = byId("settings-summary");
+  var settingsState = byId("admin-settings-state");
+  var settingsRefresh = byId("settings-refresh");
+  var settingsCurl = byId("settings-curl");
+  var settingsChat = byId("settings-nasi-chat");
+  var settingsCopyCurl = byId("settings-copy-curl");
+  var settingsCopyChat = byId("settings-copy-chat");
   var newUserToggle = byId("new-user-toggle");
   var userCancel = byId("user-cancel");
   var newDepartmentToggle = byId("new-department-toggle");
@@ -3878,11 +3895,13 @@ _WORKSPACE_JS = """
     adminTabPolicies.setAttribute("aria-selected", section === "policies" ? "true" : "false");
     adminTabAlerts.setAttribute("aria-selected", section === "alerts" ? "true" : "false");
     adminTabAccess.setAttribute("aria-selected", section === "access" ? "true" : "false");
+    adminTabSettings.setAttribute("aria-selected", section === "settings" ? "true" : "false");
     adminUsersPanel.hidden = section !== "users";
     adminDepartmentsPanel.hidden = section !== "departments";
     adminPoliciesPanel.hidden = section !== "policies";
     adminAlertsPanel.hidden = section !== "alerts";
     adminAccessPanel.hidden = section !== "access";
+    adminSettingsPanel.hidden = section !== "settings";
   }
 
   function showAdminSection(section) {
@@ -3979,6 +3998,12 @@ _WORKSPACE_JS = """
           return adminAccessLoaded ? Promise.resolve(true) : loadAccessLog(true);
         });
       }
+    }
+    if (section === "settings") {
+      // Read-only values only; the tab has no form and sends no mutation.
+      queueAdminList(function () {
+        return adminSettingsLoaded ? Promise.resolve(true) : loadAdminSettings(true);
+      });
     }
   }
 
@@ -4086,6 +4111,14 @@ _WORKSPACE_JS = """
   adminTabPolicies.addEventListener("click", function () { showAdminSection("policies"); });
   adminTabAlerts.addEventListener("click", function () { showAdminSection("alerts"); });
   adminTabAccess.addEventListener("click", function () { showAdminSection("access"); });
+  adminTabSettings.addEventListener("click", function () { showAdminSection("settings"); });
+  settingsRefresh.addEventListener("click", function () { loadAdminSettings(true); });
+  settingsCopyCurl.addEventListener("click", function () {
+    copySettingsSnippet(settingsCurl, "curl snippet");
+  });
+  settingsCopyChat.addEventListener("click", function () {
+    copySettingsSnippet(settingsChat, "nasi-chat snippet");
+  });
   alertsBell.addEventListener("click", function () {
     if (!profile || !profile.user || profile.user.role !== "admin") { return; }
     showView("admin");
@@ -5295,6 +5328,150 @@ _WORKSPACE_JS = """
     });
   }
 
+  function settingsText(value) {
+    if (typeof value === "boolean") { return value ? "Yes" : "No"; }
+    if (value === null || value === undefined || value === "") { return "Not configured"; }
+    if (typeof value === "number") { return String(value); }
+    return String(value);
+  }
+
+  function appendSettingRow(label, value) {
+    var row = document.createElement("div");
+    row.className = "admin-table-row cols-2";
+    row.appendChild(tableCell(label, "cell-muted", "Setting"));
+    row.appendChild(tableCell(settingsText(value), "", "Value"));
+    settingsSummary.appendChild(row);
+  }
+
+  function settingsLimitLines(limits) {
+    if (!isObject(limits)) { return []; }
+    var lines = [];
+    for (var name in limits) {
+      if (!Object.prototype.hasOwnProperty.call(limits, name)) { continue; }
+      var entry = limits[name];
+      if (isObject(entry)) {
+        lines.push({
+          label: "Limit · " + name,
+          value: "effective " + settingsText(entry.effective) + " · ceiling " +
+            settingsText(entry.ceiling) + " · source " + settingsText(entry.source)
+        });
+      } else {
+        lines.push({ label: "Limit · " + name, value: entry });
+      }
+    }
+    return lines;
+  }
+
+  function renderAdminSettings(data) {
+    clearNode(settingsSummary);
+    renderTableHead(settingsSummary, ["Setting", "Value"], 2);
+    appendSettingRow("Model", data.model);
+    var policy = isObject(data.policy) ? data.policy : {};
+    appendSettingRow("Policy version", policy.version);
+    appendSettingRow("Policy digest", policy.digest);
+    appendSettingRow("Policy token budget", policy.token_budget);
+    var guards = isObject(data.guards) ? data.guards : {};
+    appendSettingRow("Guard mode", guards.mode);
+    appendSettingRow("Guards active", guards.active);
+    appendSettingRow("Guard framing version", guards.framing_version);
+    var chatLimits = isObject(data.chat_limits) ? data.chat_limits : {};
+    for (var chatKey in chatLimits) {
+      if (!Object.prototype.hasOwnProperty.call(chatLimits, chatKey)) { continue; }
+      appendSettingRow("Chat limit · " + chatKey, chatLimits[chatKey]);
+    }
+    var limitLines = settingsLimitLines(data.limits);
+    for (var limitIndex = 0; limitIndex < limitLines.length; limitIndex += 1) {
+      appendSettingRow(limitLines[limitIndex].label, limitLines[limitIndex].value);
+    }
+    var operational = isObject(data.operational) ? data.operational : {};
+    for (var operationalKey in operational) {
+      if (!Object.prototype.hasOwnProperty.call(operational, operationalKey)) { continue; }
+      appendSettingRow("Operational · " + operationalKey, operational[operationalKey]);
+    }
+  }
+
+  function settingsSnippets() {
+    // Snippets are display-only and are built from this page's origin.  The
+    // credential is always the literal placeholder, never a configured key.
+    var origin = "";
+    try { origin = String(window.location.origin || ""); } catch (error) { origin = ""; }
+    var header = ["Author", "ization: ", "Bearer", " "].join("");
+    var curl = "curl -sS " + origin + "/chat \\\n" +
+      '  -H "' + header + '$NASI_LEMAK_API_KEY" \\\n' +
+      '  -H "Content-Type: application/json" \\\n' +
+      "  -d '{\\\"prompt\\\":\\\"Hello\\\"}'";
+    var chat = 'NASI_GATEWAY_TOKEN="$NASI_LEMAK_API_KEY" nasi-chat' +
+      ' --base-url ' + origin + ' --prompt "Hello"';
+    if (settingsCurl) {
+      settingsCurl.textContent = curl;
+      settingsCurl.value = curl;
+    }
+    if (settingsChat) {
+      settingsChat.textContent = chat;
+      settingsChat.value = chat;
+    }
+  }
+
+  function copySettingsSnippet(field, label) {
+    var text = field && typeof field.value === "string" ? field.value : "";
+    if (!text) { return; }
+    function done() { setStatus(settingsState, label + " copied.", "ok"); }
+    function failed() {
+      setStatus(settingsState, "Copy failed; select the text and copy it manually.", "error");
+    }
+    if (typeof navigator !== "undefined" && navigator.clipboard &&
+        typeof navigator.clipboard.writeText === "function") {
+      navigator.clipboard.writeText(text).then(done, failed);
+      return;
+    }
+    try {
+      field.focus();
+      if (typeof field.select === "function") { field.select(); }
+      if (typeof document.execCommand === "function" && document.execCommand("copy")) {
+        done();
+      } else {
+        failed();
+      }
+    } catch (error) {
+      failed();
+    }
+  }
+
+  function loadAdminSettings(reset) {
+    if (!signedIn || adminSettingsLoading) { return Promise.resolve(false); }
+    var epoch = sessionEpoch;
+    var token = adminStateEpoch;
+    adminSettingsSeq += 1;
+    var seq = adminSettingsSeq;
+    adminSettingsLoading = true;
+    // The snippets depend only on the page origin, so they stay available even
+    // if the read-only settings request fails.
+    settingsSnippets();
+    if (reset) {
+      clearNode(settingsSummary);
+      setStatus(settingsState, "Loading settings…");
+    } else {
+      setStatus(settingsState, "Refreshing settings…");
+    }
+    return api("/workspace/api/admin/settings").then(function (result) {
+      if (epoch !== sessionEpoch || token !== adminStateEpoch || seq !== adminSettingsSeq) {
+        return false;
+      }
+      adminSettingsLoading = false;
+      if (adminGuard(result, settingsState)) { return false; }
+      if (!result.ok || !isObject(result.data)) {
+        setStatus(settingsState, serverMessage(result, timeoutOrNetwork(result)), "error");
+        return false;
+      }
+      adminSettings = result.data;
+      adminSettingsLoaded = true;
+      renderAdminSettings(adminSettings);
+      settingsSnippets();
+      setStatus(settingsState, "");
+      return true;
+    });
+  }
+
   function alertQueryPath() {
     var parts = ["limit=50"];
     if (alertStage.value) { parts.push("stage=" + encodeURIComponent(alertStage.value)); }
@@ -5851,6 +6028,10 @@ _WORKSPACE_JS = """
     adminGrantsLoaded = false;
     adminAccessLoaded = false;
     adminPoliciesLoaded = false;
+    adminSettings = null;
+    adminSettingsLoaded = false;
+    adminSettingsLoading = false;
+    adminSettingsSeq += 1;
     policyProfiles = [];
     policyProfilesLoading = false;
     policyProfilesSeq += 1;
@@ -5944,6 +6125,10 @@ _WORKSPACE_JS = """
     clearNode(effectivePolicy);
     clearNode(alertList);
     clearNode(alertDetail);
+    clearNode(settingsSummary);
+    if (settingsCurl) { settingsCurl.value = ""; settingsCurl.textContent = ""; }
+    if (settingsChat) { settingsChat.value = ""; settingsChat.textContent = ""; }
+    setStatus(settingsState, "");
     alertDetail.hidden = true;
     alertMore.hidden = true;
     alertMore.disabled = false;
@@ -6547,6 +6732,7 @@ WORKSPACE_HTML = """<!doctype html>
 <button id="admin-tab-policies" class="admin-subtab" type="button" role="tab" aria-controls="admin-policies-panel" aria-selected="false">Policies</button>
 <button id="admin-tab-alerts" class="admin-subtab" type="button" role="tab" aria-controls="admin-alerts-panel" aria-selected="false">Alerts</button>
 <button id="admin-tab-access" class="admin-subtab" type="button" role="tab" aria-controls="admin-access-panel" aria-selected="false">Access history</button>
+<button id="admin-tab-settings" class="admin-subtab" type="button" role="tab" aria-controls="admin-settings-panel" aria-selected="false">Settings</button>
 </div>
 <p id="admin-status" class="chat-status" role="status" aria-live="polite"></p>
 
@@ -6797,6 +6983,28 @@ WORKSPACE_HTML = """<!doctype html>
 <div id="grant-list" class="admin-list" aria-label="Review access grants"></div>
 <button id="grant-more" class="admin-more" type="button" hidden>Load more grants</button>
 </details>
+</section>
+
+<section id="admin-settings-panel" class="admin-panel-section" role="tabpanel" aria-labelledby="admin-tab-settings" hidden>
+<div class="admin-section-head">
+<h3 id="settings-heading">Settings</h3>
+<button id="settings-refresh" class="ghost" type="button">Refresh settings</button>
+</div>
+<p class="admin-note">Read-only. These values are resolved at server startup; this tab cannot change the model, policy, guards or limits.</p>
+<p id="admin-settings-state" class="admin-note" role="status" aria-live="polite"></p>
+<div id="settings-summary" class="admin-table" aria-label="Effective settings"></div>
+<h3>Chat API snippets</h3>
+<p class="admin-note">The snippets use the literal placeholder <code>$NASI_LEMAK_API_KEY</code>. Replace it with your own key; this page never shows or stores a credential.</p>
+<div class="settings-snippet">
+<label for="settings-curl">curl</label>
+<textarea id="settings-curl" class="settings-code" readonly rows="5" spellcheck="false"></textarea>
+<button id="settings-copy-curl" class="ghost" type="button">Copy curl</button>
+</div>
+<div class="settings-snippet">
+<label for="settings-nasi-chat">nasi-chat</label>
+<textarea id="settings-nasi-chat" class="settings-code" readonly rows="3" spellcheck="false"></textarea>
+<button id="settings-copy-chat" class="ghost" type="button">Copy nasi-chat</button>
+</div>
 </section>
 </div>
 </div>

@@ -200,6 +200,35 @@ class WorkspacePageHTTPTests(WorkspaceHTTPBase):
                 f'id="{table_id}" class="admin-table admin-table-list"', html
             )
 
+    def test_admin_settings_tab_is_read_only_and_uses_the_placeholder(self) -> None:
+        html = self._page().text
+        self.assertRegex(
+            html,
+            r'<button id="admin-tab-settings"[^>]*role="tab"[^>]*'
+            r'aria-controls="admin-settings-panel"[^>]*aria-selected="false"[^>]*>'
+            r"Settings</button>",
+        )
+        self.assertRegex(
+            html,
+            r'<section id="admin-settings-panel"[^>]*role="tabpanel"[^>]*'
+            r'aria-labelledby="admin-tab-settings"[^>]*hidden',
+        )
+        self.assertIn('id="settings-copy-curl"', html)
+        self.assertIn('id="settings-copy-chat"', html)
+        # The tab is read-only: no form and no mutation control of its own.
+        panel = html.split('id="admin-settings-panel"', 1)[1].split("</section>", 1)[0]
+        self.assertNotIn("<form", panel)
+        self.assertNotIn("<input", panel)
+        self.assertNotIn('method="POST"', panel)
+        # Snippets are built in the browser from the current origin and carry
+        # only the literal placeholder, never a configured credential.
+        self.assertIn("window.location.origin", html)
+        self.assertIn("$NASI_LEMAK_API_KEY", html)
+        self.assertIn("NASI_GATEWAY_TOKEN", html)
+        self.assertIn("--base-url", html)
+        for secret in (self.key, self.db_path, LEGACY_KEY, PASSWORD):
+            self.assertNotIn(secret, html)
+
     def test_mobile_topbar_keeps_wrapped_guard_status_inside_the_header(self) -> None:
         html = self._page().text
         css = re.findall(r"<style>(.*?)</style>", html, re.S)[0]
