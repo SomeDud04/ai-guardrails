@@ -52,6 +52,7 @@ from .diagnostics import BLOCK_PAYLOAD_REJECTED, SafeDiagnostics
 from .gateway import Gateway, serialize_messages
 from .generation import conservative_byte_budget
 from .limits import ChatLimits
+from .qwen3guard import FRAMING_VERSION
 from .scan_context import ScanContext
 from .workspace_store import (
     LEASE_TTL_SECONDS,
@@ -1281,6 +1282,44 @@ def register_workspace_routes(app: FastAPI, runtime: WorkspaceRuntime) -> None:
         except Exception as exc:
             return admin_body_error(request, exc)
         return _ok(result)
+
+    @app.get("/workspace/api/admin/settings")
+    async def admin_settings(request: Request):
+        guard = _request_guard(request, runtime)
+        if guard is not None:
+            return guard
+        _user, _source, error = await admin_principal(request)
+        if error is not None:
+            return error
+        # Read-only: reject every query value instead of interpreting one, as
+        # the self-only policy endpoint does.
+        if request.query_params.multi_items():
+            return _ws_error(request, "INVALID_REQUEST", 400)
+        state = request.app.state
+        policy = getattr(runtime.internal_gateway, "policy", None)
+        limits = runtime.chat_limits
+        chat_limits: dict[str, Any] = {}
+        if isinstance(limits, ChatLimits):
+            # Every value here is non-secret effective configuration.
+            chat_limits = limits.public()
+            chat_limits["max_prompt_chars"] = limits.max_prompt_chars()
+        payload = {
+            "model": getattr(policy, "model", None),
+            "policy": {
+                "version": getattr(state, "policy_version", None),
+                "digest": getattr(state, "policy_digest", None),
+                "token_budget": getattr(policy, "token_budget", None),
+            },
+            "guards": {
+                "mode": getattr(state, "mode", None),
+                "active": getattr(state, "guards_active", None),
+                "framing_version": FRAMING_VERSION,
+            },
+            "chat_limits": chat_limits,
+            "limits": getattr(state, "limits_view", None),
+            "operational": getattr(state, "operational", None),
+        }
+        return _ok(payload)
 
     # -- conversations ---------------------------------------------------
     @app.get("/workspace/api/conversations")
