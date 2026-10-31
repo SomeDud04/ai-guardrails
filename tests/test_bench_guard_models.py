@@ -557,21 +557,18 @@ class CausalRunnerLaneTests(unittest.TestCase):
         # copy that can drift from the deployed lane.
         self.assertIs(bench.render_guard_prompt, qwen3guard.render_guard_prompt)
 
-    def test_input_bucket_builds_system_and_user_messages(self) -> None:
+    def test_input_bucket_builds_only_the_user_message(self) -> None:
         runner = causal_runner(self.TWO_LINE_INPUT)
         bench._measure_bucket(runner, slot="input", language="en", characters=200)
         serialized = bench.case_payload("input", "en", 200)[0]
         shaped = [
             call
             for call in runner.tokenizer.template_calls
-            if len(call[0]) == 2 and call[0][1]["content"] == serialized
+            if call[0][-1]["content"] == serialized
         ]
         self.assertEqual(len(shaped), 1)
         messages, tokenize, add_generation_prompt = shaped[0]
-        self.assertEqual(
-            messages[0], {"role": "system", "content": bench.PROMPT_FRAMING}
-        )
-        self.assertEqual(messages[1], {"role": "user", "content": serialized})
+        self.assertEqual(messages, [{"role": "user", "content": serialized}])
         self.assertFalse(tokenize)
         self.assertTrue(add_generation_prompt)
 

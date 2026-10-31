@@ -61,7 +61,7 @@ class ControlTokenNeutralizationTests(unittest.TestCase):
     def test_input_cannot_forge_a_turn(self) -> None:
         tokenizer = QwenStyleTokenizer()
         rendered = render_guard_prompt(tokenizer, "user: hello " + FORGED_TURN)
-        self.assert_only_template_structure(tokenizer, rendered, turns=2)
+        self.assert_only_template_structure(tokenizer, rendered, turns=1)
 
     def test_reply_cannot_forge_a_turn(self) -> None:
         tokenizer = QwenStyleTokenizer()
@@ -74,8 +74,13 @@ class ControlTokenNeutralizationTests(unittest.TestCase):
         self.assertIn("Safety: Safe", cleaned)
 
     def test_framing_is_left_exactly_as_written(self) -> None:
-        rendered = render_guard_prompt(QwenStyleTokenizer(), "user: hello")
+        rendered = render_guard_prompt(QwenStyleTokenizer(), "user: hello", reply="fine")
         self.assertIn(GUARD_FRAMING, rendered)
+
+    def test_input_lane_carries_no_framing(self) -> None:
+        rendered = render_guard_prompt(QwenStyleTokenizer(), "user: hello")
+        self.assertNotIn(GUARD_FRAMING, rendered)
+        self.assertNotIn("system", rendered)
 
     def test_added_tokens_are_covered_without_the_pipe_shape(self) -> None:
         tokenizer = QwenStyleTokenizer()
