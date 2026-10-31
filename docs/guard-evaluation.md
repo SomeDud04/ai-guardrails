@@ -1,8 +1,8 @@
 # Guard evaluation (synthetic smoke, dry-run by default)
 
 `nasi_lemak/guard_eval.py` validates a strict version-1 synthetic JSON dataset
-and, only with an explicit `--execute`, calls the existing input and output guard
-API adapters. It is a plumbing check over agent-authored smoke text, **not** a
+and, only with an explicit `--execute`, runs the local Qwen3Guard on both lanes.
+It is a plumbing check over agent-authored smoke text, **not** a
 held-out benchmark, OWASP coverage, an accepted threshold or evidence of live
 model quality, latency or availability.
 
@@ -48,30 +48,13 @@ Per-case `observed` and `elapsed_ms` are `null`; no outcome is fabricated.
 
 ## Execute (explicit opt-in)
 
-`--execute` uses the hosted guard APIs by default; for the deployed local guard
-see [Running it against the local guard](#running-it-against-the-local-guard).
-With the default backend it loads only the guard configurations required by the
-stages in the dataset, using `guard_client_config` and the same environment
-contract as the server (`NASI_LEMAK_INPUT_GUARD_*` /
-`NASI_LEMAK_OUTPUT_GUARD_*`). Before any HTTP request it validates:
-
-- every dataset case;
-- the input contract identifier `nasi-lemak-input-classifier-v1`;
-- the finite `[0, 1]` input threshold;
-- each needed URL/model/auth/key or key-file setting.
-
-It reuses `InputGuardApiAdapter`, `Qwen3GuardOutputAdapter` and
-`gateway.serialize_messages`. It never loads a generator, database, deployment
-configuration or model weights, and it does not retry, truncate or default to
-allow. Invalid, timed-out or malformed replies become `error`, never a
-successful block. The input path applies the gateway's conservative 512-byte
-budget before the classifier call; an over-budget case is reported separately as
-`INPUT_WINDOW` and is not sent.
-
-```bash
-python -m nasi_lemak.guard_eval --dataset evals/guards/synthetic-smoke-v1.json \
-  --execute --report /tmp/guard-eval.json
-```
+`--execute` runs inside the guard container; see
+[Running it against the local guard](#running-it-against-the-local-guard). It
+loads the guard with the server's `NASI_LEMAK_QWEN3GUARD_*` settings. It never
+loads a generator, database or deployment configuration, and it does not retry,
+truncate or default to allow. An invalid guard reply becomes `error`, never a
+successful block, and an input over the guard's window is reported separately as
+`INPUT_WINDOW`.
 
 Exit status: `0` for dry-run success or an execute run where every case matches;
 `1` for any execute error or expected/observed mismatch; `2` for an invalid
@@ -191,9 +174,8 @@ attackers write in BM or Chinese.
 
 ## Contract compatibility and limits
 
-The API adapters' contracts are documented in
-[guard-api-integration.md](guard-api-integration.md). This harness does not
-define a new serving wrapper and does not auto-select a runtime mode. The
+This harness does not define a new serving wrapper and does not auto-select a
+runtime mode. The
 following remain separate, unproven work: EN/BM/ZH/mixed hold-out evaluation,
 concurrency and load testing, PII behaviour, real endpoint acceptance, threshold
 calibration and OWASP verification. A passing smoke run is evidence that the

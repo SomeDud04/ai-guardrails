@@ -14,7 +14,7 @@
 #     --env-file .secrets/compose.pilot.env \
 #     -f compose.yaml -f compose.pilot.yaml config
 #
-# See docs/compose.pilot.env.example and docs/local-guards-switch.md.
+# See docs/compose.pilot.env.example.
 #
 # Bind mounts use the long syntax with ``create_host_path: false``: a missing
 # host policy/model path aborts the start instead of silently creating an empty

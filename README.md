@@ -38,7 +38,6 @@ started in this workspace because Docker is not installed.** See
 | Bounded CSV export | `/admin/export.csv` implemented locally with a separate append-only export audit; contract in [docs/evidence-export.md](docs/evidence-export.md); PostgreSQL SQL checked with a driver double only |
 | Versioned YAML startup policy | Strict loader, mandatory file activation, literal deny phrases and restart/rollback tests implemented locally |
 | Real tokenizer / attack guard / output guard | Adapters and server wiring implemented locally; **pretrained weights not run** |
-| API guard backend (input + output) | `NASI_LEMAK_GUARD_BACKEND=api` selects the API adapters in `nasi_lemak/guard_api.py`; the installer's `--guard-backend api` and the `compose.api.yaml` overlay expose the same explicit choice. Implemented and loopback-fixture-tested locally; **no live guard endpoint was contacted**, and real endpoint acceptance, model quality, latency and held-out capacity remain external work. See [docs/guard-api-integration.md](docs/guard-api-integration.md) |
 | Guard evaluation harness | `nasi_lemak/guard_eval.py` validates a synthetic dataset by default and calls the configured adapters only with `--execute`; implemented and fixture-tested locally. This is plumbing evidence, **not** held-out model quality or OWASP coverage. See [docs/guard-evaluation.md](docs/guard-evaluation.md) |
 | PII quality gate (synthetic) | Frozen agent-authored evaluation + deterministic evaluator; reviewed EMAIL terminal-period repair passes six known regression cases; v1 EMAIL fails on 1 frozen false positive and MyKad on 4; **not customer accepted**. See [docs/pii-quality.md](docs/pii-quality.md) |
 | Postal address mask (synthetic) | Narrow ASCII single-line Malaysian shapes: numbered street + five-digit postcode, plus the same body without a postcode only when it directly follows `Address:`/`Alamat:`; unlabelled no-postcode forms stay raw. Admin input/output switches, new profiles default on; frozen corpora contain no address gold, so no address quality metric is claimed. See [docs/postal-address-mask.md](docs/postal-address-mask.md) |
@@ -373,21 +372,12 @@ budget was spent on hidden reasoning, the client rejects it with the generic
 `reasoning_content`, does not retry and does not increase the request budget.
 Use an adequate `max_tokens` (the default maximum reply is 4096 tokens and the
 configurable ceiling is 8192; see [docs/chat-limits.md](docs/chat-limits.md)) and a
-provider model that returns ordinary assistant content. See
-[docs/hosted-guard-setup.md](docs/hosted-guard-setup.md) for the deployment
-troubleshooting note.
+provider model that returns ordinary assistant content.
 
 An earlier `GET .../v1/models` attempt timed out on port 80. No further live
 network checks are made in this workspace.
 
-The optional API guard backend in `nasi_lemak/guard_api.py` is selected only by
-`NASI_LEMAK_GUARD_BACKEND=api` in guarded mode; the installer and the
-`compose.api.yaml` overlay expose the same explicit choice. It is implemented and
-loopback-fixture-tested locally, but no live guard endpoint or pretrained API
-model was contacted here. Real endpoint acceptance, model quality, latency and
-held-out capacity remain external work. See
-[docs/guard-api-integration.md](docs/guard-api-integration.md) for the contract
-and [docs/guard-evaluation.md](docs/guard-evaluation.md) for the synthetic
+See [docs/guard-evaluation.md](docs/guard-evaluation.md) for the synthetic
 evaluation harness.
 
 ## Local guard wiring

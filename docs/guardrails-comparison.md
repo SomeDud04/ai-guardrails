@@ -162,8 +162,6 @@ Official references:
 ## Related internal documents
 
 - [Guard adapters](guards.md) — local Prompt Guard 2 / Llama Guard 3 contracts.
-- [Guard API integration](guard-api-integration.md) — API backend and verdict
-  contracts.
 - [Guard evaluation](guard-evaluation.md) — synthetic smoke harness.
 - [PII quality](pii-quality.md) and [language support](language-support.md) —
   synthetic recognizer evidence and limits.
