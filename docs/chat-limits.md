@@ -83,23 +83,14 @@ guard.
 
 ## Guard windows
 
-The Groq input guard is chunked into sequential windows of at most 480
-conservative units including framing, with a 64-UTF-8-byte overlap, a maximum of
-128 segments and a 32768 sum-of-window-units cap before any HTTP request. It
-also uses a 30 s deadline, request cancellation and the remaining timeout. Every
-window must be valid for the guard result to allow. Cloudflare output input is
-bounded to 32 messages and 64 KiB encoded input.
-
-More segments mean more provider requests, quota use and latency; chunking is
-not a detection or throughput guarantee. Cross-window semantic attack efficacy
-is unverified, and the overlapping lexical fixture is not live quality proof.
-Native and custom guards keep their own coverage, message and response caps;
-Groq chunking does not activate for them, so configure lower context/reply
-bounds if their limits are smaller.
+Guards keep their own coverage, message and response caps, so configure lower
+context and reply bounds if their limits are smaller. Qwen3Guard's window is set
+by `NASI_LEMAK_QWEN3GUARD_LONG_INPUT`; see [guards.md](guards.md).
 
 Each stored user prompt and assistant response is limited to 65536 characters.
 That is a per-message bound, not a conversation total: full conversation
-history is retained until an operator manually deletes it. Ciphertext format is
+history is retained until a user deletes it or an operator schedules
+[`purge-expired`](workspace-setup.md#transcript-retention). Ciphertext format is
 unchanged, so this feature needs no database migration.
 
 ## Deployment update
@@ -116,113 +107,40 @@ ${EDITOR:-nano} .secrets/compose.chat-limits.env
 ```
 
 The base `compose.yaml` declares the four names as bare pass-through entries
-with no hardcoded default; the mode, API, workspace and demo overlays inherit
+with no hardcoded default; the mode, workspace and demo overlays inherit
 them. Do not deploy or validate with `compose.yaml` alone: it has no configured
 guard mode or policy, so the gateway can remain unready. Always keep the base
 file together with the exact existing mode env file and overlay, and always
 place `--env-file .secrets/compose.chat-limits.env` **after** every existing env
 file in the matching preflight, build and up commands.
 
-API guarded mode:
+For the pilot stack:
 
 ```bash
-python3 scripts/check_hosted_setup.py \
-  --env-file .secrets/compose.env \
-  --env-file .secrets/compose.hosted-guards.env \
-  --env-file .secrets/compose.chat-limits.env \
-  -f compose.yaml -f compose.api.yaml
-
 sudo docker compose \
   --env-file .secrets/compose.env \
-  --env-file .secrets/compose.hosted-guards.env \
-  --env-file .secrets/compose.chat-limits.env \
-  -f compose.yaml -f compose.api.yaml build gateway
-
-sudo docker compose \
-  --env-file .secrets/compose.env \
-  --env-file .secrets/compose.hosted-guards.env \
-  --env-file .secrets/compose.chat-limits.env \
-  -f compose.yaml -f compose.api.yaml \
-  up -d --no-deps --force-recreate gateway
-```
-
-API plus workspace:
-
-```bash
-python3 scripts/check_hosted_setup.py \
-  --env-file .secrets/compose.env \
-  --env-file .secrets/compose.hosted-guards.env \
-  --env-file .secrets/compose.workspace.env \
-  --env-file .secrets/compose.chat-limits.env \
-  -f compose.yaml -f compose.api.yaml -f compose.workspace.yaml
-
-sudo docker compose \
-  --env-file .secrets/compose.env \
-  --env-file .secrets/compose.hosted-guards.env \
-  --env-file .secrets/compose.workspace.env \
-  --env-file .secrets/compose.chat-limits.env \
-  -f compose.yaml -f compose.api.yaml -f compose.workspace.yaml build gateway
-
-sudo docker compose \
-  --env-file .secrets/compose.env \
-  --env-file .secrets/compose.hosted-guards.env \
-  --env-file .secrets/compose.workspace.env \
-  --env-file .secrets/compose.chat-limits.env \
-  -f compose.yaml -f compose.api.yaml -f compose.workspace.yaml \
-  up -d --no-deps --force-recreate gateway
-```
-
-Full base plus API, workspace and demo ingress:
-
-```bash
-python3 scripts/check_hosted_setup.py \
-  --env-file .secrets/compose.env \
-  --env-file .secrets/compose.hosted-guards.env \
+  --env-file .secrets/compose.pilot.env \
   --env-file .secrets/compose.workspace.env \
   --env-file .secrets/compose.demo.env \
   --env-file .secrets/compose.chat-limits.env \
-  -f compose.yaml -f compose.api.yaml -f compose.workspace.yaml -f compose.demo.yaml
-
-sudo docker compose \
-  --env-file .secrets/compose.env \
-  --env-file .secrets/compose.hosted-guards.env \
-  --env-file .secrets/compose.workspace.env \
-  --env-file .secrets/compose.demo.env \
-  --env-file .secrets/compose.chat-limits.env \
-  -f compose.yaml -f compose.api.yaml -f compose.workspace.yaml -f compose.demo.yaml \
-  build gateway nginx
-
-sudo docker compose \
-  --env-file .secrets/compose.env \
-  --env-file .secrets/compose.hosted-guards.env \
-  --env-file .secrets/compose.workspace.env \
-  --env-file .secrets/compose.demo.env \
-  --env-file .secrets/compose.chat-limits.env \
-  -f compose.yaml -f compose.api.yaml -f compose.workspace.yaml -f compose.demo.yaml \
-  up -d --no-deps --force-recreate gateway
+  -f compose.yaml -f compose.pilot.yaml -f compose.workspace.yaml -f compose.demo.yaml \
+  up -d --force-recreate gateway
 ```
 
-Test or pilot deployments use their existing mode env file and overlay instead
-of the hosted API pair; keep `--env-file .secrets/compose.chat-limits.env` last.
-After recreate, confirm all four non-secret values reached the container without
-printing any secret:
+Keep `--env-file .secrets/compose.chat-limits.env` last. After recreate, confirm
+all four non-secret values reached the container without printing any secret:
 
 ```bash
-sudo docker compose \
-  --env-file .secrets/compose.env \
-  --env-file .secrets/compose.hosted-guards.env \
-  --env-file .secrets/compose.chat-limits.env \
-  -f compose.yaml -f compose.api.yaml exec -T gateway \
-  printenv NASI_LEMAK_CHAT_CONTEXT_MESSAGES \
-    NASI_LEMAK_CHAT_CONTEXT_BUDGET \
-    NASI_LEMAK_CHAT_DEFAULT_REPLY_TOKENS \
-    NASI_LEMAK_CHAT_MAX_REPLY_TOKENS
+docker exec nasi-lemak-gateway-1 printenv NASI_LEMAK_CHAT_CONTEXT_MESSAGES \
+  NASI_LEMAK_CHAT_CONTEXT_BUDGET \
+  NASI_LEMAK_CHAT_DEFAULT_REPLY_TOKENS \
+  NASI_LEMAK_CHAT_MAX_REPLY_TOKENS
 ```
 
-## Raising the hosted policy budget
+## Raising the policy budget
 
 Existing policy files are never overwritten. Older policies may still say 256.
-For larger Groq context, copy the approved file, keep every other actual
+For a larger context, copy the approved file, keep every other actual
 approved field unchanged (`app_id`, `model`, `deny_phrases` and anything else
 present), assign a new reviewed `version`, and change only the budget line:
 
