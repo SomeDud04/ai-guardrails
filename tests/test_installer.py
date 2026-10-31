@@ -701,6 +701,44 @@ class ModeValidationTests(unittest.TestCase):
         defaults.update(kwargs)
         return Installer(**defaults)
 
+    def test_rerun_keeps_the_overlays_this_host_uses(self) -> None:
+        inst = self._installer(mode="test")
+        compose_files = ["compose.yaml", "compose.pilot.yaml"]
+        env_files = [self.state / "compose.env"]
+        (self.state / "compose.workspace.env").write_text("x=1\n", encoding="utf-8")
+        (self.state / "compose.demo.env").write_text("x=1\n", encoding="utf-8")
+
+        inst._add_configured_overlays(compose_files, env_files)
+
+        self.assertEqual(
+            compose_files[2:],
+            [
+                str(self.project / "compose.workspace.yaml"),
+                str(self.project / "compose.demo.yaml"),
+            ],
+        )
+        self.assertEqual(
+            env_files[1:],
+            [self.state / "compose.workspace.env", self.state / "compose.demo.env"],
+        )
+
+    def test_overlays_without_env_files_stay_off(self) -> None:
+        inst = self._installer(mode="test")
+        compose_files = ["compose.yaml"]
+        env_files = [self.state / "compose.env"]
+
+        inst._add_configured_overlays(compose_files, env_files)
+
+        self.assertEqual(compose_files, ["compose.yaml"])
+        self.assertEqual(env_files, [self.state / "compose.env"])
+
+    def test_demo_bind_ip_is_written_and_refuses_a_wildcard(self) -> None:
+        path = install.write_demo_compose_env(self.state, "192.168.90.41")
+        self.assertIn("DEMO_BIND_IP='192.168.90.41'", path.read_text(encoding="utf-8"))
+        for value in ("0.0.0.0", "::", "not-an-ip"):
+            with self.subTest(value=value), self.assertRaises(ValidationError):
+                self._installer(mode="test", demo_bind_ip=value)
+
     def test_guarded_mode_requires_policy_and_model_dirs(self) -> None:
         # Construction validates all guarded-mode paths are supplied.
         with self.assertRaises(ValidationError):
