@@ -113,7 +113,7 @@ class CategoryFieldTests(unittest.TestCase):
             guard_eval, "build_local_adapters",
             return_value=({"input": FakeGuard(), "output": FakeGuard()}, {}),
         ):
-            outcomes, models = execute_dataset(data, environ={}, backend=BACKEND_LOCAL)
+            outcomes, models = execute_dataset(data, environ={})
         report, _ = guard_eval.build_run_report(data, outcomes, models=models)
         self.assertNotIn("per_stage_category", report["aggregates"])
         self.assertNotIn("category", report["cases"][0])
@@ -129,31 +129,23 @@ class LocalBackendTests(unittest.TestCase):
             return_value=({"input": guard, "output": guard}, {"input": "m", "output": "m"}),
         ):
             outcomes, models = execute_dataset(
-                data, environ={}, backend=BACKEND_LOCAL, **kwargs
+                data, environ={}, **kwargs
             )
         return data, outcomes, models
 
-    def test_both_stages_use_the_local_guard_and_never_the_api_builder(self) -> None:
-        with mock.patch.object(guard_eval, "build_adapters") as api_builder:
-            _, outcomes, _ = self.run_local(
-                [
-                    case("in-ok", "hello"),
-                    case("in-no", "please block", expected="block", category="jailbreak"),
-                    case("out-ok", "q", stage="output", output="fine"),
-                    case("out-no", "q", stage="output", output="block me", expected="block",
-                         category="violent"),
-                ]
-            )
-        api_builder.assert_not_called()
+    def test_both_stages_use_the_local_guard(self) -> None:
+        _, outcomes, _ = self.run_local(
+            [
+                case("in-ok", "hello"),
+                case("in-no", "please block", expected="block", category="jailbreak"),
+                case("out-ok", "q", stage="output", output="fine"),
+                case("out-no", "q", stage="output", output="block me", expected="block",
+                     category="violent"),
+            ]
+        )
         self.assertEqual(
             [outcome.observed for outcome in outcomes], ["allow", "block", "allow", "block"]
         )
-
-    def test_legacy_window_does_not_apply_to_the_local_backend(self) -> None:
-        # Over the API classifier's 512-unit window, inside the local budget.
-        _, outcomes, _ = self.run_local([case("long", "word " * 200)])
-        self.assertEqual(outcomes[0].observed, "allow")
-        self.assertIsNone(outcomes[0].error_code)
 
     def test_guard_limit_and_failure_are_errors_not_decisions(self) -> None:
         _, outcomes, _ = self.run_local(
@@ -203,7 +195,7 @@ class LocalBackendTests(unittest.TestCase):
     def test_invalid_local_configuration_fails_before_any_case(self) -> None:
         data = dataset([case("a", "hello")])
         with self.assertRaises(guard_eval.EvaluationConfigError):
-            execute_dataset(data, environ={}, backend=BACKEND_LOCAL)
+            execute_dataset(data, environ={})
 
 
 class CommandLineTests(unittest.TestCase):
