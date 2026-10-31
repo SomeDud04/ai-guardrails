@@ -445,7 +445,6 @@ sudo docker compose \
   --env-file .secrets/compose.workspace.env \
   -f compose.yaml -f compose.test.yaml -f compose.workspace.yaml \
   run --rm --no-deps \
-  --user "0:0" \
   -v "$PWD/.secrets/workspace:/secrets:ro" \
   --entrypoint python gateway \
   -m nasi_lemak.workspace_cli init \
@@ -453,9 +452,10 @@ sudo docker compose \
   --key-file /secrets/workspace_key
 ```
 
-The one-off container runs as root only because the mounted key is mode `0400`
-inside a `0700` operator directory. The long-running gateway remains UID
-`10001`. Never pass the DSN or password in argv or an environment variable, and
+The one-off container runs as the gateway's UID `10001`, not root: the service
+drops every capability, so container root cannot enter the `0700` secrets
+directory. `migration_dsn` must therefore be owned by `10001:10001`.
+Never pass the DSN or password in argv or an environment variable, and
 never point the runtime `NASI_LEMAK_WORKSPACE_DSN_FILE` at the migration DSN.
 
 If the migration DSN was removed during the earlier setup, recreate it privately
@@ -482,7 +482,6 @@ sudo docker compose \
   --env-file .secrets/compose.workspace.env \
   -f compose.yaml -f compose.test.yaml -f compose.workspace.yaml \
   run --rm --no-deps -T \
-  --user "0:0" \
   -v "$PWD/.secrets/workspace:/secrets:ro" \
   --entrypoint python gateway - <<'PY'
 import pathlib

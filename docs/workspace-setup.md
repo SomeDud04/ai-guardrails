@@ -109,7 +109,7 @@ is used only by the one-off `init` below. Create it with mode `0600` through an
 editor, for example:
 
 ```bash
-install -m 0600 /dev/null .secrets/workspace/migration_dsn
+install -o 10001 -g 10001 -m 0600 /dev/null .secrets/workspace/migration_dsn
 nano .secrets/workspace/migration_dsn
 ```
 
@@ -132,7 +132,6 @@ sudo docker compose \
   --env-file .secrets/compose.test.env \
   -f compose.yaml -f compose.test.yaml \
   run --rm --no-deps \
-  --user "0:0" \
   -v "$PWD/.secrets/workspace:/secrets:ro" \
   --entrypoint python gateway \
   -m nasi_lemak.workspace_cli init \
@@ -140,10 +139,9 @@ sudo docker compose \
   --key-file /secrets/workspace_key
 ```
 
-The one-off `init` container runs as `0:0` only because the mounted key is
-mode `0400`, owned by `10001:10001`, inside a `0700` directory; the non-root
-operator UID cannot read it. This applies only to this privileged migration
-container. The gateway runtime still runs as UID `10001`.
+The one-off container runs as the gateway's UID `10001`, not root: the service
+drops every capability, so container root cannot enter the `0700` secrets
+directory. `migration_dsn` must therefore be owned by `10001:10001`.
 
 Re-running `init` with the same key and schema is safe. A different key fails
 before committing changes. Keep the privileged DSN until the one-time
@@ -274,7 +272,6 @@ sudo docker compose \
   --env-file .secrets/compose.test.env \
   -f compose.yaml -f compose.test.yaml \
   run --rm --no-deps \
-  --user "0:0" \
   -v "$PWD/.secrets/workspace:/secrets:ro" \
   --entrypoint python gateway \
   -m nasi_lemak.workspace_cli bootstrap-admin \
