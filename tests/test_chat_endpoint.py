@@ -1163,6 +1163,9 @@ class SharedAdmissionTests(ChatEndpointTestBase):
                 await asyncio.sleep(0.005)
             self.assertFalse(app.state.sem.locked())
 
+            # The slot is free again; a busy machine must not trip the short
+            # deadline this test set for the first request.
+            app.state.chat_work_timeout = 30
             third = await asgi_request(
                 app,
                 headers=headers,
