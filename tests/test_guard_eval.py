@@ -1,8 +1,8 @@
 """Tests for the guard-only synthetic evaluation command.
 
-All execute tests use a loopback ``ThreadingHTTPServer`` fixture and synthetic
-text. They prove plumbing, contract handling and denominator arithmetic only;
-they are not model-quality, latency or live-endpoint evidence.
+All execute tests use a fake in-process guard and synthetic text. They prove
+plumbing and denominator arithmetic only; they are not model-quality, latency or
+live-endpoint evidence.
 """
 
 from __future__ import annotations
@@ -13,15 +13,13 @@ import io
 import json
 import os
 import tempfile
-import threading
 import unittest
-from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 from unittest import mock
 from typing import Any
 
 from nasi_lemak import guard_eval
-from nasi_lemak.guard_api import INPUT_GUARD_CONTRACT_V1
+from nasi_lemak.guards import GuardError, GuardInputLimit
 from nasi_lemak.guard_eval import (
     EVIDENCE_LABEL,
     ERROR_INPUT_API,
@@ -36,15 +34,8 @@ from nasi_lemak.guard_eval import (
     main,
 )
 
+MODEL = "qwen3guard-gen-fixture"
 DATASET = Path(__file__).resolve().parent.parent / "evals" / "guards" / "synthetic-smoke-v1.json"
-INPUT_MODEL = "nasi-lemak/input-guard-fixture-1"
-OUTPUT_MODEL = "Qwen/Qwen3Guard-Gen-4B"
-INPUT_KEY = "input-key-not-a-real-secret"
-OUTPUT_KEY = "output-key-not-a-real-secret"
-SAFE_VERDICT = "Safety: Safe\nCategories: None\nRefusal: No"
-UNSAFE_VERDICT = "Safety: Unsafe\nCategories: Violent\nRefusal: No"
-
-
 def input_case(
     case_id: str = "in-1",
     *,
@@ -99,125 +90,11 @@ def write_dataset(root: Path, payload: Any, name: str = "dataset.json") -> Path:
     return path
 
 
-def header(request: dict[str, Any], name: str) -> str | None:
-    for key, value in request["headers"].items():
-        if key.lower() == name.lower():
-            return value
-    return None
-
-
-def input_response(probability: float = 0.05) -> tuple[int, bytes]:
-    return 200, json.dumps(
-        {
-            "model": INPUT_MODEL,
-            "malicious_probability": probability,
-            "input_tokens": 12,
-            "truncated": False,
-        }
-    ).encode("utf-8")
-
-
-def verdict_response(content: str) -> tuple[int, bytes]:
-    return 200, json.dumps(
-        {
-            "id": "chatcmpl-fixture",
-            "object": "chat.completion",
-            "created": 0,
-            "model": "upstream",
-            "choices": [
-                {
-                    "index": 0,
-                    "message": {"role": "assistant", "content": content},
-                    "finish_reason": "stop",
-                }
-            ],
-        }
-    ).encode("utf-8")
-
-
-class _Handler(BaseHTTPRequestHandler):
-    protocol_version = "HTTP/1.1"
-
-    def log_message(self, format: str, *args: Any) -> None:
-        pass
-
-    def _handle(self) -> None:
-        raw_length = self.headers.get("Content-Length")
-        try:
-            length = int(raw_length) if raw_length else 0
-        except ValueError:
-            length = 0
-        raw = self.rfile.read(length) if length else b""
-        try:
-            parsed = json.loads(raw.decode("utf-8")) if raw else None
-        except (UnicodeDecodeError, json.JSONDecodeError):
-            parsed = None
-        request = {
-            "method": self.command,
-            "path": self.path,
-            "headers": dict(self.headers),
-            "json": parsed,
-        }
-        self.server.requests.append(request)
-        status, body = self.server.responder(request)
-        self.close_connection = True
-        try:
-            self.send_response(status)
-            self.send_header("Content-Type", "application/json")
-            self.send_header("Content-Length", str(len(body)))
-            self.end_headers()
-            self.wfile.write(body)
-        except ConnectionError:
-            pass
-
-    do_GET = _handle
-    do_POST = _handle
-
-
-class _FixtureServer(ThreadingHTTPServer):
-    daemon_threads = True
-    allow_reuse_address = True
-
-
 class FixtureMixin(unittest.TestCase):
     def setUp(self) -> None:
         self.tmp = tempfile.TemporaryDirectory()
         self.addCleanup(self.tmp.cleanup)
         self.root = Path(self.tmp.name)
-
-    def start_server(self, responder) -> _FixtureServer:
-        httpd = _FixtureServer(("127.0.0.1", 0), _Handler)
-        httpd.requests = []
-        httpd.responder = responder
-        thread = threading.Thread(
-            target=lambda: httpd.serve_forever(poll_interval=0.01), daemon=True
-        )
-        thread.start()
-
-        def cleanup() -> None:
-            httpd.shutdown()
-            thread.join(timeout=2)
-            httpd.server_close()
-
-        self.addCleanup(cleanup)
-        return httpd
-
-    def base_url(self, httpd: _FixtureServer) -> str:
-        return f"http://127.0.0.1:{httpd.server_address[1]}/v1"
-
-    def guard_env(self, httpd: _FixtureServer) -> dict[str, str]:
-        return {
-            "NASI_LEMAK_INPUT_GUARD_URL": self.base_url(httpd),
-            "NASI_LEMAK_INPUT_GUARD_MODEL": INPUT_MODEL,
-            "NASI_LEMAK_INPUT_GUARD_AUTH": "bearer",
-            "NASI_LEMAK_INPUT_GUARD_API_KEY": INPUT_KEY,
-            "NASI_LEMAK_INPUT_GUARD_THRESHOLD": "0.5",
-            "NASI_LEMAK_INPUT_GUARD_CONTRACT": INPUT_GUARD_CONTRACT_V1,
-            "NASI_LEMAK_OUTPUT_GUARD_URL": self.base_url(httpd),
-            "NASI_LEMAK_OUTPUT_GUARD_MODEL": OUTPUT_MODEL,
-            "NASI_LEMAK_OUTPUT_GUARD_AUTH": "bearer",
-            "NASI_LEMAK_OUTPUT_GUARD_API_KEY": OUTPUT_KEY,
-        }
 
     def run_main(
         self, args: list[str], env: dict[str, str] | None
@@ -235,14 +112,6 @@ class FixtureMixin(unittest.TestCase):
             with contextlib.redirect_stdout(stdout), contextlib.redirect_stderr(stderr):
                 code = main(args)
         return code, stdout.getvalue(), stderr.getvalue()
-
-    def default_responder(self, request: dict[str, Any]) -> tuple[int, bytes]:
-        if request["path"].endswith("/classify"):
-            text = request["json"]["input"]
-            return input_response(0.9 if "ATTACK-MARKER" in text else 0.05)
-        content = request["json"]["messages"][-1]["content"]
-        return verdict_response(UNSAFE_VERDICT if "UNSAFE-MARKER" in content else SAFE_VERDICT)
-
 
 class DatasetValidationTests(unittest.TestCase):
     def setUp(self) -> None:
@@ -350,9 +219,7 @@ class DryRunTests(FixtureMixin):
     def test_dry_run_needs_no_environment_client_or_network(self) -> None:
         report_path = self.root / "dry-run.json"
         with mock.patch.object(
-            guard_eval, "guard_client_config", side_effect=AssertionError("no config")
-        ), mock.patch.object(
-            guard_eval, "GenerationClient", side_effect=AssertionError("no client")
+            guard_eval, "build_local_adapters", side_effect=AssertionError("no guard")
         ):
             code, stdout, stderr = self.run_main(
                 ["--dataset", str(DATASET), "--report", str(report_path)], {}
@@ -506,222 +373,114 @@ class AggregateTests(unittest.TestCase):
         self.assertEqual(zero_class["rates"]["false_block_rate"], 0.5)
 
 
+class _FakeGuard:
+    """Decides on markers in the text; counts every call it receives."""
+
+    def __init__(self) -> None:
+        self.calls = 0
+
+    def scan_attack(self, serialized: str) -> dict[str, str]:
+        self.calls += 1
+        if "WINDOW-MARKER" in serialized:
+            raise GuardInputLimit("over the window")
+        if "BROKEN-MARKER" in serialized:
+            raise GuardError("no verdict")
+        return {"decision": "block" if "ATTACK-MARKER" in serialized else "allow"}
+
+    def scan_response(self, messages: list[dict[str, str]], output: str) -> dict[str, bool]:
+        self.calls += 1
+        if "BROKEN-MARKER" in output:
+            raise GuardError("no verdict")
+        return {"safe": "UNSAFE-MARKER" not in output}
+
+
 class ExecuteTests(FixtureMixin):
-    def test_real_adapters_are_invoked_with_separate_credentials(self) -> None:
-        httpd = self.start_server(self.default_responder)
-        path = write_dataset(
-            self.root,
-            dataset_payload(
-                [
-                    input_case("in-safe", text="SAFE-MARKER"),
-                    input_case("in-attack", expected="block", text="ATTACK-MARKER"),
-                    output_case(
-                        "out-unsafe", expected="block", output="UNSAFE-MARKER answer"
-                    ),
-                ]
+    def setUp(self) -> None:
+        super().setUp()
+        self.guard = _FakeGuard()
+        patcher = mock.patch.object(
+            guard_eval,
+            "build_local_adapters",
+            return_value=(
+                {"input": self.guard, "output": self.guard},
+                {"input": MODEL, "output": MODEL},
             ),
         )
-        dataset = load_dataset(path)
-        outcomes, models = execute_dataset(dataset, environ=self.guard_env(httpd))
-        self.assertEqual(models, {"input": INPUT_MODEL, "output": OUTPUT_MODEL})
+        patcher.start()
+        self.addCleanup(patcher.stop)
+
+    def _dataset(self, cases: list[dict[str, Any]]) -> Path:
+        return write_dataset(self.root, dataset_payload(cases))
+
+    def test_both_stages_run_through_the_local_guard(self) -> None:
+        path = self._dataset(
+            [
+                input_case("in-safe", expected="allow", text="SAFE-MARKER"),
+                input_case("in-attack", expected="block", text="ATTACK-MARKER"),
+                output_case("out-unsafe", expected="block", output="UNSAFE-MARKER"),
+            ]
+        )
+        outcomes, models = execute_dataset(load_dataset(path), environ={})
+        self.assertEqual(models, {"input": MODEL, "output": MODEL})
         self.assertEqual(
             [(outcome.case_id, outcome.observed) for outcome in outcomes],
             [("in-safe", "allow"), ("in-attack", "block"), ("out-unsafe", "block")],
         )
-        self.assertEqual(
-            [request["path"] for request in httpd.requests],
-            ["/v1/classify", "/v1/classify", "/v1/chat/completions"],
-        )
-        self.assertEqual(header(httpd.requests[0], "Authorization"), "Bearer " + INPUT_KEY)
-        self.assertEqual(header(httpd.requests[2], "Authorization"), "Bearer " + OUTPUT_KEY)
-        self.assertIn("SAFE-MARKER", httpd.requests[0]["json"]["input"])
 
-    def test_execute_report_contains_no_payload_url_key_or_header(self) -> None:
-        httpd = self.start_server(self.default_responder)
+    def test_execute_report_contains_no_payload(self) -> None:
         canary = "REPORT-CANARY-7c1d"
         report_path = self.root / "execute.json"
-        path = write_dataset(
-            self.root,
-            dataset_payload(
-                [
-                    input_case("in-safe", text=f"SAFE-MARKER {canary}"),
-                    output_case(
-                        "out-safe", text=f"question {canary}", output=f"SAFE-MARKER {canary}"
-                    ),
-                ]
-            ),
-        )
-        code, stdout, stderr = self.run_main(
-            ["--dataset", str(path), "--execute", "--report", str(report_path)],
-            self.guard_env(httpd),
+        path = self._dataset([input_case("in-safe", expected="allow", text=canary)])
+        code, _stdout, stderr = self.run_main(
+            ["--dataset", str(path), "--execute", "--report", str(report_path)], {}
         )
         self.assertEqual(code, 0, stderr)
-        text = report_path.read_text(encoding="utf-8")
-        report = json.loads(text)
-        self.assertFalse(report["dry_run"])
-        self.assertEqual(report["models"], {"input": INPUT_MODEL, "output": OUTPUT_MODEL})
-        for secret in (
-            canary,
-            INPUT_KEY,
-            OUTPUT_KEY,
-            "127.0.0.1",
-            "http://",
-            "Authorization",
-            "Bearer",
-            '"messages"',
-            "SAFE-MARKER",
-        ):
-            with self.subTest(secret=secret):
-                self.assertNotIn(secret, text)
-                self.assertNotIn(secret, stdout + stderr)
+        self.assertNotIn(canary, report_path.read_text(encoding="utf-8"))
 
-    def test_invalid_reply_is_an_error_not_a_block_and_is_not_retried(self) -> None:
-        cases = [
-            ("input", "input", ERROR_INPUT_API),
-            ("output", "output", ERROR_OUTPUT_API),
-        ]
-        for stage, marker, expected_code in cases:
-            if stage == "input":
-                def responder(request: dict[str, Any]) -> tuple[int, bytes]:
-                    if request["path"].endswith("/classify"):
-                        return 200, b'{"model":"' + INPUT_MODEL.encode() + b'","malicious_probability":NaN,"input_tokens":1,"truncated":false}'
-                    raise AssertionError("output guard must not run for an input-only case")
-
-                case = input_case("bad-input", expected="block")
-            else:
-                def responder(request: dict[str, Any]) -> tuple[int, bytes]:
-                    if request["path"].endswith("/classify"):
-                        return input_response()
-                    return verdict_response("Safety: Unsafe\nCategories: Violent")
-
-                case = output_case("bad-output", expected="block", output="UNSAFE-MARKER")
-            with self.subTest(stage=stage):
-                httpd = self.start_server(responder)
-                report_path = self.root / f"{stage}-error.json"
-                path = write_dataset(self.root, dataset_payload([case]), f"{stage}.json")
-                code, stdout, stderr = self.run_main(
-                    ["--dataset", str(path), "--execute", "--report", str(report_path)],
-                    self.guard_env(httpd),
-                )
-                self.assertEqual(code, 1, stderr)
-                report = json.loads(report_path.read_text(encoding="utf-8"))
-                entry = report["cases"][0]
-                self.assertEqual(entry["observed"], "error")
-                self.assertEqual(entry["error_code"], expected_code)
-                self.assertEqual(report["aggregates"]["total"]["completed"], 0)
-                self.assertEqual(report["aggregates"]["total"]["errors"], 1)
-                self.assertEqual(len(httpd.requests), 1)
-                self.assertNotIn("provider", stdout + stderr)
-                self.assertNotIn("127.0.0.1", stdout + stderr)
-
-    def test_bad_late_case_causes_zero_requests(self) -> None:
-        httpd = self.start_server(self.default_responder)
-        path = write_dataset(
-            self.root,
-            dataset_payload(
-                [
-                    input_case("in-safe", text="SAFE-MARKER"),
-                    {**input_case("in-late"), "messages": [{"role": "tool", "content": "bad"}]},
-                ]
-            ),
+    def test_invalid_verdict_is_an_error_not_a_block(self) -> None:
+        path = self._dataset(
+            [
+                input_case("in-bad", expected="block", text="BROKEN-MARKER"),
+                output_case("out-bad", expected="block", output="BROKEN-MARKER"),
+            ]
         )
-        code, _, _ = self.run_main(
-            ["--dataset", str(path), "--execute"], self.guard_env(httpd)
+        outcomes, _models = execute_dataset(load_dataset(path), environ={})
+        self.assertEqual(
+            [(outcome.observed, outcome.error_code) for outcome in outcomes],
+            [("error", ERROR_INPUT_API), ("error", ERROR_OUTPUT_API)],
         )
+        self.assertEqual(self.guard.calls, 2)
+
+    def test_input_over_the_window_is_a_separate_error(self) -> None:
+        path = self._dataset([input_case("in-long", expected="block", text="WINDOW-MARKER")])
+        outcomes, _models = execute_dataset(load_dataset(path), environ={})
+        self.assertEqual(outcomes[0].observed, "error")
+        self.assertEqual(outcomes[0].error_code, ERROR_INPUT_WINDOW)
+        self.assertEqual(aggregate_outcomes(outcomes)["total"]["window_errors"], 1)
+
+    def test_bad_late_case_causes_no_guard_call(self) -> None:
+        path = self._dataset(
+            [
+                input_case("in-safe", expected="allow", text="SAFE-MARKER"),
+                input_case("in-safe", expected="allow", text="duplicate id"),
+            ]
+        )
+        code, _stdout, _stderr = self.run_main(["--dataset", str(path), "--execute"], {})
         self.assertEqual(code, 2)
-        self.assertEqual(httpd.requests, [])
+        self.assertEqual(self.guard.calls, 0)
 
-    def test_invalid_config_causes_zero_requests(self) -> None:
-        httpd = self.start_server(self.default_responder)
-        path = write_dataset(self.root, dataset_payload([input_case()]))
-        env = self.guard_env(httpd)
-        env.pop("NASI_LEMAK_INPUT_GUARD_CONTRACT")
-        code, _, _ = self.run_main(["--dataset", str(path), "--execute"], env)
-        self.assertEqual(code, 2)
-        self.assertEqual(httpd.requests, [])
-
-    def test_input_window_error_is_separate_and_sends_no_request(self) -> None:
-        httpd = self.start_server(self.default_responder)
-        report_path = self.root / "window.json"
-        path = write_dataset(
-            self.root,
-            dataset_payload(
-                [
-                    input_case("in-safe", text="SAFE-MARKER"),
-                    input_case("in-window", expected="block", text="x" * 600),
-                ]
-            ),
-        )
-        code, stdout, _ = self.run_main(
-            ["--dataset", str(path), "--execute", "--report", str(report_path)],
-            self.guard_env(httpd),
-        )
-        self.assertEqual(code, 1)
-        report = json.loads(report_path.read_text(encoding="utf-8"))
-        entries = {entry["id"]: entry for entry in report["cases"]}
-        self.assertEqual(entries["in-safe"]["observed"], "allow")
-        self.assertEqual(entries["in-window"]["observed"], "error")
-        self.assertEqual(entries["in-window"]["error_code"], ERROR_INPUT_WINDOW)
-        total = report["aggregates"]["total"]
-        self.assertEqual(total["completed"], 1)
-        self.assertEqual(total["errors"], 1)
-        self.assertEqual(total["window_errors"], 1)
-        self.assertEqual(len(httpd.requests), 1)
-        self.assertIn("window_errors=1", stdout)
-
-    def test_input_window_is_independent_of_gateway_policy_ceiling(self) -> None:
-        from nasi_lemak import gateway
-        from nasi_lemak.guard_api import INPUT_GUARD_MAX_TOKENS
-
-        self.assertEqual(guard_eval.INPUT_EVAL_WINDOW_BUDGET, 512)
-        self.assertEqual(guard_eval.INPUT_EVAL_WINDOW_BUDGET, INPUT_GUARD_MAX_TOKENS)
-        dataset = guard_eval.parse_dataset(
-            dataset_payload(
-                [
-                    input_case("in-window", expected="block", text="x" * 600),
-                    input_case("in-small", text="SAFE-MARKER"),
-                ]
-            ),
-            sha256="0" * 64,
-        )
-        cases = {case.case_id: case for case in dataset.cases}
-        self.assertGreater(gateway.MAX_TOKEN_BUDGET, guard_eval.INPUT_EVAL_WINDOW_BUDGET)
-        self.assertTrue(guard_eval.input_window_exceeded(cases["in-window"]))
-        self.assertFalse(guard_eval.input_window_exceeded(cases["in-small"]))
+    def test_invalid_guard_config_exits_before_any_case(self) -> None:
+        path = self._dataset([input_case("in-safe", expected="allow", text="SAFE-MARKER")])
         with mock.patch.object(
-            gateway, "MAX_TOKEN_BUDGET", gateway.MAX_TOKEN_BUDGET * 8
+            guard_eval,
+            "build_local_adapters",
+            side_effect=guard_eval.EvaluationConfigError("invalid"),
         ):
-            self.assertTrue(guard_eval.input_window_exceeded(cases["in-window"]))
-
-    def test_only_needed_guard_configs_are_required(self) -> None:
-        httpd = self.start_server(self.default_responder)
-        path = write_dataset(self.root, dataset_payload([input_case()]))
-        env = {
-            key: value
-            for key, value in self.guard_env(httpd).items()
-            if not key.startswith("NASI_LEMAK_OUTPUT_GUARD")
-        }
-        outcomes, models = execute_dataset(load_dataset(path), environ=env)
-        self.assertEqual(outcomes[0].observed, "allow")
-        self.assertEqual(models, {"input": INPUT_MODEL})
-        self.assertEqual(len(httpd.requests), 1)
-
-    def test_guard_config_is_validated_before_any_request(self) -> None:
-        httpd = self.start_server(self.default_responder)
-        path = write_dataset(
-            self.root,
-            dataset_payload(
-                [
-                    input_case("in-safe"),
-                    output_case("out-safe", output="SAFE-MARKER"),
-                ]
-            ),
-        )
-        env = self.guard_env(httpd)
-        env.pop("NASI_LEMAK_OUTPUT_GUARD_MODEL")
-        code, _, _ = self.run_main(["--dataset", str(path), "--execute"], env)
+            code, _stdout, _stderr = self.run_main(
+                ["--dataset", str(path), "--execute"], {}
+            )
         self.assertEqual(code, 2)
-        self.assertEqual(httpd.requests, [])
+        self.assertEqual(self.guard.calls, 0)
 
 
 if __name__ == "__main__":

@@ -1,15 +1,9 @@
-"""The one Qwen3Guard contract shared by the HTTP and the local transports.
+"""The one Qwen3Guard contract.
 
 The Qwen3Guard semantics -- the fixed prompt framing, the safety/category/refusal
 vocabulary, the conversation validation and the strict three-line verdict parse --
-are defined **once**, here.  Two transports consume them:
-
-* :mod:`nasi_lemak.guard_api` sends the validated conversation to an
-  OpenAI-compatible serving wrapper over HTTP and parses the returned verdict
-  text.  It re-exports every name below, so the historical import path
-  ``nasi_lemak.guard_api.parse_verdict`` still resolves to this definition.
-* :mod:`nasi_lemak.qwen3_local` runs ``Qwen3Guard-Gen-0.6B`` in-process with the
-  same framing and the same parser.
+are defined **once**, here.  :mod:`nasi_lemak.qwen3_local` runs
+``Qwen3Guard-Gen-0.6B`` in-process with this framing and this parser.
 
 Keeping one definition is the point: two copies of the taxonomy or of the
 verdict parser would drift, and a drifted parser is a detection change nobody

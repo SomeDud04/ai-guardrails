@@ -7,10 +7,10 @@ the suite for two structural defects that would otherwise ship silently:
 * a second copy of the verdict parser or of the safety taxonomy -- the drift
   the shared contract exists to remove.
 
-Historical private spellings in ``guard_api`` (``_CATEGORY_VALUES``,
-``_SAFETY_VALUES``, ``_REFUSAL_VALUES`` and ``_parse_categories``) are counted
-as the same contract slot as their public names.  A literal private taxonomy
-tuple is a second implementation even when the public name still exists.
+Private spellings (``_CATEGORY_VALUES``, ``_SAFETY_VALUES``,
+``_REFUSAL_VALUES`` and ``_parse_categories``) are counted as the same contract
+slot as their public names.  A literal private taxonomy tuple is a second
+implementation even when the public name still exists.
 
 They are deliberately fast and dependency-free: standard library only.
 """
@@ -336,7 +336,7 @@ class HistoricalNameRegressionTest(unittest.TestCase):
         for name, value in _ORIGINAL_PRIVATE_TAXONOMY.items():
             with self.subTest(name=name):
                 modules = self._mutated_package(
-                    "guard_api.py", f"{name} = {value}"
+                    "gateway.py", f"{name} = {value}"
                 )
                 found = _contract_implementations(modules)
                 group = NAME_TO_GROUP[name]
@@ -348,7 +348,7 @@ class HistoricalNameRegressionTest(unittest.TestCase):
 
     def test_annotated_private_taxonomy_literal_is_rejected(self) -> None:
         modules = self._mutated_package(
-            "guard_api.py",
+            "gateway.py",
             "_SAFETY_VALUES: tuple[str, ...] = "
             '("Safe", "Unsafe", "Controversial")',
         )
@@ -376,7 +376,7 @@ class HistoricalNameRegressionTest(unittest.TestCase):
         }
         for name, source in declarations.items():
             with self.subTest(name=name):
-                modules = self._mutated_package("guard_api.py", source)
+                modules = self._mutated_package("gateway.py", source)
                 found = _contract_implementations(modules)
                 group = NAME_TO_GROUP[name]
                 self.assertEqual(
@@ -388,9 +388,9 @@ class HistoricalNameRegressionTest(unittest.TestCase):
     def test_current_aliases_pass(self) -> None:
         modules = _package_asts()
         self.assertEqual(
-            list(_iter_contract_implementations(modules["guard_api.py"])),
+            list(_iter_contract_implementations(modules["gateway.py"])),
             [],
-            "the current direct aliases and frozenset re-export are not copies",
+            "a module without the contract has no copy of it",
         )
         found = _contract_implementations(modules)
         for group in CONTRACT_GROUPS:
@@ -399,7 +399,7 @@ class HistoricalNameRegressionTest(unittest.TestCase):
 
     def test_annotated_current_alias_passes(self) -> None:
         modules = self._mutated_package(
-            "guard_api.py",
+            "gateway.py",
             "_SAFETY_VALUES: tuple[str, ...] = SAFETY_VALUES",
         )
         found = _contract_implementations(modules)
@@ -408,7 +408,7 @@ class HistoricalNameRegressionTest(unittest.TestCase):
     def test_package_ast_mutations_are_in_memory_only(self) -> None:
         before = {path: path.read_bytes() for path in _package_modules()}
         modules = self._mutated_package(
-            "guard_api.py",
+            "gateway.py",
             '_SAFETY_VALUES = ("Safe", "Unsafe", "Controversial")',
         )
         _contract_implementations(modules)

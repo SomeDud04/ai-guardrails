@@ -64,24 +64,12 @@ from .generation import (
     RealGatewayAdapters,
     TestGatewayAdapters,
 )
-from .guard_api import (
-    INPUT_GUARD_CONTRACT_V1,
-    InputGuardApiAdapter,
-    Qwen3GuardOutputAdapter,
-    guard_client_config,
-)
 from .limits import (
     LIMIT_FIELDS,
     ChatLimits,
     ChatLimitsError,
     has_explicit_env,
     tighten,
-)
-from .hosted_guards import (
-    CLOUDFLARE_LLAMA_GUARD_MODEL,
-    GROQ_PROMPT_GUARD_MODEL,
-    CloudflareLlamaGuardOutputAdapter,
-    GroqPromptGuardInputAdapter,
 )
 from .operator import (
     OperatorQueryError,
@@ -141,11 +129,9 @@ ENV_LLAMA_GUARD_CONTEXT_LIMIT = "NASI_LEMAK_LLAMA_GUARD_CONTEXT_LIMIT"
 # fallback between them is supported.
 ENV_GUARD_BACKEND = "NASI_LEMAK_GUARD_BACKEND"
 GUARD_BACKEND_LOCAL = "local"
-GUARD_BACKEND_API = "api"
 GUARD_BACKEND_QWEN3GUARD = "qwen3guard-local"
 GUARD_BACKENDS = (
     GUARD_BACKEND_LOCAL,
-    GUARD_BACKEND_API,
     GUARD_BACKEND_QWEN3GUARD,
 )
 
@@ -159,29 +145,6 @@ ENV_QWEN3GUARD_OUTPUT_THRESHOLD = "NASI_LEMAK_QWEN3GUARD_OUTPUT_THRESHOLD"
 ENV_QWEN3GUARD_WORKERS = "NASI_LEMAK_QWEN3GUARD_WORKERS"
 ENV_QWEN3GUARD_THREADS = "NASI_LEMAK_QWEN3GUARD_THREADS"
 ENV_QWEN3GUARD_LONG_INPUT = "NASI_LEMAK_QWEN3GUARD_LONG_INPUT"
-
-INPUT_GUARD_ENV_PREFIX = "NASI_LEMAK_INPUT_GUARD"
-OUTPUT_GUARD_ENV_PREFIX = "NASI_LEMAK_OUTPUT_GUARD"
-ENV_INPUT_GUARD_URL = f"{INPUT_GUARD_ENV_PREFIX}_URL"
-ENV_INPUT_GUARD_MODEL = f"{INPUT_GUARD_ENV_PREFIX}_MODEL"
-ENV_INPUT_GUARD_AUTH = f"{INPUT_GUARD_ENV_PREFIX}_AUTH"
-ENV_INPUT_GUARD_API_KEY = f"{INPUT_GUARD_ENV_PREFIX}_API_KEY"
-ENV_INPUT_GUARD_API_KEY_FILE = f"{INPUT_GUARD_ENV_PREFIX}_API_KEY_FILE"
-ENV_INPUT_GUARD_THRESHOLD = f"{INPUT_GUARD_ENV_PREFIX}_THRESHOLD"
-ENV_INPUT_GUARD_CONTRACT = f"{INPUT_GUARD_ENV_PREFIX}_CONTRACT"
-ENV_INPUT_GUARD_PROVIDER = f"{INPUT_GUARD_ENV_PREFIX}_PROVIDER"
-ENV_OUTPUT_GUARD_URL = f"{OUTPUT_GUARD_ENV_PREFIX}_URL"
-ENV_OUTPUT_GUARD_MODEL = f"{OUTPUT_GUARD_ENV_PREFIX}_MODEL"
-ENV_OUTPUT_GUARD_AUTH = f"{OUTPUT_GUARD_ENV_PREFIX}_AUTH"
-ENV_OUTPUT_GUARD_API_KEY = f"{OUTPUT_GUARD_ENV_PREFIX}_API_KEY"
-ENV_OUTPUT_GUARD_API_KEY_FILE = f"{OUTPUT_GUARD_ENV_PREFIX}_API_KEY_FILE"
-ENV_OUTPUT_GUARD_PROVIDER = f"{OUTPUT_GUARD_ENV_PREFIX}_PROVIDER"
-
-# Optional hosted provider pair.  Both selectors must be supplied together;
-# leaving both unset preserves the existing gateway-owned input contract and
-# Qwen3Guard output adapter.  No provider is inferred from a URL or model.
-INPUT_GUARD_PROVIDER_GROQ = "groq-prompt-guard"
-OUTPUT_GUARD_PROVIDER_CLOUDFLARE = "cloudflare-llama-guard"
 
 # Optional operational bounds.  An explicit ``make_app`` argument always wins;
 # otherwise these environment values apply, then the built-in defaults.  An
@@ -651,61 +614,6 @@ def _guard_backend(env: dict[str, str]) -> str:
     return backend if backend in GUARD_BACKENDS else ""
 
 
-def _hosted_guard_providers(env: dict[str, str]) -> tuple[str, str]:
-    """Return the explicit hosted provider pair, or two empty defaults.
-
-    Defaults apply only when BOTH selector variables are absent (``None``).
-    An explicitly supplied empty or whitespace-only pair is invalid, as is a
-    single selector, an unknown value, a mixed value or a non-string.  This
-    runs before config/key-file reads and before any client loader.
-    """
-    input_provider = env.get(ENV_INPUT_GUARD_PROVIDER)
-    output_provider = env.get(ENV_OUTPUT_GUARD_PROVIDER)
-    if input_provider is None and output_provider is None:
-        return "", ""
-    if not isinstance(input_provider, str) or not isinstance(output_provider, str):
-        raise ValueError("guard provider selection is not supported")
-    input_provider = input_provider.strip()
-    output_provider = output_provider.strip()
-    if (
-        input_provider == INPUT_GUARD_PROVIDER_GROQ
-        and output_provider == OUTPUT_GUARD_PROVIDER_CLOUDFLARE
-    ):
-        return input_provider, output_provider
-    raise ValueError("guard provider selection is not supported")
-
-
-def _api_guard_config(
-    env: dict[str, str],
-) -> tuple[Any, Any, float, str, str]:
-    """Validate every API guard setting before any client is constructed.
-
-    The hosted pair ignores the gateway-owned input contract, requires exact
-    approved model IDs and bearer auth on both dedicated guard configs, and
-    creates no fallback for a missing or invalid selection.  The default pair
-    still requires the version-1 input contract.
-    """
-    input_provider, output_provider = _hosted_guard_providers(env)
-    if not input_provider:
-        contract = env.get(ENV_INPUT_GUARD_CONTRACT)
-        if not isinstance(contract, str) or contract.strip() != INPUT_GUARD_CONTRACT_V1:
-            raise ValueError("input guard contract is not supported")
-    threshold = _guard_threshold(
-        _required_guard_setting(env, ENV_INPUT_GUARD_THRESHOLD)
-    )
-    input_config = guard_client_config(env, INPUT_GUARD_ENV_PREFIX)
-    output_config = guard_client_config(env, OUTPUT_GUARD_ENV_PREFIX)
-    if input_provider:
-        if input_config.auth_mode != "bearer" or output_config.auth_mode != "bearer":
-            raise ValueError("hosted guard providers require bearer auth")
-        if (
-            input_config.model != GROQ_PROMPT_GUARD_MODEL
-            or output_config.model != CLOUDFLARE_LLAMA_GUARD_MODEL
-        ):
-            raise ValueError("hosted guard model is not supported")
-    return input_config, output_config, threshold, input_provider, output_provider
-
-
 def _mode_from_env(env: dict[str, str]) -> str:
     mode = env.get(ENV_MODE, MODE_GUARDED).strip().lower()
     return mode if mode in (MODE_GUARDED, MODE_TEST) else ""
@@ -738,7 +646,7 @@ def make_adapters_from_env(
     * ``NASI_LEMAK_MODE``: ``guarded`` (default) or ``test``.
     * For ``test``: explicit ``NASI_LEMAK_ALLOW_UNGUARDED_TEST=true`` plus a
       valid generation configuration.
-    * ``NASI_LEMAK_GUARD_BACKEND``: ``local`` (default), ``api`` or
+    * ``NASI_LEMAK_GUARD_BACKEND``: ``local`` (default) or
       ``qwen3guard-local``. Unknown or partial values return ``None``; there is
       no fallback between backends.
     * For ``guarded`` + ``local``: ``NASI_LEMAK_GENERATION_URL`` and
@@ -754,18 +662,6 @@ def make_adapters_from_env(
       by :mod:`nasi_lemak.guard_pool`) and ``..._LONG_INPUT`` (default 8192,
       minimum 512, maximum 32768). No Meta guard directory, URL or threshold is
       read on this path, and every value is validated before the loader runs.
-    * For ``guarded`` + ``api``: the same generation settings plus explicit
-      ``NASI_LEMAK_INPUT_GUARD_{URL,MODEL,AUTH,THRESHOLD,CONTRACT}`` and
-      ``NASI_LEMAK_OUTPUT_GUARD_{URL,MODEL,AUTH}``, each with exactly one of
-      ``..._API_KEY`` or ``..._API_KEY_FILE`` when auth is ``bearer``. No local
-      guard directories or ML dependencies are required or loaded.
-    * Optional hosted pair: set both ``NASI_LEMAK_INPUT_GUARD_PROVIDER=
-      groq-prompt-guard`` and ``NASI_LEMAK_OUTPUT_GUARD_PROVIDER=
-      cloudflare-llama-guard``. The models must be exactly
-      ``meta-llama/llama-prompt-guard-2-86m`` and
-      ``@cf/meta/llama-guard-3-8b``, both auth modes must be ``bearer``, and
-      the input contract is not required. One selector, an unknown value or a
-      different model leaves the app unready before any loader or network call.
     """
     env = os.environ if environ is None else environ
     mode = _mode_from_env(env)
@@ -792,47 +688,11 @@ def make_adapters_from_env(
 
     generation_loader = client_loader or _load_generation_client
 
-    if mode == MODE_GUARDED and backend == GUARD_BACKEND_API:
-        # API backend: validate the provider selection, contract/threshold and
-        # both dedicated configs (including explicit key files) before any
-        # client loader runs.  It requires no local guard artifact directories
-        # or ML imports.  A hosted selection has no fallback to the default
-        # custom-input/Qwen-output pair.
-        try:
-            (
-                input_config,
-                output_config,
-                threshold,
-                input_provider,
-                output_provider,
-            ) = _api_guard_config(env)
-            input_client = generation_loader(input_config)
-            output_client = generation_loader(output_config)
-            client = generation_loader(config)
-            if input_provider and output_provider:
-                input_guard = GroqPromptGuardInputAdapter(
-                    input_client, threshold=threshold
-                )
-                output_guard = CloudflareLlamaGuardOutputAdapter(output_client)
-            else:
-                input_guard = InputGuardApiAdapter(
-                    input_client, threshold=threshold
-                )
-                output_guard = Qwen3GuardOutputAdapter(output_client)
-            return RealGatewayAdapters(
-                client,
-                tokenizer=input_guard,
-                attack_guard=input_guard,
-                output_guard=output_guard,
-            )
-        except Exception:
-            return None
-
     if mode == MODE_GUARDED and backend == GUARD_BACKEND_QWEN3GUARD:
         # Local Qwen3Guard-Gen: validate every dedicated setting before any
         # loader, then build one causal guard shared by the tokenizer, attack
         # and output slots.  A failure at any stage yields no adapter; the Meta
-        # directories and the API settings are never consulted.
+        # directories are never consulted.
         try:
             (
                 qwen_directory,
@@ -890,7 +750,6 @@ def make_adapters_from_env(
         except Exception:
             return None
 
-    generation_loader = client_loader or _load_generation_client
     try:
         client = generation_loader(config)
     except Exception:

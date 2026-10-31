@@ -937,16 +937,12 @@ def write_guarded_compose_env(
     state_dir: Path,
     project_dir: Path,
     policy_file: str,
-    prompt_guard_dir: str,
-    llama_guard_dir: str,
     qwen_guard_dir: str,
 ) -> Path:
     env_path = state_dir / "compose.pilot.env"
     lines = [
         PILOT_ENV_HEADER,
         _env_line("PILOT_POLICY_FILE", policy_file),
-        _env_line("PILOT_PROMPT_GUARD_MODEL_DIR", prompt_guard_dir),
-        _env_line("PILOT_LLAMA_GUARD_MODEL_DIR", llama_guard_dir),
         _env_line("PILOT_QWEN_GUARD_MODEL_DIR", qwen_guard_dir),
         _env_line("PILOT_QWEN_GUARD_MODEL_CONTAINER_DIR", QWEN_GUARD_CONTAINER_DIR),
         _env_line("NASI_LEMAK_QWEN3GUARD_INPUT_THRESHOLD", PILOT_QWEN_THRESHOLD),
@@ -958,8 +954,6 @@ def write_guarded_compose_env(
         _env_line("NASI_LEMAK_CHAT_CONTEXT_BUDGET", PILOT_CONTEXT_BUDGET),
         _env_line("NASI_LEMAK_CHAT_MAX_CONCURRENCY", PILOT_MAX_CONCURRENCY),
         _env_line("NASI_LEMAK_GENERATION_SYSTEM_PROMPT", PILOT_GENERATION_SYSTEM_PROMPT),
-        _env_line("NASI_LEMAK_PROMPT_GUARD_THRESHOLD", "0.5"),
-        _env_line("NASI_LEMAK_LLAMA_GUARD_CONTEXT_LIMIT", "4096"),
         _env_line("GUARD_MEM_LIMIT", "8g"),
         _env_line("GUARD_CPUS", "4.0"),
         _env_line("GUARD_PIDS_LIMIT", "512"),
@@ -1000,391 +994,6 @@ def ensure_runtime_readable(path: Path, *, label: str) -> None:
             f"{label} {path} is not readable by runtime UID {RUNTIME_UID}; "
             f"run: chmod a+r {path}"
         )
-
-
-# ---------------------------------------------------------------------------
-# Guard API backend configuration (nonsecret only)
-# ---------------------------------------------------------------------------
-GUARD_BACKEND_LOCAL = "local"
-GUARD_BACKEND_API = "api"
-GUARD_BACKENDS = (GUARD_BACKEND_LOCAL, GUARD_BACKEND_API)
-GUARD_API_CONTRACT = "nasi-lemak-input-classifier-v1"
-GUARD_API_CONFIG_VERSION = 1
-GUARD_API_CONFIG_MAX_BYTES = 64 * 1024
-
-
-@dataclass(frozen=True)
-class GuardApiEndpoint:
-    url: str
-    model: str
-    auth: str
-    api_key_file: str | None
-    threshold: float | None = None
-    timeout: float | None = None
-    max_response_bytes: int | None = None
-    allow_insecure_http: bool = False
-
-
-@dataclass(frozen=True)
-class GuardApiConfig:
-    input: GuardApiEndpoint
-    output: GuardApiEndpoint
-    ca_file: str | None = None
-
-
-def _guard_api_error(message: str) -> ValidationError:
-    return ValidationError(f"guard API config: {message}")
-
-
-def _guard_api_path(value: Any, label: str, *, absolute: bool = True) -> str:
-    if not isinstance(value, str) or not value.strip():
-        raise _guard_api_error(f"{label} must be a non-empty path")
-    text = value.strip()
-    if absolute and not Path(text).is_absolute():
-        raise _guard_api_error(f"{label} must be an absolute path")
-    _validate_no_injection(text, name=label)
-    return text
-
-
-def _guard_api_number(
-    value: Any,
-    label: str,
-    *,
-    minimum: float,
-    maximum: float,
-    integer: bool = False,
-) -> float | int:
-    if isinstance(value, bool) or not isinstance(value, (int, float)):
-        raise _guard_api_error(f"{label} must be a number")
-    if integer and not isinstance(value, int):
-        raise _guard_api_error(f"{label} must be an integer")
-    number = float(value)
-    if number != number or number in (float("inf"), float("-inf")):
-        raise _guard_api_error(f"{label} must be finite")
-    if not minimum <= number <= maximum:
-        raise _guard_api_error(f"{label} must be between {minimum} and {maximum}")
-    return int(number) if integer else number
-
-
-def _guard_api_operator_file(value: Any, label: str) -> str:
-    """Validate a non-secret CA/config file by metadata only.
-
-    Used for the operator-supplied CA bundle.  Only metadata is inspected; the
-    certificate contents are never read by ``--check`` or ``--plan``.  A
-    non-secret CA may be world/group readable, so the generic readability hint
-    is safe here.
-    """
-    text = _guard_api_path(value, label)
-    path = Path(text)
-    try:
-        st = platform_ops().lstat(path)
-    except OSError as exc:
-        raise _guard_api_error(f"{label} {path} cannot be inspected: {exc}") from None
-    if platform_ops().is_symlink(path) or not stat.S_ISREG(st.st_mode):
-        raise _guard_api_error(f"{label} {path} must be a regular non-symlink file")
-    if st.st_size <= 0:
-        raise _guard_api_error(f"{label} {path} must not be empty")
-    try:
-        ensure_runtime_readable(path, label=label)
-    except InstallError as exc:
-        raise _guard_api_error(str(exc)) from None
-    return text
-
-
-def _guard_api_secret_file(value: Any, label: str) -> str:
-    """Validate a bearer key file by metadata only; never read its contents.
-
-    The runtime container runs as UID/GID 10001.  A key file is accepted only
-    when it is a regular non-symlink file that the runtime can read through
-    owner or runtime-group permissions and that is not group/world writable or
-    world readable.  The message tells the operator how to install a key
-    (``chown`` plus ``chmod 0400``); it never suggests ``chmod a+r`` for a
-    secret.  ``--check``, ``--plan`` and the mutating install never change the
-    operator's permissions and never read the key.
-    """
-    text = _guard_api_path(value, label)
-    path = Path(text)
-    try:
-        st = platform_ops().lstat(path)
-    except OSError as exc:
-        raise _guard_api_error(f"{label} {path} cannot be inspected: {exc}") from None
-    if platform_ops().is_symlink(path) or not stat.S_ISREG(st.st_mode):
-        raise _guard_api_error(
-            f"{label} {path} must be a regular non-symlink file"
-        )
-    if st.st_size <= 0:
-        raise _guard_api_error(f"{label} {path} must not be empty")
-    mode = stat.S_IMODE(st.st_mode)
-    uid = getattr(st, "st_uid", -1)
-    gid = getattr(st, "st_gid", -1)
-    hint = (
-        f"install it with: chown {RUNTIME_UID}:{RUNTIME_GID} {path} "
-        f"&& chmod 0400 {path}"
-    )
-    if mode & 0o022:
-        raise _guard_api_error(
-            f"{label} {path} must not be writable by group or others; {hint}"
-        )
-    if mode & 0o004:
-        raise _guard_api_error(
-            f"{label} {path} must not be world-readable; {hint}"
-        )
-    owner_readable = uid == RUNTIME_UID and bool(mode & 0o400)
-    group_readable = gid == RUNTIME_GID and bool(mode & 0o040)
-    if not (owner_readable or group_readable):
-        raise _guard_api_error(
-            f"{label} {path} is not readable by runtime UID {RUNTIME_UID}; {hint}"
-        )
-    return text
-
-
-def _guard_api_duplicates(pairs: list[tuple[str, Any]]) -> dict[str, Any]:
-    result: dict[str, Any] = {}
-    for key, value in pairs:
-        if key in result:
-            raise _guard_api_error(f"duplicate key {key!r}")
-        result[key] = value
-    return result
-
-
-def _guard_api_endpoint(
-    section: Any,
-    *,
-    label: str,
-    threshold_required: bool,
-) -> GuardApiEndpoint:
-    if not isinstance(section, dict):
-        raise _guard_api_error(f"{label} must be an object")
-    allowed = {
-        "url",
-        "model",
-        "auth",
-        "api_key_file",
-        "timeout",
-        "max_response_bytes",
-        "allow_insecure_http",
-    }
-    if threshold_required:
-        allowed.add("threshold")
-    unknown = sorted(set(section) - allowed)
-    if unknown:
-        raise _guard_api_error(f"{label} has unknown fields: {', '.join(unknown)}")
-
-    allow_insecure = section.get("allow_insecure_http", False)
-    if not isinstance(allow_insecure, bool):
-        raise _guard_api_error(f"{label}.allow_insecure_http must be boolean")
-    raw_url = section.get("url")
-    if not isinstance(raw_url, str) or not raw_url.strip():
-        raise _guard_api_error(f"{label}.url is required")
-    try:
-        url = validate_generation_url(
-            raw_url.strip(), allow_insecure=allow_insecure
-        )
-    except ValidationError as exc:
-        raise _guard_api_error(f"{label}.url: {exc}") from None
-    raw_model = section.get("model")
-    if not isinstance(raw_model, str) or not raw_model.strip():
-        raise _guard_api_error(f"{label}.model is required")
-    try:
-        model = validate_model_id(raw_model.strip())
-    except ValidationError as exc:
-        raise _guard_api_error(f"{label}.model: {exc}") from None
-    try:
-        auth = validate_generation_auth(section.get("auth"))
-    except ValidationError as exc:
-        raise _guard_api_error(f"{label}.auth: {exc}") from None
-
-    key_file = section.get("api_key_file")
-    if auth == "bearer":
-        if key_file is None:
-            raise _guard_api_error(
-                f"{label}.api_key_file is required for bearer auth"
-            )
-        key_file = _guard_api_secret_file(
-            key_file, f"{label}.api_key_file"
-        )
-    elif key_file is not None:
-        raise _guard_api_error(
-            f"{label}.api_key_file must be omitted for auth 'none'"
-        )
-
-    threshold: float | None = None
-    if threshold_required:
-        if "threshold" not in section:
-            raise _guard_api_error(f"{label}.threshold is required")
-        threshold = float(
-            _guard_api_number(
-                section["threshold"],
-                f"{label}.threshold",
-                minimum=0.0,
-                maximum=1.0,
-            )
-        )
-    timeout: float | None = None
-    if "timeout" in section:
-        timeout = float(
-            _guard_api_number(
-                section["timeout"],
-                f"{label}.timeout",
-                minimum=1.0,
-                maximum=600.0,
-            )
-        )
-    max_response: int | None = None
-    if "max_response_bytes" in section:
-        max_response = int(
-            _guard_api_number(
-                section["max_response_bytes"],
-                f"{label}.max_response_bytes",
-                minimum=1024.0,
-                maximum=4 * 1024 * 1024,
-                integer=True,
-            )
-        )
-    return GuardApiEndpoint(
-        url=url,
-        model=model,
-        auth=auth,
-        api_key_file=key_file,
-        threshold=threshold,
-        timeout=timeout,
-        max_response_bytes=max_response,
-        allow_insecure_http=allow_insecure,
-    )
-
-
-def load_guard_api_config(path: Path) -> GuardApiConfig:
-    """Load a bounded, strict, versioned, non-secret guard API config.
-
-    Inline credentials are rejected; bearer key files are referenced by absolute
-    operator-supplied paths.  No network access is performed and secret contents
-    are never read.
-    """
-    path = Path(path)
-    if not path.is_absolute():
-        raise _guard_api_error("config path must be absolute")
-    try:
-        st = platform_ops().lstat(path)
-    except OSError as exc:
-        raise _guard_api_error(f"cannot inspect {path}: {exc}") from None
-    if platform_ops().is_symlink(path) or not stat.S_ISREG(st.st_mode):
-        raise _guard_api_error(f"{path} must be a regular non-symlink file")
-    if st.st_size <= 0 or st.st_size > GUARD_API_CONFIG_MAX_BYTES:
-        raise _guard_api_error(
-            f"{path} must be between 1 and {GUARD_API_CONFIG_MAX_BYTES} bytes"
-        )
-    try:
-        document = json.loads(
-            platform_ops().read_text(path),
-            object_pairs_hook=_guard_api_duplicates,
-        )
-    except ValidationError:
-        raise
-    except (OSError, ValueError) as exc:
-        raise _guard_api_error(f"cannot parse {path}: {exc}") from None
-    if not isinstance(document, dict):
-        raise _guard_api_error("top level must be an object")
-    unknown = sorted(set(document) - {"version", "input", "output", "ca_file"})
-    if unknown:
-        raise _guard_api_error(f"unknown fields: {', '.join(unknown)}")
-    version = document.get("version")
-    if type(version) is not int or version != GUARD_API_CONFIG_VERSION:
-        raise _guard_api_error(
-            f"version must be the integer {GUARD_API_CONFIG_VERSION}"
-        )
-    if "input" not in document or "output" not in document:
-        raise _guard_api_error("input and output sections are required")
-    input_endpoint = _guard_api_endpoint(
-        document["input"], label="input", threshold_required=True
-    )
-    output_endpoint = _guard_api_endpoint(
-        document["output"], label="output", threshold_required=False
-    )
-    ca_file = None
-    if "ca_file" in document:
-        ca_file = _guard_api_operator_file(document["ca_file"], "ca_file")
-    return GuardApiConfig(
-        input=input_endpoint, output=output_endpoint, ca_file=ca_file
-    )
-
-
-def ensure_empty_guard_key(state_dir: Path) -> Path:
-    """Return the installer-owned empty secret for an auth ``none`` endpoint.
-
-    It is deliberately never referenced by a runtime ``_API_KEY_FILE`` variable;
-    it exists only because Compose requires both guard secret sources.
-    """
-    path = state_dir / "guard_api_empty_key"
-    if path.exists():
-        if platform_ops().is_symlink(path):
-            raise InstallError(f"refusing to use symlinked {path}")
-        st = platform_ops().lstat(path)
-        if not stat.S_ISREG(st.st_mode) or st.st_size != 0:
-            raise InstallError(
-                f"{path} must be an empty installer-owned file; move it aside"
-            )
-        return path
-    atomic_write(path, "", 0o600)
-    return path
-
-
-def write_api_compose_env(
-    state_dir: Path,
-    policy_file: str,
-    config: GuardApiConfig,
-    empty_key_file: Path,
-) -> Path:
-    """Write .secrets/compose.api.env with paths and non-secret settings only."""
-    env_path = state_dir / "compose.api.env"
-    lines = [
-        API_ENV_HEADER,
-        _env_line("API_POLICY_FILE", str(policy_file)),
-        _env_line("NASI_LEMAK_INPUT_GUARD_URL", config.input.url),
-        _env_line("NASI_LEMAK_INPUT_GUARD_MODEL", config.input.model),
-        _env_line("NASI_LEMAK_INPUT_GUARD_AUTH", config.input.auth),
-        _env_line(
-            "NASI_LEMAK_INPUT_GUARD_THRESHOLD",
-            str(config.input.threshold),
-        ),
-        _env_line("NASI_LEMAK_INPUT_GUARD_CONTRACT", GUARD_API_CONTRACT),
-        _env_line(
-            "INPUT_GUARD_KEY_SOURCE_FILE",
-            config.input.api_key_file or str(empty_key_file),
-        ),
-        _env_line("NASI_LEMAK_OUTPUT_GUARD_URL", config.output.url),
-        _env_line("NASI_LEMAK_OUTPUT_GUARD_MODEL", config.output.model),
-        _env_line("NASI_LEMAK_OUTPUT_GUARD_AUTH", config.output.auth),
-        _env_line(
-            "OUTPUT_GUARD_KEY_SOURCE_FILE",
-            config.output.api_key_file or str(empty_key_file),
-        ),
-    ]
-    for prefix, endpoint, secret_name in (
-        ("NASI_LEMAK_INPUT_GUARD", config.input, "input_guard_key"),
-        ("NASI_LEMAK_OUTPUT_GUARD", config.output, "output_guard_key"),
-    ):
-        if endpoint.auth == "bearer":
-            lines.append(
-                _env_line(f"{prefix}_API_KEY_FILE", f"/run/secrets/{secret_name}")
-            )
-        if endpoint.timeout is not None:
-            lines.append(_env_line(f"{prefix}_TIMEOUT", str(endpoint.timeout)))
-        if endpoint.max_response_bytes is not None:
-            lines.append(
-                _env_line(
-                    f"{prefix}_MAX_RESPONSE_BYTES",
-                    str(endpoint.max_response_bytes),
-                )
-            )
-        if endpoint.allow_insecure_http:
-            lines.append(
-                _env_line(f"{prefix}_ALLOW_INSECURE_HTTP", "true")
-            )
-    if config.ca_file:
-        lines.append(_env_line("GUARD_CA_BUNDLE", config.ca_file))
-    lines.append("")
-    _write_installer_file(env_path, "\n".join(lines), 0o600, header=API_ENV_HEADER)
-    return env_path
 
 
 def write_test_policy(project_dir: Path) -> Path:
@@ -2218,8 +1827,6 @@ class Installer:
         generation_model: str,
         generation_auth: str,
         policy_file: str | None,
-        prompt_guard_dir: str | None,
-        llama_guard_dir: str | None,
         interactive: bool,
         qwen_guard_dir: str | None = None,
         ack_test_unguarded: bool,
@@ -2227,8 +1834,6 @@ class Installer:
         runner: CommandRunner,
         prompt_fn=None,
         provisioner: DockerProvisioner | None = None,
-        guard_backend: str = GUARD_BACKEND_LOCAL,
-        guard_api_config: str | None = None,
     ):
         self.project_dir = project_dir
         self.state_dir = state_dir
@@ -2246,8 +1851,6 @@ class Installer:
         )
         self.generation_auth = validate_generation_auth(generation_auth)
         self.policy_file = _absolute_project_path(project_dir, policy_file)
-        self.prompt_guard_dir = _absolute_project_path(project_dir, prompt_guard_dir)
-        self.llama_guard_dir = _absolute_project_path(project_dir, llama_guard_dir)
         self.qwen_guard_dir = _absolute_project_path(project_dir, qwen_guard_dir)
         self.interactive = interactive
         self.ack_test_unguarded = ack_test_unguarded
@@ -2255,39 +1858,11 @@ class Installer:
         self.runner = runner
         self.provisioner = provisioner
         self._prompt_fn = prompt_fn if prompt_fn is not None else input
-        if guard_backend not in GUARD_BACKENDS:
-            raise ValidationError("guard backend must be 'local' or 'api'")
-        self.guard_backend = guard_backend
-        self.guard_api_config_path: Path | None = None
-        self.guard_api_config: GuardApiConfig | None = None
-
         if self.mode == "guarded":
             if not self.policy_file:
                 raise ValidationError("guarded mode requires --policy-file")
-            if self.guard_backend == GUARD_BACKEND_API:
-                if not guard_api_config:
-                    raise ValidationError(
-                        "the API guard backend requires --guard-api-config"
-                    )
-                candidate = Path(guard_api_config)
-                if not candidate.is_absolute():
-                    raise ValidationError(
-                        "--guard-api-config must be an absolute path"
-                    )
-                self.guard_api_config_path = candidate
-                # Cheap structural/file-metadata validation before any change.
-                self.guard_api_config = load_guard_api_config(candidate)
-            else:
-                if not self.prompt_guard_dir:
-                    raise ValidationError("guarded mode requires --prompt-guard-dir")
-                if not self.llama_guard_dir:
-                    raise ValidationError("guarded mode requires --llama-guard-dir")
-                if not self.qwen_guard_dir:
-                    raise ValidationError("guarded mode requires --qwen-guard-dir")
-        elif guard_api_config is not None or self.guard_backend != GUARD_BACKEND_LOCAL:
-            raise ValidationError(
-                "--guard-backend api and --guard-api-config require guarded mode"
-            )
+            if not self.qwen_guard_dir:
+                raise ValidationError("guarded mode requires --qwen-guard-dir")
 
     def _prompt(self, text: str) -> str:
         if not self.interactive:
@@ -2320,17 +1895,6 @@ class Installer:
         if not self.policy_file or not Path(self.policy_file).is_file():
             raise InstallError("guarded mode policy file is not readable")
         ensure_runtime_readable(Path(self.policy_file), label="guarded policy file")
-        if self.guard_backend == GUARD_BACKEND_API:
-            if self.guard_api_config_path is None:
-                raise InstallError("API guard backend config path is missing")
-            self.guard_api_config = load_guard_api_config(
-                self.guard_api_config_path
-            )
-            return
-        if not self.prompt_guard_dir or not Path(self.prompt_guard_dir).is_dir():
-            raise InstallError("prompt guard model directory is not available")
-        if not self.llama_guard_dir or not Path(self.llama_guard_dir).is_dir():
-            raise InstallError("llama guard model directory is not available")
         if not self.qwen_guard_dir or not Path(self.qwen_guard_dir).is_dir():
             raise InstallError("qwen3guard model directory is not available")
 
@@ -2363,45 +1927,21 @@ class Installer:
             f"  Generation model:  {self.generation_model}",
         ]
         if self.mode == "guarded":
-            lines.append(f"  Guard backend:      {self.guard_backend}")
             lines.append(f"  Policy file:       {self.policy_file}")
-            if self.guard_backend == GUARD_BACKEND_API:
-                lines.append(f"  Guard API config:  {self.guard_api_config_path}")
-                if self.guard_api_config is not None:
-                    lines.append(
-                        f"  Input guard URL:   {self.guard_api_config.input.url}"
-                    )
-                    lines.append(
-                        f"  Input guard model: {self.guard_api_config.input.model}"
-                    )
-                    lines.append(
-                        f"  Output guard URL:  {self.guard_api_config.output.url}"
-                    )
-                    lines.append(
-                        f"  Output guard model: {self.guard_api_config.output.model}"
-                    )
-                    if self.guard_api_config.ca_file:
-                        lines.append(
-                            f"  Private CA bundle: {self.guard_api_config.ca_file}"
-                        )
-                lines.append("  Guard key files:   supplied by operator (values not printed)")
-            else:
-                lines.append(f"  Prompt Guard dir:  {self.prompt_guard_dir}")
-                lines.append(f"  Llama Guard dir:   {self.llama_guard_dir}")
-                lines.append(f"  Qwen3Guard dir:    {self.qwen_guard_dir} (active guard)")
-                lines.append(
-                    f"  Qwen3Guard budget: {PILOT_QWEN_WORKERS} worker x "
-                    f"{PILOT_QWEN_THREADS} threads, threshold {PILOT_QWEN_THRESHOLD}"
-                )
-                lines.append(
-                    f"  Reply budget:      {PILOT_DEFAULT_REPLY_TOKENS} tokens "
-                    "with a concise-answer instruction"
-                )
-                lines.append(
-                    f"  Chat bounds:       max {PILOT_MAX_REPLY_TOKENS} reply tokens, "
-                    f"context {PILOT_CONTEXT_BUDGET}, "
-                    f"{PILOT_MAX_CONCURRENCY} request at a time"
-                )
+            lines.append(f"  Qwen3Guard dir:    {self.qwen_guard_dir} (active guard)")
+            lines.append(
+                f"  Qwen3Guard budget: {PILOT_QWEN_WORKERS} worker x "
+                f"{PILOT_QWEN_THREADS} threads, threshold {PILOT_QWEN_THRESHOLD}"
+            )
+            lines.append(
+                f"  Reply budget:      {PILOT_DEFAULT_REPLY_TOKENS} tokens "
+                "with a concise-answer instruction"
+            )
+            lines.append(
+                f"  Chat bounds:       max {PILOT_MAX_REPLY_TOKENS} reply tokens, "
+                f"context {PILOT_CONTEXT_BUDGET}, "
+                f"{PILOT_MAX_CONCURRENCY} request at a time"
+            )
         lines.append("  Config is rewritten from the values above on every mutating run.")
 
         lines.extend([
@@ -2422,8 +1962,6 @@ class Installer:
         ])
         if self.mode == "test":
             lines.append(f"    - {self.state_dir / 'compose.test.env'}")
-        elif self.guard_backend == GUARD_BACKEND_API:
-            lines.append(f"    - {self.state_dir / 'compose.api.env'}")
         else:
             lines.append(f"    - {self.state_dir / 'compose.pilot.env'}")
         return "\n".join(lines)
@@ -2513,35 +2051,11 @@ class Installer:
                     self.state_dir / "compose.env",
                     self.state_dir / "compose.test.env",
                 ]
-            elif self.guard_backend == GUARD_BACKEND_API:
-                if self.guard_api_config is None:
-                    raise InstallError("API guard backend config is unavailable")
-                empty_key = ensure_empty_guard_key(self.state_dir)
-                write_api_compose_env(
-                    self.state_dir,
-                    self.policy_file or "",
-                    self.guard_api_config,
-                    empty_key,
-                )
-                compose_files = [
-                    str(self.project_dir / "compose.yaml"),
-                    str(self.project_dir / "compose.api.yaml"),
-                ]
-                if self.guard_api_config.ca_file:
-                    compose_files.append(
-                        str(self.project_dir / "compose.api-ca.yaml")
-                    )
-                env_files = [
-                    self.state_dir / "compose.env",
-                    self.state_dir / "compose.api.env",
-                ]
             else:
                 write_guarded_compose_env(
                     self.state_dir,
                     self.project_dir,
                     self.policy_file or "",
-                    self.prompt_guard_dir or "",
-                    self.llama_guard_dir or "",
                     self.qwen_guard_dir or "",
                 )
                 compose_files = [
@@ -2591,8 +2105,6 @@ class Installer:
             "compose.env": self.state_dir / "compose.env",
             "compose.test.env": self.state_dir / "compose.test.env",
             "compose.pilot.env": self.state_dir / "compose.pilot.env",
-            "compose.api.env": self.state_dir / "compose.api.env",
-            "guard_api_empty_key": self.state_dir / "guard_api_empty_key",
             "policy.test.yaml": self.project_dir / "policy.test.yaml",
         }
 
@@ -2720,18 +2232,6 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--allow-insecure-http", action="store_true", help="allow plain HTTP generation URL")
     parser.add_argument("--policy-file", help="approved YAML policy file (guarded mode)")
     parser.add_argument(
-        "--guard-backend",
-        choices=GUARD_BACKENDS,
-        default=GUARD_BACKEND_LOCAL,
-        help="guarded-mode guard backend (default: local native artifacts)",
-    )
-    parser.add_argument(
-        "--guard-api-config",
-        help="absolute non-secret JSON config for --guard-backend api",
-    )
-    parser.add_argument("--prompt-guard-dir", help="local Prompt Guard 2 directory (guarded mode)")
-    parser.add_argument("--llama-guard-dir", help="local Llama Guard 3 directory (guarded mode)")
-    parser.add_argument(
         "--qwen-guard-dir",
         help="local Qwen3Guard-Gen-0.6B directory, the active guard (guarded mode)",
     )
@@ -2757,18 +2257,12 @@ def _interactive_prompt(default_url: str, default_model: str) -> tuple[str, str]
 
 def _interactive_guarded_prompt(
     policy_file: str | None,
-    prompt_guard_dir: str | None,
-    llama_guard_dir: str | None,
     qwen_guard_dir: str | None,
-) -> tuple[str, str, str, str]:
+) -> tuple[str, str]:
     """Prompt for guarded paths before constructor validation."""
     print()
     policy = input(f"Approved policy file [{policy_file or 'required'}]: ").strip()
     policy = policy or (policy_file or "")
-    prompt_dir = input(f"Prompt Guard 2 directory [{prompt_guard_dir or 'required'}]: ").strip()
-    prompt_dir = prompt_dir or (prompt_guard_dir or "")
-    llama_dir = input(f"Llama Guard 3 directory [{llama_guard_dir or 'required'}]: ").strip()
-    llama_dir = llama_dir or (llama_guard_dir or "")
     qwen_dir = input(
         f"Qwen3Guard-Gen-0.6B directory [{qwen_guard_dir or 'required'}]: "
     ).strip()
@@ -2777,15 +2271,13 @@ def _interactive_guarded_prompt(
         label
         for label, value in (
             ("--policy-file", policy),
-            ("--prompt-guard-dir", prompt_dir),
-            ("--llama-guard-dir", llama_dir),
             ("--qwen-guard-dir", qwen_dir),
         )
         if not value
     ]
     if missing:
         raise InstallError("guarded mode requires " + ", ".join(missing))
-    return policy, prompt_dir, llama_dir, qwen_dir
+    return policy, qwen_dir
 
 
 
@@ -2826,35 +2318,9 @@ def main(argv: list[str] | None = None) -> int:
                 else:
                     raise InstallError("mode choice must be 1 (test) or 2 (guarded)")
             if mode == "guarded":
-                if args.guard_backend == GUARD_BACKEND_API:
-                    policy = input(
-                        f"Approved policy file [{args.policy_file or 'required'}]: "
-                    ).strip() or (args.policy_file or "")
-                    api_config = input(
-                        "Guard API JSON config "
-                        f"[{args.guard_api_config or 'required'}]: "
-                    ).strip() or (args.guard_api_config or "")
-                    if not policy:
-                        raise InstallError("API guard mode requires --policy-file")
-                    if not api_config:
-                        raise InstallError(
-                            "API guard mode requires --guard-api-config"
-                        )
-                    args.policy_file = policy
-                    args.guard_api_config = api_config
-                else:
-                    guarded_paths = _interactive_guarded_prompt(
-                        args.policy_file,
-                        args.prompt_guard_dir,
-                        args.llama_guard_dir,
-                        args.qwen_guard_dir,
-                    )
-                    (
-                        args.policy_file,
-                        args.prompt_guard_dir,
-                        args.llama_guard_dir,
-                        args.qwen_guard_dir,
-                    ) = guarded_paths
+                args.policy_file, args.qwen_guard_dir = _interactive_guarded_prompt(
+                    args.policy_file, args.qwen_guard_dir
+                )
             generation_url, generation_model = _interactive_prompt(
                 generation_url or "", generation_model or ""
             )
@@ -2879,15 +2345,11 @@ def main(argv: list[str] | None = None) -> int:
             generation_model=generation_model,
             generation_auth=args.generation_auth,
             policy_file=args.policy_file,
-            prompt_guard_dir=args.prompt_guard_dir,
-            llama_guard_dir=args.llama_guard_dir,
             qwen_guard_dir=args.qwen_guard_dir,
             interactive=interactive,
             ack_test_unguarded=args.ack_test_unguarded,
             allow_insecure_http=allow_insecure,
             runner=RealCommandRunner(),
-            guard_backend=args.guard_backend,
-            guard_api_config=args.guard_api_config,
         )
 
         if args.check:

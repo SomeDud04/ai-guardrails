@@ -35,7 +35,6 @@ from nasi_lemak.generation import (
     GenerationConfig,
     RealGatewayAdapters,
 )
-from nasi_lemak.guard_api import Qwen3GuardOutputAdapter, parse_verdict as http_parse_verdict
 from nasi_lemak.guard_errors import GuardError, GuardInputLimit
 from nasi_lemak.guard_pool import (
     GuardInferencePool,
@@ -341,22 +340,6 @@ class LocalTransportTestCase(unittest.TestCase):
             **kwargs,
         )
 
-    def _http_guard(self, verdict: str) -> Qwen3GuardOutputAdapter:
-        config = GenerationConfig(
-            url="http://127.0.0.1:9/v1",
-            model="qwen3guard-test",
-            auth_mode=AUTH_NONE,
-            allow_insecure_http=True,
-        )
-        client = GenerationClient(config)
-
-        def generate(messages: list[dict[str, str]], max_tokens: int = 0) -> str:
-            self.assertLessEqual(max_tokens, VERDICT_MAX_TOKENS)
-            return verdict
-
-        client.generate = generate  # type: ignore[method-assign]
-        return Qwen3GuardOutputAdapter(client)
-
 
 class VerdictLaneTests(LocalTransportTestCase):
     """One parser, two lanes: the artifact shapes and the input-only category."""
@@ -379,7 +362,7 @@ class VerdictLaneTests(LocalTransportTestCase):
         for call in (
             lambda: parse_verdict_fields(SAFE_INPUT, lane="response"),
             lambda: parse_verdict(SAFE_INPUT),
-            lambda: http_parse_verdict(SAFE_INPUT),
+            lambda: parse_verdict(SAFE_INPUT),
             lambda: parse_verdict_fields(SAFE_INPUT, lane="system"),
         ):
             with self.subTest(call=call):
@@ -395,7 +378,7 @@ class VerdictLaneTests(LocalTransportTestCase):
         with self.assertRaises(GuardError):
             parse_verdict_fields(strict, lane="response")
         with self.assertRaises(GuardError):
-            http_parse_verdict(strict)
+            parse_verdict(strict)
 
     def test_local_input_lane_uses_the_input_contract(self) -> None:
         allowing = self._guard(model_kwargs={"output": SAFE_INPUT})
@@ -408,21 +391,13 @@ class VerdictLaneTests(LocalTransportTestCase):
         with self.assertRaises(GuardError):
             guard.scan_response([{"role": "user", "content": "hello"}], "reply")
 
-    def test_historical_guard_api_names_resolve_to_the_shared_parser(self) -> None:
-        self.assertIs(http_parse_verdict, parse_verdict)
-
 
 class TransportParityTests(LocalTransportTestCase):
-    def test_local_and_http_parse_the_same_verdict_to_the_same_decision(self) -> None:
+    def test_local_verdict_matches_the_shared_parser(self) -> None:
         messages = [{"role": "user", "content": "hello"}]
         for verdict in (SAFE, UNSAFE, CONTROVERSIAL):
             with self.subTest(verdict=verdict.splitlines()[0]):
                 local = self._guard(model_kwargs={"output": verdict})
-                http = self._http_guard(verdict)
-                self.assertEqual(
-                    local.scan_response(messages, "reply"),
-                    http.scan_response(messages, "reply"),
-                )
                 self.assertEqual(
                     local.scan_response(messages, "reply")["safe"],
                     parse_verdict(verdict),

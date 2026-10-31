@@ -20,7 +20,7 @@ from pathlib import Path
 from unittest import mock
 
 from scripts import bench_guard_models as bench
-from nasi_lemak import generation, guard_api, qwen3guard
+from nasi_lemak import generation, qwen3guard
 
 REPO_ROOT = Path(__file__).resolve().parents[1]
 SCRIPT = REPO_ROOT / "scripts" / "bench_guard_models.py"
@@ -292,10 +292,10 @@ class WorkloadDefinitionTests(unittest.TestCase):
 
 class ContractTests(unittest.TestCase):
     def test_taxonomy_matches_the_product_contract(self) -> None:
-        self.assertEqual(set(bench.CATEGORY_VALUES), guard_api._CATEGORY_VALUES)
-        self.assertEqual(len(bench.CATEGORY_VALUES), len(guard_api._CATEGORY_VALUES))
-        self.assertEqual(bench.SAFETY_VALUES, guard_api._SAFETY_VALUES)
-        self.assertEqual(bench.REFUSAL_VALUES, guard_api._REFUSAL_VALUES)
+        self.assertEqual(set(bench.CATEGORY_VALUES), set(qwen3guard.CATEGORY_VALUES))
+        self.assertEqual(len(bench.CATEGORY_VALUES), len(qwen3guard.CATEGORY_VALUES))
+        self.assertEqual(bench.SAFETY_VALUES, qwen3guard.SAFETY_VALUES)
+        self.assertEqual(bench.REFUSAL_VALUES, qwen3guard.REFUSAL_VALUES)
         self.assertEqual(
             bench.INPUT_ONLY_CATEGORY_VALUES,
             qwen3guard.INPUT_ONLY_CATEGORY_VALUES,
@@ -352,7 +352,7 @@ class ContractTests(unittest.TestCase):
                 with self.assertRaises(bench.BenchmarkError):
                     bench.parse_verdict(sample)
                 with self.assertRaises(Exception):
-                    guard_api.parse_verdict(sample, lane="response")
+                    qwen3guard.parse_verdict(sample, lane="response")
 
     def test_parse_verdict_matches_the_product_parser(self) -> None:
         samples = (
@@ -362,7 +362,7 @@ class ContractTests(unittest.TestCase):
         )
         for sample in samples:
             self.assertEqual(
-                bench.parse_verdict(sample)["allow"], guard_api.parse_verdict(sample)
+                bench.parse_verdict(sample)["allow"], qwen3guard.parse_verdict(sample)
             )
         for malformed in (
             "Safety: Safe\nCategories: Violent\nRefusal: No",
@@ -374,7 +374,7 @@ class ContractTests(unittest.TestCase):
             with self.assertRaises(bench.BenchmarkError):
                 bench.parse_verdict(malformed)
             with self.assertRaises(Exception):
-                guard_api.parse_verdict(malformed)
+                qwen3guard.parse_verdict(malformed)
 
     def test_parse_safety_label_is_strict(self) -> None:
         self.assertEqual(bench.parse_safety_label("Safe"), "Safe")

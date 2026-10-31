@@ -3,18 +3,9 @@
 # This file is inert configuration scaffolding, not runtime proof.  It selects
 # the opt-in ``guards`` Dockerfile target, sets guarded mode explicitly, selects
 # ``NASI_LEMAK_GUARD_BACKEND=qwen3guard-local``, and mounts one operator-approved
-# policy file, the existing pilot Meta model directories and the local
-# Qwen3Guard-Gen directory read-only.  No model ID is invented, no model or
-# license is supplied, and no image is built, started or benchmarked by this
-# file.
-#
-# EXTENDS, DOES NOT REPLACE, THE META PILOT.  The baseline pilot already ran
-# with Meta Prompt Guard 2 and Llama Guard 3.  This overlay keeps those
-# environment settings and read-only bind mounts exactly as approved, with
-# their existing defaults, and adds the Qwen entries on top.  The Meta host
-# artifact paths therefore remain mandatory even though Qwen performs the
-# active scans: they are the already-approved operator paths, not new or
-# invented ones.
+# policy file and the local Qwen3Guard-Gen directory read-only.  No model ID is
+# invented, no model or license is supplied, and no image is built, started or
+# benchmarked by this file.
 #
 # Always apply it ON TOP of the default stack (never alone):
 #
@@ -24,15 +15,6 @@
 #     -f compose.yaml -f compose.pilot.yaml config
 #
 # See docs/compose.pilot.env.example and docs/local-guards-switch.md.
-#
-# TWO VERTICALS, NEVER ONE MIXED CONTAINER.  In this local-guard composition the
-# hosted API guard settings from compose.api.yaml -- every
-# NASI_LEMAK_INPUT_GUARD_* and NASI_LEMAK_OUTPUT_GUARD_* entry, their
-# *_API_KEY_FILE secrets, and compose.api-ca.yaml -- must be ABSENT, not empty.
-# Do not combine this file with compose.api.yaml, compose.api-ca.yaml or the
-# hosted-guard env file.  An empty hosted URL/model is still a half-configured
-# hosted lane, and this backend never falls back to it.  Conversely, the hosted
-# composition must not carry the QWEN3GUARD_* entries below.
 #
 # Bind mounts use the long syntax with ``create_host_path: false``: a missing
 # host policy/model path aborts the start instead of silently creating an empty
@@ -67,13 +49,6 @@ services:
       - NASI_LEMAK_GUARD_BACKEND=qwen3guard-local
       # Container paths must match the read-only bind targets below.
       - NASI_LEMAK_POLICY_FILE=/run/pilot/policy/policy.yaml
-      # Existing Meta pilot settings, restored unchanged from the approved
-      # baseline (including their defaults).  They remain part of the extended
-      # pilot even though Qwen performs the active scans.
-      - NASI_LEMAK_PROMPT_GUARD_MODEL_DIR=/models/prompt-guard-2
-      - NASI_LEMAK_LLAMA_GUARD_MODEL_DIR=/models/llama-guard-3
-      - NASI_LEMAK_PROMPT_GUARD_THRESHOLD=${NASI_LEMAK_PROMPT_GUARD_THRESHOLD:-0.5}
-      - NASI_LEMAK_LLAMA_GUARD_CONTEXT_LIMIT=${NASI_LEMAK_LLAMA_GUARD_CONTEXT_LIMIT:-4096}
       # Required Qwen model directory.  The value is a mandatory ``:?``
       # interpolation and the same expression is the bind target below, so the
       # runtime variable and the mount cannot disagree.  A missing value aborts
@@ -102,19 +77,6 @@ services:
       - type: bind
         source: ${PILOT_POLICY_FILE:?Set PILOT_POLICY_FILE to an approved policy-file path}
         target: /run/pilot/policy/policy.yaml
-        read_only: true
-        bind:
-          create_host_path: false
-      # Retained Meta pilot mounts: the approved host paths are still required.
-      - type: bind
-        source: ${PILOT_PROMPT_GUARD_MODEL_DIR:?Set PILOT_PROMPT_GUARD_MODEL_DIR to a local Prompt Guard 2 directory}
-        target: /models/prompt-guard-2
-        read_only: true
-        bind:
-          create_host_path: false
-      - type: bind
-        source: ${PILOT_LLAMA_GUARD_MODEL_DIR:?Set PILOT_LLAMA_GUARD_MODEL_DIR to a local Llama Guard 3 directory}
-        target: /models/llama-guard-3
         read_only: true
         bind:
           create_host_path: false

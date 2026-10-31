@@ -1,30 +1,21 @@
 """Guard-only evaluation over a strict synthetic JSON dataset.
 
 The default command is a **dry run**: it validates the complete dataset and
-reports the planned case counts. It constructs no guard client, reads no
-credential and performs no network access. ``--execute`` additionally loads only
-the guard configurations needed by the stages present in the dataset, through
-the existing :func:`~nasi_lemak.guard_api.guard_client_config` helper, and runs
-the real :class:`~nasi_lemak.guard_api.InputGuardApiAdapter` and
-:class:`~nasi_lemak.guard_api.Qwen3GuardOutputAdapter`.
-
-``--backend qwen3guard-local`` runs the same cases through the in-process
-:class:`~nasi_lemak.qwen3_local.Qwen3GuardLocal` guard instead, configured by the
-same ``NASI_LEMAK_QWEN3GUARD_*`` settings as the server.  It is meant to run
-inside the guard container, and it reads no API key.
+reports the planned case counts. It loads no guard, reads no credential and
+performs no network access. ``--execute`` runs the cases through the in-process
+:class:`~nasi_lemak.qwen3_local.Qwen3GuardLocal` guard, configured by the same
+``NASI_LEMAK_QWEN3GUARD_*`` settings as the server.  It is meant to run inside the
+guard container, and it reads no API key.
 
 This is an agent-authored smoke harness, not a held-out benchmark. It reports
 no model-quality acceptance and no live endpoint claim. Reports contain case
 identifiers, labels, counts, generic error codes and timings only: never raw
 messages, candidate output, URLs, keys, headers or exception text.
 
-The dataset is fully validated before the first HTTP request, so a malformed
-late case cannot cause a partial run. Input cases use the legacy custom
-classifier's fixed conservative budget (512 units, mirroring
-``INPUT_GUARD_MAX_TOKENS``, including framing) before the classifier call; this
-window is independent of the gateway's request policy ceiling. An over-budget
-case is reported as a separate ``INPUT_WINDOW`` error and is never sent. There is no retry, truncation or default-allow behaviour, and an invalid
-or timed-out guard reply is an error rather than a successful block.
+The dataset is fully validated before the first case runs, so a malformed late
+case cannot cause a partial run. An input over the guard's window is reported as
+a separate ``INPUT_WINDOW`` error. There is no retry, truncation or default-allow
+behaviour, and an invalid guard reply is an error rather than a successful block.
 """
 
 from __future__ import annotations
@@ -42,20 +33,8 @@ from pathlib import Path
 from typing import Any, Mapping, Sequence
 
 from .gateway import serialize_messages
-from .generation import (
-    GenerationClient,
-    GenerationConfigError,
-    conservative_byte_budget,
-)
-from .guard_api import (
-    INPUT_GUARD_CONTRACT_V1,
-    INPUT_GUARD_MAX_TOKENS,
-    MAX_ENCODED_INPUT_BYTES,
-    InputGuardApiAdapter,
-    Qwen3GuardOutputAdapter,
-    guard_client_config,
-)
 from .guards import GuardError, GuardInputLimit
+from .qwen3guard import MAX_ENCODED_INPUT_BYTES
 
 SCHEMA_VERSION = 1
 REPORT_KIND = "guard_evaluation"
@@ -78,9 +57,8 @@ CATEGORIES = (
     "political",
     "copyright",
 )
-BACKEND_API = "api"
 BACKEND_LOCAL = "qwen3guard-local"
-BACKENDS = (BACKEND_API, BACKEND_LOCAL)
+BACKENDS = (BACKEND_LOCAL,)
 #: Reads the dataset from standard input, for piping it into a container.
 STDIN_DATASET = "-"
 PROGRESS_EVERY = 10
@@ -96,28 +74,16 @@ _ACCEPTED_ROLES = frozenset({"system", "user", "assistant"})
 
 # These literal prefixes mirror the server-side selection contract. Importing
 # nasi_lemak.server here would pull FastAPI into a guard-only evaluation path.
-INPUT_GUARD_ENV_PREFIX = "NASI_LEMAK_INPUT_GUARD"
-OUTPUT_GUARD_ENV_PREFIX = "NASI_LEMAK_OUTPUT_GUARD"
-ENV_INPUT_GUARD_THRESHOLD = f"{INPUT_GUARD_ENV_PREFIX}_THRESHOLD"
-ENV_INPUT_GUARD_CONTRACT = f"{INPUT_GUARD_ENV_PREFIX}_CONTRACT"
-
 ERROR_INPUT_WINDOW = "INPUT_WINDOW"
 ERROR_INPUT_API = "INPUT_API"
 ERROR_OUTPUT_API = "OUTPUT_API"
-
-# Fixed evaluation window for the legacy custom InputGuardApiAdapter preflight.
-# It mirrors that adapter's own ``max_input_tokens`` contract and is
-# deliberately independent of the gateway's generation request policy ceiling,
-# so a policy change cannot silently widen this classifier-only check.
-INPUT_EVAL_WINDOW_BUDGET = INPUT_GUARD_MAX_TOKENS
-
 
 class DatasetError(ValueError):
     """The synthetic dataset failed validation. Messages carry no payload."""
 
 
 class EvaluationConfigError(ValueError):
-    """The guard API environment is incomplete or invalid."""
+    """The local guard configuration is incomplete or invalid."""
 
 
 class ReportError(OSError):
@@ -336,58 +302,6 @@ def input_serialized(case: GuardCase) -> str:
     )
 
 
-def input_window_exceeded(case: GuardCase) -> bool:
-    """True when the conservative budget exceeds the classifier eval window.
-
-    The window is the legacy custom classifier's fixed budget, not the
-    gateway's generation policy ceiling.
-    """
-    return conservative_byte_budget(input_serialized(case)) > INPUT_EVAL_WINDOW_BUDGET
-
-
-def _guard_threshold(value: Any) -> float:
-    try:
-        threshold = float(value)
-    except (TypeError, ValueError):
-        raise EvaluationConfigError("guard input threshold is invalid") from None
-    if not math.isfinite(threshold) or not 0.0 <= threshold <= 1.0:
-        raise EvaluationConfigError("guard input threshold is invalid")
-    return threshold
-
-
-def build_adapters(
-    environ: Mapping[str, str], stages: Sequence[str]
-) -> tuple[dict[str, Any], dict[str, str]]:
-    """Build only the guard adapters required by the dataset stages.
-
-    Configuration is validated and clients are constructed before the first
-    case runs, so an invalid late setting cannot produce a partial request
-    sequence. Construction itself performs no network access.
-    """
-    adapters: dict[str, Any] = {"input": None, "output": None}
-    models: dict[str, str] = {}
-    try:
-        if "input" in stages:
-            contract = environ.get(ENV_INPUT_GUARD_CONTRACT)
-            if not isinstance(contract, str) or contract.strip() != INPUT_GUARD_CONTRACT_V1:
-                raise EvaluationConfigError("input guard contract is not supported")
-            threshold = _guard_threshold(environ.get(ENV_INPUT_GUARD_THRESHOLD))
-            config = guard_client_config(environ, INPUT_GUARD_ENV_PREFIX)
-            adapters["input"] = InputGuardApiAdapter(
-                GenerationClient(config), threshold=threshold
-            )
-            models["input"] = config.model
-        if "output" in stages:
-            config = guard_client_config(environ, OUTPUT_GUARD_ENV_PREFIX)
-            adapters["output"] = Qwen3GuardOutputAdapter(GenerationClient(config))
-            models["output"] = config.model
-    except EvaluationConfigError:
-        raise
-    except (GenerationConfigError, GuardError, ValueError, TypeError):
-        raise EvaluationConfigError("guard API configuration is invalid") from None
-    return adapters, models
-
-
 def build_local_adapters(
     environ: Mapping[str, str],
 ) -> tuple[dict[str, Any], dict[str, str]]:
@@ -416,22 +330,19 @@ def _observe(
     case: GuardCase,
     *,
     serialized: str | None,
-    window_exceeded: bool,
     adapters: Mapping[str, Any],
 ) -> Outcome:
     start = time.perf_counter()
     observed = "error"
     error_code: str | None = None
-    if window_exceeded:
-        error_code = ERROR_INPUT_WINDOW
-    elif case.stage == "input":
+    if case.stage == "input":
         try:
             result = adapters["input"].scan_attack(serialized)
             if not isinstance(result, dict) or result.get("decision") not in (
                 "allow",
                 "block",
             ):
-                raise GuardError("guard input API response is invalid")
+                raise GuardError("guard input response is invalid")
             observed = result["decision"]
         except GuardInputLimit:
             observed, error_code = "error", ERROR_INPUT_WINDOW
@@ -443,7 +354,7 @@ def _observe(
                 [dict(message) for message in case.messages], case.output
             )
             if not isinstance(result, dict) or not isinstance(result.get("safe"), bool):
-                raise GuardError("guard output API response is invalid")
+                raise GuardError("guard output response is invalid")
             observed = "allow" if result["safe"] else "block"
         except (GuardError, OSError, ValueError, TypeError):
             observed, error_code = "error", ERROR_OUTPUT_API
@@ -464,29 +375,12 @@ def execute_dataset(
     dataset: GuardDataset,
     *,
     environ: Mapping[str, str],
-    backend: str = BACKEND_API,
     progress: Any = None,
 ) -> tuple[tuple[Outcome, ...], dict[str, str]]:
-    """Run every case against the real guards; no generator or database.
-
-    The legacy classifier's fixed window applies only to the API backend.  The
-    local guard enforces its own budget and reports an over-budget input itself.
-    """
-    if backend == BACKEND_LOCAL:
-        adapters, models = build_local_adapters(environ)
-    else:
-        stages = tuple(
-            stage for stage in STAGES if any(case.stage == stage for case in dataset.cases)
-        )
-        adapters, models = build_adapters(environ, stages)
+    """Run every case against the real guard; no generator or database."""
+    adapters, models = build_local_adapters(environ)
     serialized = {
         case.case_id: input_serialized(case) if case.stage == "input" else None
-        for case in dataset.cases
-    }
-    windows = {
-        case.case_id: (
-            backend == BACKEND_API and case.stage == "input" and input_window_exceeded(case)
-        )
         for case in dataset.cases
     }
     outcomes: list[Outcome] = []
@@ -495,7 +389,6 @@ def execute_dataset(
             _observe(
                 case,
                 serialized=serialized[case.case_id],
-                window_exceeded=windows[case.case_id],
                 adapters=adapters,
             )
         )
@@ -664,7 +557,6 @@ def _expected_counts(cases: Sequence[GuardCase]) -> dict[str, Any]:
             "cases": 0,
             "expected_allowed": 0,
             "expected_blocked": 0,
-            "window_exceeded": 0,
         }
 
     total = blank()
@@ -677,8 +569,6 @@ def _expected_counts(cases: Sequence[GuardCase]) -> dict[str, Any]:
                 group["expected_allowed"] += 1
             else:
                 group["expected_blocked"] += 1
-            if case.stage == "input" and input_window_exceeded(case):
-                group["window_exceeded"] += 1
     return {"total": total, "per_stage": per_stage, "per_language": per_language}
 
 
@@ -702,7 +592,7 @@ def build_run_report(
     outcomes: Sequence[Outcome],
     *,
     models: Mapping[str, str],
-    backend: str = BACKEND_API,
+    backend: str = BACKEND_LOCAL,
 ) -> tuple[dict[str, Any], int]:
     """Build a metadata-only execute report; never includes payload text."""
     return {
@@ -848,8 +738,8 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument(
         "--backend",
         choices=BACKENDS,
-        default=BACKEND_API,
-        help="guards used with --execute (default: the configured guard APIs)",
+        default=BACKEND_LOCAL,
+        help="guard used with --execute (default: the local Qwen3Guard)",
     )
     parser.add_argument("--report", help="create-exclusive JSON report path")
     args = parser.parse_args(argv)
@@ -869,7 +759,7 @@ def main(argv: list[str] | None = None) -> int:
                 print(f"progress: {done}/{total}", file=sys.stderr, flush=True)
 
             outcomes, models = execute_dataset(
-                dataset, environ=os.environ, backend=args.backend, progress=progress
+                dataset, environ=os.environ, progress=progress
             )
             report, code = build_run_report(
                 dataset, outcomes, models=models, backend=args.backend
