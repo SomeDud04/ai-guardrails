@@ -10,8 +10,10 @@ from nasi_lemak.gateway import (
     Policy,
     log_rejection,
     make_demo_gateway,
+    serialize_messages,
 )
 from nasi_lemak.generation import GenerationError, RealGatewayAdapters
+from nasi_lemak.qwen3guard import serialize_messages as shared_serialize_messages
 from nasi_lemak.scan_context import ScanContext
 
 
@@ -536,6 +538,20 @@ class GatewayTests(unittest.TestCase):
         ):
             with self.subTest(label=label):
                 self.assertNotIn(prompt, json.dumps(value))
+
+
+class SerializerExportTests(unittest.TestCase):
+    def test_gateway_reexports_the_shared_serializer(self):
+        self.assertIs(serialize_messages, shared_serialize_messages)
+        self.assertEqual(
+            serialize_messages(
+                [
+                    {"role": "user", "content": "Hello"},
+                    {"role": "assistant", "content": "Hi"},
+                ]
+            ),
+            "user: Hello\nassistant: Hi",
+        )
 
 
 if __name__ == "__main__":

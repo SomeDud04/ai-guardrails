@@ -465,7 +465,7 @@ def _extract_content(payload: Any) -> str:
             "generation endpoint returned no text content",
             diagnostic_code="generation_no_final_content",
         )
-    return content
+    return content.lstrip()
 
 
 class GenerationClient:

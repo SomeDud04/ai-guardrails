@@ -437,6 +437,37 @@ class ConfigurationTests(ChatCliTestBase):
             self.assertEqual(chat_cli.resolve_token({}), TOKEN)
         ask.assert_called_once()
 
+    def test_plaintext_non_loopback_base_url_warns_once_without_the_token(self) -> None:
+        for base in (
+            "http://192.168.90.41:8080",
+            "http://guardway.test:8080",
+        ):
+            with self.subTest(base=base):
+                code, out, err = self.run_cli(
+                    ["--base-url", base, "--prompt", "Hello"],
+                    opener=self.opener_for(200, ALLOW_REPLY),
+                )
+                self.assertEqual(code, chat_cli.EXIT_ALLOW)
+                self.assertEqual(err.count("WARNING"), 1)
+                self.assertEqual(err.count("\n"), 1)
+                self.assertIn("plaintext http", err)
+                self.assertNotIn(TOKEN, out + err)
+
+        for base in (
+            "http://127.0.0.1:8000",
+            "http://127.9.9.9:8000",
+            "http://localhost:8000",
+            "http://[::1]:8000",
+            "https://192.168.90.41:8080",
+        ):
+            with self.subTest(base=base):
+                code, out, err = self.run_cli(
+                    ["--base-url", base, "--prompt", "Hello"],
+                    opener=self.opener_for(200, ALLOW_REPLY),
+                )
+                self.assertEqual(code, chat_cli.EXIT_ALLOW)
+                self.assertNotIn("WARNING", err)
+
     def test_invalid_timeout_is_a_usage_error(self) -> None:
         for value in (0, -1, True, "90"):
             with self.subTest(value=value):
