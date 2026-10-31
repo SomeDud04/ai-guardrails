@@ -355,7 +355,9 @@ class LoginAndAdminTests(WorkspaceHTTPBase):
         clock = FakeClock(1000.0)
         limiter = _LoginLimiter(clock)
         for index in range(600):
-            limiter.blocked(limiter.key(f"ip-{index}", "alice"))
+            key = limiter.key(f"ip-{index}", "alice")
+            if not limiter.blocked(key, limiter.ip_key(f"ip-{index}")):
+                limiter.record(key)
         self.assertLessEqual(len(limiter._hits), 512)
 
         runtime = self.app.state.workspace
@@ -382,6 +384,60 @@ class LoginAndAdminTests(WorkspaceHTTPBase):
         )
         self.assert_error(response, 429, "RATE_LIMIT")
         self.assertEqual(calls, [])
+
+    def test_a_username_spray_cannot_evict_a_live_counter(self) -> None:
+        clock = FakeClock(1000.0)
+        limiter = _LoginLimiter(clock)
+        target = limiter.key("10.0.0.1", "alice")
+        target_ip = limiter.ip_key("10.0.0.1")
+        for _ in range(5):
+            limiter.record(target)
+        self.assertTrue(limiter.blocked(target, target_ip))
+
+        for index in range(2000):
+            limiter.record(limiter.key("10.0.0.1", f"fake-{index}"))
+
+        self.assertTrue(limiter.blocked(target, target_ip))
+
+    def test_a_full_cache_refuses_new_keys_until_the_window_passes(self) -> None:
+        clock = FakeClock(1000.0)
+        limiter = _LoginLimiter(clock)
+        for index in range(512):
+            limiter.record(limiter.key(f"ip-{index}", "alice"))
+        newcomer = limiter.key("10.0.0.9", "bob")
+        newcomer_ip = limiter.ip_key("10.0.0.9")
+        self.assertTrue(limiter.blocked(newcomer, newcomer_ip))
+
+        clock.value += 61.0
+
+        self.assertFalse(limiter.blocked(newcomer, newcomer_ip))
+
+    def test_failed_logins_across_usernames_block_the_ip(self) -> None:
+        clock = FakeClock(1000.0)
+        runtime = self.app.state.workspace
+        runtime._login_limiter = _LoginLimiter(clock)
+        for index in range(30):
+            response = self.client.post(
+                "/workspace/api/login",
+                json={"username": f"fake-{index}", "password": "wrong-password-123"},
+            )
+            self.assertEqual(response.status_code, 401)
+
+        response = self.client.post(
+            "/workspace/api/login",
+            json={"username": "alice", "password": PASSWORD},
+        )
+        self.assert_error(response, 429, "RATE_LIMIT")
+
+        clock.value += 61.0
+        self.login("alice", PASSWORD)
+
+    def test_successful_logins_do_not_count_against_the_ip(self) -> None:
+        clock = FakeClock(1000.0)
+        limiter = _LoginLimiter(clock)
+        self.app.state.workspace._login_limiter = limiter
+        self.login("alice", PASSWORD)
+        self.assertNotIn(limiter.ip_key("testclient"), limiter._hits)
 
     def test_no_password_or_token_is_logged(self) -> None:
         messages: list[str] = []

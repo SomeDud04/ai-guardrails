@@ -78,6 +78,7 @@ SESSION_COOKIE = "nasi_lemak_workspace"
 COOKIE_PATH = "/workspace"
 COOKIE_MAX_BYTES = 4096
 LOGIN_MAX_ATTEMPTS = 5
+LOGIN_IP_MAX_FAILURES = 30
 LOGIN_CACHE_MAX = 512
 USER_WINDOW_SECONDS = 60.0
 USER_MAX_REQUESTS = 30
@@ -125,8 +126,12 @@ class _AuthProblem(Exception):
 class _LoginLimiter:
     """Bounded in-process login limiter; never stores password or token.
 
-    The key is a SHA-256 digest of bounded client IP + normalised username. The
-    limiter is a local abuse control, not a distributed guarantee.
+    Keys are SHA-256 digests: bounded client IP + normalised username for
+    attempts, and the bounded client IP alone for failures. A counter that is
+    still inside the window is never evicted, because evicting one would let a
+    username spray reset a target's count. When the cache is full of live
+    counters, new keys are refused until the window moves on. The limiter is a
+    local abuse control, not a distributed guarantee.
     """
 
     def __init__(self, clock: Any = time.monotonic) -> None:
@@ -139,6 +144,11 @@ class _LoginLimiter:
         raw = f"{str(ip)[:64]}\x00{str(username)[:128].strip().lower()}"
         return hashlib.sha256(raw.encode("utf-8", "replace")).hexdigest()
 
+    @staticmethod
+    def ip_key(ip: str) -> str:
+        raw = f"failures\x00{str(ip)[:64]}"
+        return hashlib.sha256(raw.encode("utf-8", "replace")).hexdigest()
+
     def _prune(self, now: float) -> None:
         cutoff = now - LOGIN_WINDOW_SECONDS
         for key in list(self._hits):
@@ -148,37 +158,31 @@ class _LoginLimiter:
             else:
                 del self._hits[key]
 
-    def blocked(self, key: str) -> bool:
+    def blocked(self, key: str, ip_key: str) -> bool:
         with self._lock:
-            now = self._clock()
-            self._prune(now)
-            if key not in self._hits:
-                if len(self._hits) >= LOGIN_CACHE_MAX:
-                    # Bound the cache even under a rotating IP/username spray.
-                    oldest = min(
-                        self._hits,
-                        key=lambda item: self._hits[item][-1]
-                        if self._hits[item]
-                        else 0,
-                    )
-                    del self._hits[oldest]
-                self._hits[key] = []
-            return len(self._hits[key]) >= LOGIN_MAX_ATTEMPTS
+            self._prune(self._clock())
+            if len(self._hits.get(ip_key, ())) >= LOGIN_IP_MAX_FAILURES:
+                return True
+            if key in self._hits:
+                return len(self._hits[key]) >= LOGIN_MAX_ATTEMPTS
+            return len(self._hits) >= LOGIN_CACHE_MAX
 
-    def record(self, key: str) -> None:
+    def _add(self, key: str, limit: int) -> None:
         with self._lock:
             now = self._clock()
             self._prune(now)
+            if key not in self._hits and len(self._hits) >= LOGIN_CACHE_MAX:
+                return
             bucket = self._hits.setdefault(key, [])
             bucket.append(now)
-            if len(bucket) > LOGIN_MAX_ATTEMPTS:
-                del bucket[: len(bucket) - LOGIN_MAX_ATTEMPTS]
-            if len(self._hits) > LOGIN_CACHE_MAX:
-                oldest = min(
-                    self._hits,
-                    key=lambda item: self._hits[item][-1] if self._hits[item] else 0,
-                )
-                del self._hits[oldest]
+            if len(bucket) > limit:
+                del bucket[: len(bucket) - limit]
+
+    def record(self, key: str) -> None:
+        self._add(key, LOGIN_MAX_ATTEMPTS)
+
+    def record_failure(self, ip_key: str) -> None:
+        self._add(ip_key, LOGIN_IP_MAX_FAILURES)
 
 
 class _PrincipalGuard:
@@ -861,13 +865,16 @@ def register_workspace_routes(app: FastAPI, runtime: WorkspaceRuntime) -> None:
             # Missing/null/path-bearing Origins fail before authentication runs.
             return _ws_error(request, "FORBIDDEN", 403)
 
-        limiter_key = _LoginLimiter.key(_client_ip(request), username)
-        if runtime._login_limiter.blocked(limiter_key):
+        client_ip = _client_ip(request)
+        limiter_key = _LoginLimiter.key(client_ip, username)
+        limiter_ip_key = _LoginLimiter.ip_key(client_ip)
+        if runtime._login_limiter.blocked(limiter_key, limiter_ip_key):
             return _ws_error(request, "RATE_LIMIT", 429)
         runtime._login_limiter.record(limiter_key)
         try:
             result = await _db_call(app, runtime.store.authenticate, username, password)
         except AuthError:
+            runtime._login_limiter.record_failure(limiter_ip_key)
             return _ws_error(request, "UNAUTHORIZED", 401)
         except Exception as exc:
             return _store_error(request, exc)
