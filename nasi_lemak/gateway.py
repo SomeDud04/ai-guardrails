@@ -23,6 +23,7 @@ from .generation import GenerationError, conservative_byte_budget
 from .guards import GuardInputLimit
 from .limits import LIMIT_FIELDS, ChatLimits, tighten
 from .pii import mask_text
+from .qwen3guard import serialize_messages
 from .scan_context import ScanContext
 
 
@@ -353,11 +354,6 @@ def mask_pii(text: str, masks: tuple[str, ...] | None = None) -> str:
     original all-recognizer behaviour.
     """
     return mask_text(text, masks)
-
-
-def serialize_messages(messages: list[dict[str, str]]) -> str:
-    """Canonical complete conversation checked by coverage and attack adapters."""
-    return "\n".join(f"{message['role']}: {message['content']}" for message in messages)
 
 
 class Gateway:

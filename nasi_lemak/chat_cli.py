@@ -23,6 +23,7 @@ from __future__ import annotations
 
 import argparse
 import getpass
+import ipaddress
 import json
 import os
 import sys
@@ -106,6 +107,23 @@ def chat_endpoint(base_url: str) -> str:
     if parsed.query or parsed.fragment:
         raise UsageError("--base-url must not include a query or fragment")
     return base_url.strip().rstrip("/") + "/chat"
+
+
+def insecure_http_warning_needed(base_url: str) -> bool:
+    """True when the bearer token would cross plaintext http off loopback."""
+    parsed = urllib.parse.urlsplit(base_url.strip())
+    if parsed.scheme != "http":
+        return False
+    host = parsed.hostname
+    if not host:
+        return False
+    if host.rstrip(".").lower() == "localhost":
+        return False
+    try:
+        address = ipaddress.ip_address(host)
+    except ValueError:
+        return True
+    return not address.is_loopback
 
 
 def resolve_token(
@@ -357,6 +375,13 @@ def run(
     endpoint = chat_endpoint(base_url)
     timeout = resolve_timeout(timeout)
     colour = _colour_enabled(out, env)
+
+    if insecure_http_warning_needed(base_url):
+        print(
+            "WARNING: sending the bearer token over plaintext http; use https.",
+            file=err,
+            flush=True,
+        )
 
     if prompt is not None:
         return run_turn(

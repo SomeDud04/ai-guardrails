@@ -30,6 +30,10 @@ Pilot note: the CPU output scan takes roughly 10 s for a short reply and about
 instruction in `NASI_LEMAK_GENERATION_SYSTEM_PROMPT`. Both are optional; the
 code defaults remain 1024 and no prompt.
 
+Through port 8080 nginx rejects request bodies over 64 KiB before the gateway
+sees them, so raising `NASI_LEMAK_MAX_BODY_BYTES` above that also needs both
+`deploy/nginx-demo.conf` and `deploy/nginx-demo-tls.conf` changed.
+
 ## Precedence: env ceiling, then policy
 
 The environment values (or their built-in defaults) are hard ceilings. The

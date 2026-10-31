@@ -326,6 +326,33 @@ class TemplateDeliverySingleSourceTest(unittest.TestCase):
                         )
 
 
+class SerializeMessagesSingleSourceTest(unittest.TestCase):
+    """One conversation serializer; gateway re-exports the shared definition."""
+
+    def test_serializer_is_defined_once_and_gateway_imports_it(self) -> None:
+        definitions = []
+        for path in _package_modules():
+            tree = _parse(path)
+            for node in tree.body:
+                if (
+                    isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef))
+                    and node.name == "serialize_messages"
+                ):
+                    definitions.append(path.name)
+        self.assertEqual(definitions, ["qwen3guard.py"])
+
+        tree = _parse(PACKAGE_ROOT / "gateway.py")
+        imported = False
+        for node in ast.walk(tree):
+            if isinstance(node, ast.ImportFrom) and node.module == "qwen3guard":
+                imported = any(
+                    alias.name == "serialize_messages" for alias in node.names
+                )
+        self.assertTrue(
+            imported, "gateway must import the one shared serializer"
+        )
+
+
 class HistoricalNameRegressionTest(unittest.TestCase):
     def _mutated_package(self, module_name: str, source: str) -> dict[str, ast.Module]:
         modules = _package_asts()

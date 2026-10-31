@@ -830,6 +830,23 @@ class GatewayIntegrationTests(FixtureMixin):
         self.assertEqual(counters[GENERATION_TRUNCATED], 1)
         self.assertEqual(counters[GENERATION_NO_FINAL_CONTENT], 0)
 
+    def test_reply_leading_whitespace_is_removed_and_trailing_text_is_kept(self):
+        httpd = self.start_server()
+        client = GenerationClient(self.config(httpd))
+
+        self.set_json(httpd, chat_payload("\n\nHello  \n"))
+        self.assertEqual(
+            client.generate([{"role": "user", "content": "hello"}], 8),
+            "Hello  \n",
+        )
+
+        self.set_json(httpd, chat_payload(" \n\t "))
+        with self.assertRaises(GenerationError) as caught:
+            client.generate([{"role": "user", "content": "hello"}], 8)
+        self.assertEqual(
+            caught.exception.diagnostic_code, GENERATION_NO_FINAL_CONTENT
+        )
+
     def test_only_masked_text_reaches_real_transport_and_alias_maps_to_upstream(self):
         httpd = self.start_server(body=json.dumps(chat_payload("answer test@example.com")).encode("utf-8"))
         gateway, tokenizer, attack, output = self.build(httpd)
@@ -845,6 +862,18 @@ class GatewayIntegrationTests(FixtureMixin):
         self.assertNotIn("test@example.com", json.dumps(payload["messages"]))
         self.assertIn("[EMAIL]", payload["messages"][0]["content"])
         self.assertEqual([event["event_type"] for event in gateway.audit_events()], ["request_started", "request_completed"])
+
+    def test_output_guard_scans_the_same_leading_whitespace_stripped_reply(self):
+        httpd = self.start_server(
+            body=json.dumps(chat_payload("\n\nHello  \n")).encode("utf-8")
+        )
+        gateway, _, _, output = self.build(httpd)
+        status, response = self.call(gateway)
+        self.assertEqual(status, 200)
+        self.assertEqual(
+            response["choices"][0]["message"]["content"], "Hello  \n"
+        )
+        self.assertEqual(output.inputs, ["Hello  \n"])
 
     def test_guard_tokenizer_and_audit_failures_prevent_upstream_call(self):
         httpd = self.start_server()

@@ -187,6 +187,17 @@ class NginxConfigTests(unittest.TestCase):
         self.assertIn("client_body_buffer_size 64k;", self.text)
         self.assertIn("proxy_request_buffering on;", self.text)
 
+    def test_chat_limits_doc_names_both_nginx_files_for_a_raised_body_limit(self):
+        tls_conf = (
+            ROOT / "deploy" / "nginx-demo-tls.conf"
+        ).read_text(encoding="utf-8")
+        doc = (ROOT / "docs" / "chat-limits.md").read_text(encoding="utf-8")
+        for text in (self.text, tls_conf):
+            self.assertIn("client_max_body_size 64k;", text)
+        self.assertIn("NASI_LEMAK_MAX_BODY_BYTES", doc)
+        self.assertIn("deploy/nginx-demo.conf", doc)
+        self.assertIn("deploy/nginx-demo-tls.conf", doc)
+
     def test_response_deadlines_exceed_the_default_chat_deadline(self):
         self.assertIn("proxy_read_timeout 90s;", self.text)
         self.assertIn("proxy_send_timeout 90s;", self.text)
