@@ -162,6 +162,11 @@ and `in-benign-13-bm`. The pass mark was set on 31 October, after the first run
 and the probes had exposed these rows, so this is a pilot acceptance check and
 not an independent measure of accuracy.
 
+The run was repeated the same day on `main` at `002a699` after the schema 4
+migration, the hosted guard removal and the per-category policy change. The
+policy allowed no categories. The totals, every category and the three
+non-matching rows were identical.
+
 ### What this dataset cannot show
 
 It is agent-authored synthetic data, not a hold-out set, and its evidence label
