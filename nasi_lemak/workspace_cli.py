@@ -232,6 +232,20 @@ def _command_bootstrap(
         raise CliError("an administrator already exists; it was not reset")
 
 
+def _command_purge(
+    args: argparse.Namespace, store_factory: StoreFactory | None
+) -> int:
+    dsn = _read_secret_file(args.dsn_file, label="DSN")
+    key = _read_secret_file(args.key_file, label="key")
+    store = _open_store(dsn, key, migrate=False, store_factory=store_factory)
+    try:
+        return store.purge_expired_conversations(args.older_than_days)
+    except ValueError:
+        raise CliError("retention period is invalid") from None
+    finally:
+        _close_store(store)
+
+
 class _SanitizedArgumentParser(argparse.ArgumentParser):
     """Reject parse errors without echoing raw argv values (possible secrets)."""
 
@@ -272,6 +286,14 @@ def _build_parser() -> argparse.ArgumentParser:
     bootstrap.add_argument("--username", required=True)
     bootstrap.add_argument("--full-name", required=True)
     bootstrap.add_argument("--department", required=True)
+
+    purge = subcommands.add_parser(
+        "purge-expired",
+        help="delete conversations untouched for the given number of days",
+    )
+    purge.add_argument("--dsn-file", required=True)
+    purge.add_argument("--key-file", required=True)
+    purge.add_argument("--older-than-days", required=True, type=int)
     return parser
 
 
@@ -306,6 +328,9 @@ def main(
         elif args.command == "bootstrap-admin":
             _command_bootstrap(args, store_factory, password_reader)
             print("workspace administrator created", file=out)
+        elif args.command == "purge-expired":
+            deleted = _command_purge(args, store_factory)
+            print(f"deleted {deleted} expired conversations", file=out)
         else:  # argparse prevents this, but keep a fail-closed default.
             raise CliError("unsupported command")
     except CliError as exc:

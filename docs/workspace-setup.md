@@ -359,6 +359,24 @@ workspace PostgreSQL privilege tests truncate every workspace row; never set the
 flag for a shared database, and note that `TEST_WORKSPACE_DSN` alone never
 authorises destructive setup.
 
+## Transcript retention
+
+Nothing expires by default. To delete conversations nobody has touched for a
+set number of days, schedule this on the host, and pick the period with your
+data-protection owner first. Run through `nl-compose` or your full Compose
+chain, for example from root's crontab, once a day:
+
+```bash
+nl-compose exec -T gateway python -m nasi_lemak.workspace_cli purge-expired \
+  --dsn-file /run/secrets/workspace_dsn \
+  --key-file /run/secrets/workspace_key \
+  --older-than-days 90
+```
+
+It prints only a count. A conversation with a turn in progress is kept. Deleted
+transcripts cannot be recovered. Audit rows, the access log and alert metadata
+hold no transcript text and are not touched.
+
 ## Updating and operating
 
 Update the code with `git pull --ff-only`, then rebuild with the matching base

@@ -95,6 +95,30 @@ class WorkspaceCliTests(unittest.TestCase):
             password_reader=password_reader or (lambda prompt: GOOD_PASSWORD),
         )
 
+    # -- retention -------------------------------------------------------
+    def _purge(self, days: str):
+        return self._run(
+            "purge-expired",
+            "--dsn-file",
+            self.dsn_path,
+            "--key-file",
+            self.key_path,
+            "--older-than-days",
+            days,
+        )
+
+    def test_purge_reports_the_count_without_secrets(self) -> None:
+        self._init()
+        code, out, _err = self._purge("30")
+        self.assertEqual(code, 0)
+        self.assertEqual(out.strip(), "deleted 0 expired conversations")
+
+    def test_purge_rejects_a_bad_period(self) -> None:
+        self._init()
+        code, _out, err = self._purge("0")
+        self.assertEqual(code, 2)
+        self.assertIn("retention period is invalid", err)
+
     # -- key generation --------------------------------------------------
     def test_generate_key_is_exclusive_and_never_overwrites(self) -> None:
         code, out, err = self._run(

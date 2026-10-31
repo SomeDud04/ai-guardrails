@@ -705,6 +705,7 @@ class ModeValidationTests(unittest.TestCase):
         inst = self._installer(mode="test")
         compose_files = ["compose.yaml", "compose.pilot.yaml"]
         env_files = [self.state / "compose.env"]
+        self.state.mkdir(exist_ok=True)
         (self.state / "compose.workspace.env").write_text("x=1\n", encoding="utf-8")
         (self.state / "compose.demo.env").write_text("x=1\n", encoding="utf-8")
 

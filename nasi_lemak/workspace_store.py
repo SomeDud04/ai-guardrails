@@ -52,6 +52,7 @@ from .workspace_governance import AlertAdminMixin, PolicyAdminMixin
 
 SCHEMA_PATH = Path(__file__).with_name("workspace_schema.sql")
 SCHEMA_VERSION = 4
+MAX_RETENTION_DAYS = 36500
 # Version 2 adds outcome/request_id/error_code to ws_messages. Runtime stores
 # open with ``migrate=False`` and therefore require an explicit provisioning
 # step (CLI slice) rather than silently altering a live database.
@@ -2234,6 +2235,36 @@ class WorkspaceStore(PolicyAdminMixin, AlertAdminMixin):
             )
             if applied != 1:
                 raise Conflict("conversation busy")
+
+    @_guard
+    def purge_expired_conversations(self, older_than_days: int) -> int:
+        """Delete conversations untouched for the given period; return the count.
+
+        Runs only when an operator schedules it, so nothing expires by default.
+        A conversation with a live turn is kept. Non-content audit and alert
+        rows stay, as they do when a user deletes a conversation.
+        """
+        if (
+            not isinstance(older_than_days, int)
+            or isinstance(older_than_days, bool)
+            or not 1 <= older_than_days <= MAX_RETENTION_DAYS
+        ):
+            raise ValueError("retention period is invalid")
+        now = self._now()
+        cutoff = now - older_than_days * 86400.0
+        expired = (
+            "updated_at < ? AND NOT (status = 'appending' OR (status = 'pending' "
+            "AND lease_expires_at IS NOT NULL AND lease_expires_at > ?))"
+        )
+        with self._backend.transaction() as db:
+            db.execute(
+                "DELETE FROM ws_messages WHERE conversation_id IN "
+                f"(SELECT id FROM ws_conversations WHERE {expired})",
+                (cutoff, now),
+            )
+            return db.execute(
+                f"DELETE FROM ws_conversations WHERE {expired}", (cutoff, now)
+            )
 
     @_guard
     def list_access_log(

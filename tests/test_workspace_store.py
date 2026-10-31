@@ -67,6 +67,23 @@ class WorkspaceStoreTest(unittest.TestCase):
         self.bob = self._user("bob", "Bob Lim", self.accounting["id"])
         self.carol = self._user("carol", "Carol Ng", self.hr["id"])
 
+    # -- retention -------------------------------------------------------
+    def test_purge_deletes_only_conversations_past_the_period(self) -> None:
+        old = self.store.create_conversation(self.alice["id"])
+        self.clock.advance(31 * 86400.0)
+        fresh = self.store.create_conversation(self.bob["id"])
+
+        self.assertEqual(self.store.purge_expired_conversations(30), 1)
+
+        with self.assertRaises(NotFound):
+            self.store.read_conversation(self.alice["id"], old["id"])
+        self.store.read_conversation(self.bob["id"], fresh["id"])
+
+    def test_purge_rejects_an_invalid_period(self) -> None:
+        for value in (0, -1, 36501, True, 30.0, "30"):
+            with self.subTest(value=value), self.assertRaises(ValueError):
+                self.store.purge_expired_conversations(value)
+
     # -- helpers ---------------------------------------------------------
     def _open(self, key: str | None = None, clock: FakeClock | None = None) -> WorkspaceStore:
         return WorkspaceStore(
