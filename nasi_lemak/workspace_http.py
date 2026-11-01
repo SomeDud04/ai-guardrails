@@ -1328,6 +1328,25 @@ def register_workspace_routes(app: FastAPI, runtime: WorkspaceRuntime) -> None:
         }
         return _ok(payload)
 
+    @app.get("/workspace/api/admin/live")
+    async def admin_live(request: Request):
+        guard = _request_guard(request, runtime)
+        if guard is not None:
+            return guard
+        _user, _source, error = await admin_principal(request)
+        if error is not None:
+            return error
+        if request.query_params.multi_items():
+            return _ws_error(request, "INVALID_REQUEST", 400)
+        state = request.app.state
+        return _ok(
+            {
+                **state.gateway.metrics.snapshot(),
+                "capacity": state.operational["max_concurrency"],
+                "generated_at": time.time(),
+            }
+        )
+
     @app.get("/workspace/api/admin/monitor")
     async def admin_monitor(request: Request):
         guard = _request_guard(request, runtime)

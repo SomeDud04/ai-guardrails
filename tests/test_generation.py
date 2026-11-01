@@ -830,6 +830,28 @@ class GatewayIntegrationTests(FixtureMixin):
         self.assertEqual(counters[GENERATION_TRUNCATED], 1)
         self.assertEqual(counters[GENERATION_NO_FINAL_CONTENT], 0)
 
+    def test_reported_token_usage_is_kept_for_the_monitor(self):
+        httpd = self.start_server()
+        client = GenerationClient(self.config(httpd))
+        payload = chat_payload("Hello")
+        payload["usage"] = {"prompt_tokens": 7, "completion_tokens": 9}
+        self.set_json(httpd, payload)
+        client.generate([{"role": "user", "content": "hello"}], 8)
+        self.assertEqual(
+            client.last_usage(), {"prompt_tokens": 7, "completion_tokens": 9}
+        )
+
+    def test_invalid_or_missing_usage_is_ignored(self):
+        httpd = self.start_server()
+        client = GenerationClient(self.config(httpd))
+        for usage in (None, "x", {"prompt_tokens": -1, "completion_tokens": 9}):
+            payload = chat_payload("Hello")
+            if usage is not None:
+                payload["usage"] = usage
+            self.set_json(httpd, payload)
+            client.generate([{"role": "user", "content": "hello"}], 8)
+            self.assertIsNone(client.last_usage())
+
     def test_reply_leading_whitespace_is_removed_and_trailing_text_is_kept(self):
         httpd = self.start_server()
         client = GenerationClient(self.config(httpd))

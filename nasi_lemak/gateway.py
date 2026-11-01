@@ -18,6 +18,7 @@ from typing import Any
 
 from .audit import AuditStore, SqliteAuditStore
 from .controls import GatewayControl, block_detail
+from .live_metrics import LiveMetrics
 from .diagnostics import SIGNAL_CODES, record_signal
 from .generation import GenerationError, conservative_byte_budget
 from .guards import GuardInputLimit
@@ -297,6 +298,10 @@ class Policy:
         return hashlib.sha256(canonical.encode("utf-8")).hexdigest()
 
 
+def _elapsed_ms(started: float) -> int:
+    return round((time.perf_counter() - started) * 1000.0)
+
+
 def _policy_allows(result: dict[str, Any], allowed: tuple[str, ...]) -> bool:
     """True when every category behind a block is one the policy allows.
 
@@ -392,6 +397,7 @@ class Gateway:
             raise ValueError("audit path or store required")
 
         self.adapters = adapters
+        self.metrics = LiveMetrics()
         if not isinstance(policy, Policy):
             raise ValueError("invalid policy")
         if limits is None:
@@ -486,6 +492,38 @@ class Gateway:
         control: GatewayControl | None = None,
         result_sink: dict[str, Any] | None = None,
     ):
+        """Run the pipeline and record its timing for the Monitor screen."""
+        timing: dict[str, Any] = {}
+        status = 0
+        self.metrics.enter()
+        try:
+            outcome = self._pipeline(
+                method,
+                path,
+                headers,
+                body,
+                timing,
+                scan_context=scan_context,
+                control=control,
+                result_sink=result_sink,
+            )
+            status = outcome[0]
+            return outcome
+        finally:
+            self.metrics.leave(timing, status)
+
+    def _pipeline(
+        self,
+        method: str,
+        path: str,
+        headers: Any,
+        body: Any,
+        timing: dict[str, Any],
+        *,
+        scan_context: ScanContext | None = None,
+        control: GatewayControl | None = None,
+        result_sink: dict[str, Any] | None = None,
+    ):
         """Run the one guarded pipeline for one request.
 
         ``result_sink`` is an optional, request-local, in-memory mapping that is
@@ -557,6 +595,7 @@ class Gateway:
             _audit_sink("request_started", "pending")
         except Exception:
             return self._error(503, "UNAVAILABLE", request_id)
+        timing["started"] = time.perf_counter()
         serialized = serialize_messages(messages)
         try:
             if conservative_byte_budget(serialized) > effective_limits.context_budget:
@@ -589,6 +628,7 @@ class Gateway:
                 raise _ScanCancelled()
             stage = "input_guard"
             if control.input_check_enabled:
+                scan_started = time.perf_counter()
                 if scan_context is not None and getattr(
                     self.adapters, "supports_scan_context", False
                 ):
@@ -597,6 +637,7 @@ class Gateway:
                     )
                 else:
                     result = self.adapters.scan_attack(serialized)
+                timing["input_ms"] = _elapsed_ms(scan_started)
                 if not isinstance(result, dict) or result.get("decision") not in ("allow", "block"):
                     raise ValueError("invalid attack result")
                 if result["decision"] == "block" and not _policy_allows(
@@ -626,7 +667,14 @@ class Gateway:
             ]
             _sink("sanitized_messages", [dict(message) for message in safe_messages])
             stage = "generation"
+            generation_started = time.perf_counter()
             output = self.adapters.generate(safe_messages, self.policy.model, max_tokens)
+            timing["generation_ms"] = _elapsed_ms(generation_started)
+            read_usage = getattr(self.adapters, "last_usage", None)
+            usage = read_usage() if callable(read_usage) else None
+            if usage:
+                timing["prompt_tokens"] = usage["prompt_tokens"]
+                timing["reply_tokens"] = usage["completion_tokens"]
             if not isinstance(output, str):
                 raise ValueError("invalid generation result")
         except GenerationError as exc:
@@ -658,6 +706,7 @@ class Gateway:
             if scan_context is not None and scan_context.cancelled():
                 raise _ScanCancelled()
             if control.output_check_enabled:
+                scan_started = time.perf_counter()
                 contextual_scan = getattr(self.adapters, "scan_response", None)
                 if callable(contextual_scan):
                     # Each request passes its own complete sanitized conversation.
@@ -668,6 +717,7 @@ class Gateway:
                     # Legacy synthetic test adapters only implement response-only
                     # scanning. Genuine adapters must provide ``scan_response``.
                     result = self.adapters.scan_output(output)
+                timing["output_ms"] = _elapsed_ms(scan_started)
                 if not isinstance(result, dict) or not isinstance(result.get("safe"), bool):
                     raise ValueError("invalid output result")
                 safe = result["safe"] or _policy_allows(

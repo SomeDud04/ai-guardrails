@@ -1546,6 +1546,9 @@ def make_app(
     # thread still runs.  The done callback removes it only on real completion.
     app.state.chat_tasks: set[asyncio.Task] = set()
     app.state.workspace = workspace_runtime
+    if workspace_runtime.internal_gateway is not None:
+        # Both entry points report to one Monitor.
+        workspace_runtime.internal_gateway.metrics = runtime_gateway.metrics
     app.state.workspace_tasks: set[asyncio.Task] = set()
 
     @app.middleware("http")

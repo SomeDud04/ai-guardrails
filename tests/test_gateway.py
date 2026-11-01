@@ -258,6 +258,28 @@ class GatewayTests(unittest.TestCase):
         self.adapters.attack_result = {"decision": "block", "categories": ["Violent"]}
         self.assertEqual(self.call(request())[0], 403)
 
+    def test_a_request_records_stage_timing_and_reported_tokens(self):
+        self.adapters.last_usage = lambda: {"prompt_tokens": 12, "completion_tokens": 34}
+        self.assertEqual(self.call(request())[0], 200)
+        sample = self.gateway.metrics.snapshot()["recent"][0]
+        self.assertEqual(sample["decision"], "allowed")
+        self.assertEqual((sample["prompt_tokens"], sample["reply_tokens"]), (12, 34))
+        for key in ("input_ms", "generation_ms", "output_ms", "total_ms"):
+            self.assertIsInstance(sample[key], int)
+
+    def test_a_blocked_request_never_records_generation(self):
+        self.adapters.attack_result = {"decision": "block"}
+        self.assertEqual(self.call(request())[0], 403)
+        sample = self.gateway.metrics.snapshot()["recent"][0]
+        self.assertEqual(sample["decision"], "blocked")
+        self.assertIsNone(sample["generation_ms"])
+
+    def test_an_unauthorised_request_leaves_no_sample(self):
+        status, _ = self.gateway.handle("POST", "/v1/chat/completions", {}, request())
+        self.assertEqual(status, 401)
+        snapshot = self.gateway.metrics.snapshot()
+        self.assertEqual((snapshot["samples"], snapshot["in_flight"]), (0, 0))
+
     def test_policy_digest_cannot_be_overridden(self):
         with self.assertRaises((TypeError, ValueError)):
             Policy(version="v", digest="client-controlled")

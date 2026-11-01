@@ -44,6 +44,7 @@ import json
 import os
 import socket
 import ssl
+import threading
 import urllib.error
 import urllib.parse
 import urllib.request
@@ -420,6 +421,18 @@ def _validate_messages(messages: Any) -> list[dict[str, str]]:
     return clean
 
 
+def _extract_usage(payload: Any) -> dict[str, int] | None:
+    """Token counts from a completion, or ``None`` when the endpoint gives none."""
+    usage = payload.get("usage") if isinstance(payload, dict) else None
+    if not isinstance(usage, dict):
+        return None
+    prompt, completion = usage.get("prompt_tokens"), usage.get("completion_tokens")
+    for value in (prompt, completion):
+        if isinstance(value, bool) or not isinstance(value, int) or value < 0:
+            return None
+    return {"prompt_tokens": prompt, "completion_tokens": completion}
+
+
 def _extract_content(payload: Any) -> str:
     if not isinstance(payload, dict):
         raise GenerationError("generation endpoint returned an invalid response")
@@ -475,6 +488,7 @@ class GenerationClient:
         if not isinstance(config, GenerationConfig):
             raise GenerationConfigError("generation configuration is required")
         self.config = config
+        self._usage = threading.local()
         try:
             self._ssl_context = ssl.create_default_context(cafile=config.ca_file)
         except (OSError, ssl.SSLError):
@@ -602,7 +616,14 @@ class GenerationClient:
             payload["chat_template_kwargs"] = {
                 "enable_thinking": self.config.enable_thinking
             }
-        return _extract_content(self._request_json(self.config.chat_completions_url, method="POST", payload=payload))
+        reply = self._request_json(self.config.chat_completions_url, method="POST", payload=payload)
+        content = _extract_content(reply)
+        self._usage.value = _extract_usage(reply)
+        return content
+
+    def last_usage(self) -> dict[str, int] | None:
+        """Token counts from this thread's latest completion."""
+        return getattr(self._usage, "value", None)
 
     def list_models(self) -> list[str]:
         """Return sorted unique upstream model IDs without persisting anything."""
@@ -695,6 +716,10 @@ class RealGatewayAdapters:
 
     def count_tokens(self, serialized: str) -> Any:
         return self.tokenizer.count_tokens(serialized)
+
+    def last_usage(self) -> dict[str, int] | None:
+        read_usage = getattr(self.client, "last_usage", None)
+        return read_usage() if callable(read_usage) else None
 
     def scan_attack(self, text: str, *, scan_context: Any = None) -> Any:
         guard = self.attack_guard

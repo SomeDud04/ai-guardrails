@@ -517,6 +517,27 @@ class LoginAndAdminTests(WorkspaceHTTPBase):
             "FORBIDDEN",
         )
 
+    def test_admin_live_is_admin_only_and_counts_both_entry_points(self) -> None:
+        path = "/workspace/api/admin/live"
+        self.assert_error(self.client.get(path), 401, "UNAUTHORIZED")
+        alice_token = self.login()
+        self.assert_error(
+            self.client.get(path, headers=self.auth(alice_token)), 403, "FORBIDDEN"
+        )
+        admin_token = self.login("root.admin")
+        self.assert_error(
+            self.client.get(path + "?x=1", headers=self.auth(admin_token)),
+            400,
+            "INVALID_REQUEST",
+        )
+        runtime = self.app.state.workspace
+        self.assertIs(runtime.internal_gateway.metrics, self.app.state.gateway.metrics)
+        response = self.client.get(path, headers=self.auth(admin_token))
+        self.assertEqual(response.status_code, 200, response.text)
+        payload = response.json()
+        self.assertEqual(payload["in_flight"], 0)
+        self.assertEqual(payload["capacity"], self.app.state.operational["max_concurrency"])
+
     def test_admin_monitor_is_admin_only_and_holds_no_content(self) -> None:
         path = "/workspace/api/admin/monitor"
         self.assert_error(self.client.get(path), 401, "UNAUTHORIZED")
