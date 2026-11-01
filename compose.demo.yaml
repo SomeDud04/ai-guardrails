@@ -55,6 +55,12 @@ services:
       - no-new-privileges:true
     mem_limit: 64m
     cpus: 0.5
+    # The access log goes to Docker's log, so bound what it can keep on disk.
+    logging:
+      driver: json-file
+      options:
+        max-size: "10m"
+        max-file: "5"
     pids_limit: 64
     healthcheck:
       # Local liveness through the ingress only.  This says nothing about guard
@@ -75,3 +81,9 @@ services:
     networks:
       # Default bridge only; no db_internal and no database secrets.
       - default
+
+  gateway:
+    environment:
+      # Monitor shows the address nginx connected from.  Display only: it is
+      # never used for authentication or rate limits.
+      NASI_LEMAK_TRUST_PROXY_CLIENT_IP: "true"

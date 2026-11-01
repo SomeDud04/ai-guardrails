@@ -1,8 +1,9 @@
-"""In-memory timing for the Monitor screen.  Holds numbers only, never text.
+"""In-memory timing for the Monitor screen.  Never holds prompt or reply text.
 
 Samples live in this process and are lost on restart.  The audit log remains the
 record; this adds what it does not hold: time spent in each stage and the token
-counts the generation endpoint reports.
+counts the generation endpoint reports.  HTTP rows add the caller's address and
+the matched route: a fixed route template, never a raw path or query string.
 """
 
 from __future__ import annotations
@@ -16,6 +17,27 @@ MAX_SAMPLES = 200
 RECENT_ROWS = 10
 STAGE_WINDOW = 20
 LIVE_WINDOW_SECONDS = 60.0
+MAX_HTTP_ROWS = 5000
+HTTP_RECENT_ROWS = 20
+HTTP_IP_ROWS = 50
+HTTP_WINDOW_SECONDS = 3600.0
+CHAT_ROUTES = frozenset(
+    {
+        "/chat",
+        "/v1/chat/completions",
+        "/workspace/api/conversations/{conversation_id}/messages",
+    }
+)
+# Health checks and Monitor's own refreshes would bury the real traffic.
+QUIET_ROUTES = frozenset(
+    {
+        "/health/live",
+        "/health/ready",
+        "/workspace/api/admin/live",
+        "/workspace/api/admin/monitor",
+        "/workspace/api/admin/alerts/summary",
+    }
+)
 
 
 def tokens_per_second(sample: dict[str, Any]) -> float | None:
@@ -34,6 +56,29 @@ def _scan_rate(scans: list[tuple[int, float]]) -> float | None:
     return round(sum(tokens for tokens, _elapsed_ms in scans) / seconds, 1)
 
 
+def _traffic(rows: list[dict[str, Any]], now: float) -> dict[str, Any]:
+    window = [row for row in rows if now - row["at"] <= HTTP_WINDOW_SECONDS]
+    by_ip: dict[str, dict[str, Any]] = {}
+    for row in window:
+        entry = by_ip.setdefault(
+            row["ip"],
+            {"ip": row["ip"], "requests": 0, "chat": 0, "refused": 0, "failed": 0},
+        )
+        entry["requests"] += 1
+        if row["method"] == "POST" and row["route"] in CHAT_ROUTES:
+            entry["chat"] += 1
+        if 400 <= row["status"] < 500:
+            entry["refused"] += 1
+        elif row["status"] >= 500:
+            entry["failed"] += 1
+        entry["last_seen"] = row["at"]
+    busiest = sorted(by_ip.values(), key=lambda entry: entry["requests"], reverse=True)
+    return {
+        "by_ip": busiest[:HTTP_IP_ROWS],
+        "recent": window[-HTTP_RECENT_ROWS:][::-1],
+    }
+
+
 class LiveMetrics:
     """Thread-safe rolling samples of finished requests."""
 
@@ -42,6 +87,7 @@ class LiveMetrics:
         self._lock = threading.Lock()
         self._samples: deque[dict[str, Any]] = deque(maxlen=MAX_SAMPLES)
         self._guard_scans: deque[tuple[int, float]] = deque(maxlen=STAGE_WINDOW)
+        self._http: deque[dict[str, Any]] = deque(maxlen=MAX_HTTP_ROWS)
         self._in_flight = 0
 
     def enter(self) -> None:
@@ -79,12 +125,30 @@ class LiveMetrics:
         with self._lock:
             self._guard_scans.append((tokens, elapsed_ms))
 
+    def note_http(
+        self, ip: str, method: str, route: str, status: int, elapsed_ms: float
+    ) -> None:
+        """Record one HTTP request: where it came from and how it ended."""
+        if route in QUIET_ROUTES:
+            return
+        row = {
+            "at": self._clock(),
+            "ip": ip,
+            "method": method,
+            "route": route,
+            "status": status,
+            "ms": round(elapsed_ms),
+        }
+        with self._lock:
+            self._http.append(row)
+
     def snapshot(self) -> dict[str, Any]:
         now = self._clock()
         with self._lock:
             samples = list(self._samples)
             in_flight = self._in_flight
             scans = list(self._guard_scans)
+            http_rows = list(self._http)
         recent = [
             {**sample, "tokens_per_second": tokens_per_second(sample)}
             for sample in samples[-RECENT_ROWS:][::-1]
@@ -122,4 +186,5 @@ class LiveMetrics:
                 "output": average("output_ms"),
             },
             "recent": recent,
+            "traffic": _traffic(http_rows, now),
         }

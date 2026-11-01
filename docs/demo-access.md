@@ -59,8 +59,10 @@ image is built from the pulled checkout, which already packages the page module.
 - `Authorization` headers pass through unchanged, and the client's original
   `Host` header is forwarded verbatim (including an explicit `:8080` port).
   No client-supplied forwarding (`X-Forwarded-For`, `Forwarded`) metadata is
-  trusted or generated, and no CORS headers are added. `/` still serves the
-  gateway's demo shell, and `/admin` still requires the operator key.
+  trusted or generated, and no CORS headers are added. nginx overwrites
+  `X-Real-IP` with the connecting address, and the gateway uses it only for the
+  Monitor traffic table, never for authentication or rate limits. `/` still
+  serves the gateway's demo shell, and `/admin` still requires the operator key.
 - Upstream response headers (including CSP, `X-Content-Type-Options` and frame
   headers) pass through. Errors are not intercepted, responses are not cached,
   and nothing is retried, so a POST is never replayed.
@@ -70,10 +72,14 @@ image is built from the pulled checkout, which already packages the page module.
 - Docker's embedded resolver (`127.0.0.11`, short TTL) plus variable-based
   `proxy_pass` re-resolves `gateway` at request time, so rebuilding the gateway
   container with a new address does not leave a stale upstream IP.
-- nginx logs nothing per request (`access_log off`) and sends only critical
-  errors to stderr. Request bodies, URIs and `Authorization` values are not
-  routinely logged. The image tag `nginx:stable-alpine` is a mutable
-  convenience tag, not a digest pin.
+- nginx writes one line per request to Docker's log and sends only critical
+  errors to stderr. Each line holds the time, client IP address, status, method,
+  seconds taken, bytes sent and path. Query strings, headers (including
+  `Authorization`) and bodies are not logged. Read it with `nl-compose logs nginx`.
+  Docker keeps at most five 10 MB files, and recreating the nginx container
+  deletes them. Client IP addresses are personal data under most privacy rules,
+  so decide how long to keep them before production use. The image tag
+  `nginx:stable-alpine` is a mutable convenience tag, not a digest pin.
 
 The proxy body limit is 64 KiB, matching the gateway's default maximum body.
 Request buffering is enabled so slow clients cannot hold an application worker.

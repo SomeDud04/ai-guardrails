@@ -822,6 +822,45 @@ class GuardSpeedWiringTests(unittest.TestCase):
         )
 
 
+class TrafficByIpTests(unittest.TestCase):
+    def _traffic(self, environ: dict[str, str], headers: dict[str, str], path: str = "/") -> dict:
+        with tempfile.TemporaryDirectory() as tmp:
+            store = SqliteAuditStore(Path(tmp) / "audit.sqlite3")
+            app = make_app(
+                gateway=Gateway("key", audit_store=store, adapters=MemoryAdapters()),
+                environ=environ,
+            )
+            client = TestClient(app)
+            client.get(path, headers=headers)
+            return app.state.gateway.metrics.snapshot()["traffic"]
+
+    def test_the_proxy_address_counts_only_when_configured(self) -> None:
+        real_ip = {"X-Real-IP": "192.168.90.50"}
+        trusted = self._traffic({"NASI_LEMAK_TRUST_PROXY_CLIENT_IP": "true"}, real_ip)
+        self.assertEqual(trusted["by_ip"][0]["ip"], "192.168.90.50")
+        untrusted = self._traffic({}, real_ip)
+        self.assertEqual(untrusted["by_ip"][0]["ip"], "testclient")
+
+    def test_a_value_that_is_not_an_address_falls_back_to_the_peer(self) -> None:
+        traffic = self._traffic(
+            {"NASI_LEMAK_TRUST_PROXY_CLIENT_IP": "true"}, {"X-Real-IP": "<script>"}
+        )
+        self.assertEqual(traffic["by_ip"][0]["ip"], "testclient")
+
+    def test_the_route_is_recorded_without_the_query_string(self) -> None:
+        row = self._traffic({}, {}, "/?secret=value")["recent"][0]
+        self.assertEqual((row["method"], row["route"], row["status"]), ("GET", "/", 200))
+        self.assertNotIn("secret", str(row))
+
+    def test_an_unknown_path_is_not_recorded(self) -> None:
+        row = self._traffic({}, {}, "/wp-login.php")["recent"][0]
+        self.assertEqual((row["route"], row["status"]), ("unmatched", 404))
+
+    def test_the_route_is_still_seen_behind_tls(self) -> None:
+        row = self._traffic({"NASI_LEMAK_TLS_TERMINATED_AT_PROXY": "true"}, {})["recent"][0]
+        self.assertEqual(row["route"], "/")
+
+
 class TlsTerminatedAtProxyTests(unittest.TestCase):
     def _seen_scheme(self, scope_type: str = "http") -> str:
         seen: dict[str, Any] = {}

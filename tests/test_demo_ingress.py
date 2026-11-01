@@ -39,14 +39,22 @@ class DemoComposeTests(unittest.TestCase):
         cls.demo = _load("compose.demo.yaml")
         cls.service = cls.demo["services"]["nginx"]
 
-    def test_overlay_adds_only_the_nginx_service(self):
-        self.assertEqual(set(self.demo["services"]), {"nginx"})
+    def test_overlay_adds_nginx_and_only_one_gateway_setting(self):
+        self.assertEqual(set(self.demo["services"]), {"nginx", "gateway"})
         self.assertNotIn("db", self.demo["services"])
-        self.assertNotIn("gateway", self.demo["services"])
+        self.assertEqual(
+            self.demo["services"]["gateway"],
+            {"environment": {"NASI_LEMAK_TRUST_PROXY_CLIENT_IP": "true"}},
+        )
         # The demo file must not redeclare secrets, volumes or networks.
         for key in ("secrets", "volumes", "networks"):
             with self.subTest(key=key):
                 self.assertNotIn(key, self.demo)
+
+    def test_access_log_disk_use_is_bounded(self):
+        logging = self.service["logging"]
+        self.assertEqual(logging["driver"], "json-file")
+        self.assertEqual(logging["options"], {"max-size": "10m", "max-file": "5"})
 
     def test_gateway_and_database_keep_private_defaults(self):
         gateway = self.base["services"]["gateway"]
@@ -127,11 +135,28 @@ class NginxConfigTests(unittest.TestCase):
     def test_process_paths_and_logging_avoid_the_read_only_root(self):
         self.assertIn("pid /tmp/nginx.pid;", self.text)
         self.assertIn("error_log /dev/stderr crit;", self.text)
-        self.assertIn("access_log off;", self.text)
-        self.assertNotRegex(self.text, r"access_log\s+/")
-        self.assertNotRegex(self.text, r"access_log\s+\S*\$request")
+        self.assertIn("access_log /dev/stdout traffic if=$traffic_loggable;", self.text)
         for path in ("client_body", "proxy", "fastcgi", "uwsgi", "scgi"):
             self.assertIn(f"/tmp/{path}", self.text)
+
+    def test_access_log_records_metadata_only(self):
+        match = re.search(r"log_format traffic (.*?);", self.flat)
+        self.assertIsNotNone(match)
+        fields = set(re.findall(r"\$[a-z_0-9]+", match.group(1)))
+        self.assertEqual(
+            fields,
+            {
+                "$time_iso8601",
+                "$remote_addr",
+                "$status",
+                "$request_method",
+                "$request_time",
+                "$body_bytes_sent",
+                "$uri",
+            },
+        )
+        # A hostile path cannot shift the other fields while it stays last.
+        self.assertTrue(match.group(1).rstrip("' ").endswith("$uri"))
 
     def test_listens_on_unprivileged_http_only(self):
         self.assertRegex(self.text, r"listen\s+8080;")
@@ -177,9 +202,11 @@ class NginxConfigTests(unittest.TestCase):
             if not line.strip().startswith("#")
         )
         # The proxy neither generates nor trusts client forwarding metadata.
-        for header in ("X-Forwarded-For", "X-Forwarded-Host", "X-Real-IP", "Forwarded"):
+        for header in ("X-Forwarded-For", "X-Forwarded-Host", "Forwarded"):
             with self.subTest(header=header):
                 self.assertNotIn(header, directives)
+        # X-Real-IP is overwritten, so a client cannot choose its own address.
+        self.assertIn("proxy_set_header X-Real-IP $remote_addr;", directives)
 
     def test_body_limit_matches_server_default_and_keeps_slow_clients_out(self):
         self.assertEqual(DEFAULT_MAX_BODY_BYTES, 64 * 1024)

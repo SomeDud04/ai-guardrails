@@ -1374,6 +1374,14 @@ async function respondMonitor(app) {
       tokens_per_second: { latest: 42.5, average: 40 },
       guard_tokens_per_second: { latest: 96.2, average: 91.4 },
       stages_ms: { input: 6000, generation: 8000, output: 5000 },
+      traffic: {
+        by_ip: [
+          { ip: "192.168.90.50", requests: 12, chat: 3, refused: 2, failed: 1, last_seen: 1700000000 },
+        ],
+        recent: [
+          { at: 1700000000, ip: "192.168.90.50", method: "POST", route: "/chat", status: 403, ms: 850 },
+        ],
+      },
       recent: [
         {
           at: 1700000000,
@@ -1450,6 +1458,12 @@ async function scenarioAdmin() {
     "time per stage must render");
   assert(app.elementFor("live-recent").textContent.indexOf("340") >= 0,
     "the latest requests must render");
+  assert(app.elementFor("live-traffic").textContent.indexOf("192.168.90.50") >= 0,
+    "traffic by IP must render");
+  assert(app.elementFor("live-http").textContent.indexOf("/chat") >= 0,
+    "the latest HTTP requests must render");
+  assert(app.elementFor("live-http").textContent.indexOf("850 ms") >= 0,
+    "a short request must show in milliseconds");
   assert(app.callsMatching("/workspace/api/admin/users").length === 0,
     "the monitor must not load account lists");
   app.elementFor("admin-tab-users").dispatch("click");

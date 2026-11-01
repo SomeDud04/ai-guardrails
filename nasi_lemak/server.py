@@ -20,6 +20,7 @@ from __future__ import annotations
 import asyncio
 import hashlib
 import hmac
+import ipaddress
 import json
 import math
 import os
@@ -158,6 +159,7 @@ ENV_BODY_READ_TIMEOUT = "NASI_LEMAK_BODY_READ_TIMEOUT"
 
 ENV_POLICY_FILE = "NASI_LEMAK_POLICY_FILE"
 ENV_TLS_TERMINATED_AT_PROXY = "NASI_LEMAK_TLS_TERMINATED_AT_PROXY"
+ENV_TRUST_PROXY_CLIENT_IP = "NASI_LEMAK_TRUST_PROXY_CLIENT_IP"
 ENV_OPERATOR_KEY_DIGEST = "NASI_LEMAK_OPERATOR_KEY_DIGEST"
 ENV_OPERATOR_AUDIT_DSN = "NASI_LEMAK_OPERATOR_AUDIT_DSN"
 
@@ -626,9 +628,36 @@ class _TlsTerminatedAtProxy:
         self.app = app
 
     async def __call__(self, scope: Any, receive: Any, send: Any) -> None:
+        # Set in place: the outer middleware reads the matched route from this
+        # same scope once the request has been served.
         if scope["type"] == "http":
-            scope = {**scope, "scheme": "https"}
+            scope["scheme"] = "https"
         await self.app(scope, receive, send)
+
+
+def _client_address(request: Request) -> str:
+    """The caller's address, for display on Monitor only.
+
+    ``X-Real-IP`` counts only when the operator says nginx is in front, because
+    nginx overwrites it.  Anything that is not an address falls back to the peer.
+    """
+    if request.app.state.trust_proxy_client_ip:
+        try:
+            return str(ipaddress.ip_address(request.headers.get("x-real-ip", "").strip()))
+        except ValueError:
+            pass
+    return request.client.host if request.client else "unknown"
+
+
+def _note_http(request: Request, status: int, elapsed_ms: float) -> None:
+    metrics = getattr(getattr(request.app.state, "gateway", None), "metrics", None)
+    if metrics is None:
+        return
+    route = getattr(request.scope.get("route"), "path", None)
+    # The catch-all that answers unknown paths is not a route worth naming.
+    if not route or route.endswith(":path}"):
+        route = "unmatched"
+    metrics.note_http(_client_address(request), request.method, route, status, elapsed_ms)
 
 
 def _mode_from_env(env: dict[str, str]) -> str:
@@ -1530,6 +1559,9 @@ def make_app(
     app.state.control_admission = _ControlPlaneAdmission(control_limit)
     if str(env.get(ENV_TLS_TERMINATED_AT_PROXY, "")).strip().lower() == "true":
         app.add_middleware(_TlsTerminatedAtProxy)
+    app.state.trust_proxy_client_ip = (
+        str(env.get(ENV_TRUST_PROXY_CLIENT_IP, "")).strip().lower() == "true"
+    )
     app.state.chat_work_timeout = chat_timeout
     # Read-only resolved operational bounds for the authenticated admin view.
     app.state.operational = {
@@ -1558,6 +1590,7 @@ def make_app(
     async def assign_request_id(request: Request, call_next):
         request_id = "req_" + uuid.uuid4().hex
         request.state.request_id = request_id
+        started = time.perf_counter()
         try:
             response = await call_next(request)
         except Exception:
@@ -1568,6 +1601,7 @@ def make_app(
         response.headers["X-Nasi-Lemak-Guards-Active"] = (
             "true" if request.app.state.guards_active else "false"
         )
+        _note_http(request, response.status_code, (time.perf_counter() - started) * 1000.0)
         return response
 
     @app.exception_handler(StarletteHTTPException)

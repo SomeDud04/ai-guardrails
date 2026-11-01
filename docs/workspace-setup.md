@@ -48,11 +48,9 @@ not be remembered.
 - Optional non-secret chat limits in `.secrets/compose.chat-limits.env`, added
   after the existing env files. See [docs/chat-limits.md](chat-limits.md).
 
-The commands below use the test-mode example. An existing API-mode deployment
-  with hosted guards must keep its own hosted API env file, guard env file and
-  overlays exactly as documented in
-  [docs/hosted-guard-setup.md](hosted-guard-setup.md); do not replace them with
-  the test-mode files or switch the deployment to test mode.
+The commands below use the test-mode example. An existing pilot deployment
+  must keep its own env files and overlays exactly as they are; do not replace
+  them with the test-mode files or switch the deployment to test mode.
 - A PostgreSQL administrator credential for the one-off migration step.
 - No production traffic. The model guards remain inactive in the current demo;
   do not describe this as guarded-mode or production efficacy evidence.
@@ -378,6 +376,16 @@ pass is not included. The two are different work and do not compare directly: th
 model writes tokens, while the guard reads tokens and writes a short verdict.
 Live figures are held in memory, cover both
 the workspace and the API, hold no prompt or reply text, and restart empty.
+
+**Traffic by IP** counts each address's requests over the last hour: chats,
+refused (4xx) and failed (5xx). **Latest HTTP requests** lists the last 20 with
+their path and status. They cover every route, including wrong-key attempts that
+never reach the audit log, but leave out health checks and Monitor's own
+refreshes. The path is the route's template, and anything unknown shows as
+`unmatched`. Behind nginx the address is the one nginx connected from, so users
+behind one VPN or NAT address appear as a single row. For the raw record, including
+unmatched paths and bytes sent, use `nl-compose logs nginx`; see
+[docs/demo-access.md](demo-access.md).
 
 **Integrate** gives connection examples for curl, Python, JavaScript, test
 harnesses, `nasi-chat` and the smoke test, using this deployment's address and

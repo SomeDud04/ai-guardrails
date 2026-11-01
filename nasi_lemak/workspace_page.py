@@ -657,7 +657,7 @@ button.danger:hover:not(:disabled) { background: #8f1d17; border-color: #8f1d17;
 .admin-help summary { width: fit-content; cursor: pointer; color: var(--muted); font-size: .8125rem; }
 
 /* Monitor */
-.monitor-panel { gap: var(--space-4); }
+.monitor-panel { grid-template-columns: minmax(0, 1fr); gap: var(--space-4); }
 .monitor-head { align-items: stretch; gap: var(--space-3); }
 .monitor-status { flex: 1 1 340px; padding: var(--space-2) var(--space-3); border-left: 3px solid var(--line-strong); border-radius: var(--radius); border-top: 0; border-right: 0; border-bottom: 0; background: var(--surface-raised); }
 .monitor-status strong { font-size: 1rem; font-weight: 600; }
@@ -697,6 +697,9 @@ button.danger:hover:not(:disabled) { background: #8f1d17; border-color: #8f1d17;
 .monitor-result.is-failed { color: var(--danger); font-weight: 500; }
 .monitor-columns { grid-template-columns: minmax(0, 3fr) minmax(0, 2fr); gap: var(--space-5); }
 .monitor-side { display: grid; gap: var(--space-4); align-content: start; min-width: 0; }
+#live-traffic .cols-6 { grid-template-columns: minmax(130px, 1.5fr) repeat(4, minmax(72px, 1fr)) 96px; min-width: 620px; }
+#live-http .cols-6 { grid-template-columns: 96px 130px 64px minmax(200px, 1fr) 56px 72px; min-width: 680px; }
+#live-traffic .admin-table-head > div:nth-child(n+2):nth-child(-n+5), #live-http .admin-table-head > div:nth-child(n+5) { text-align: right; }
 .integrate-code { background: var(--surface-raised); color: var(--text); font-size: .8125rem; }
 @media (max-width: 1100px) {
   .composer-hint { display: none; }
@@ -874,6 +877,8 @@ _WORKSPACE_JS = """
   var liveStagesEmpty = byId("live-stages-empty");
   var liveStagesLegend = byId("live-stages-legend");
   var liveRecent = byId("live-recent");
+  var liveTraffic = byId("live-traffic");
+  var liveHttp = byId("live-http");
   var liveTimer = null;
   var monitorSeq = 0;
   var monitorTimer = null;
@@ -5881,6 +5886,58 @@ _WORKSPACE_JS = """
     }
   }
 
+  function appendTrafficEmpty(container) {
+    var empty = document.createElement("p");
+    empty.className = "admin-table-empty";
+    empty.textContent = "No traffic in the last hour since the gateway last started.";
+    container.appendChild(empty);
+  }
+
+  function renderTrafficByIp(rows) {
+    clearNode(liveTraffic);
+    if (!rows.length) {
+      appendTrafficEmpty(liveTraffic);
+      return;
+    }
+    renderTableHead(liveTraffic, ["IP address", "Requests", "Chats", "Refused (4xx)", "Failed (5xx)", "Last seen"], 6);
+    for (var index = 0; index < rows.length; index += 1) {
+      var item = rows[index];
+      var row = document.createElement("div");
+      row.className = "admin-table-row cols-6";
+      row.appendChild(tableCell(item.ip, "", "IP address"));
+      row.appendChild(tableCell(monitorCount(item.requests), "cell-num", "Requests"));
+      row.appendChild(tableCell(monitorCount(item.chat), "cell-num", "Chats"));
+      row.appendChild(tableCell(monitorCount(item.refused), "cell-num", "Refused (4xx)"));
+      row.appendChild(tableCell(monitorCount(item.failed), "cell-num", "Failed (5xx)"));
+      row.appendChild(tableCell(formatClock(item.last_seen), "cell-muted", "Last seen"));
+      liveTraffic.appendChild(row);
+    }
+  }
+
+  function renderHttpRequests(rows) {
+    clearNode(liveHttp);
+    if (!rows.length) {
+      appendTrafficEmpty(liveHttp);
+      return;
+    }
+    renderTableHead(liveHttp, ["Time", "IP address", "Method", "Path", "Status", "Took"], 6);
+    for (var index = 0; index < rows.length; index += 1) {
+      var item = rows[index];
+      var row = document.createElement("div");
+      var outcome = item.status >= 500 ? " is-failed" : item.status >= 400 ? " is-blocked" : "";
+      row.className = "admin-table-row cols-6";
+      row.appendChild(tableCell(formatClock(item.at), "cell-muted", "Time"));
+      row.appendChild(tableCell(item.ip, "", "IP address"));
+      row.appendChild(tableCell(item.method, "", "Method"));
+      row.appendChild(tableCell(item.route, "", "Path"));
+      row.appendChild(tableCell(monitorCount(item.status), "cell-num monitor-result" + outcome, "Status"));
+      row.appendChild(tableCell(
+        item.ms < 1000 ? item.ms + " ms" : monitorSeconds(item.ms), "cell-num", "Took"
+      ));
+      liveHttp.appendChild(row);
+    }
+  }
+
   function renderLive(data) {
     var speed = isObject(data.tokens_per_second) ? data.tokens_per_second : {};
     var guardSpeed = isObject(data.guard_tokens_per_second) ? data.guard_tokens_per_second : {};
@@ -5899,6 +5956,9 @@ _WORKSPACE_JS = """
     appendMonitorMetric(liveMetrics, "Reply tokens, last minute", monitorCount(minute.reply_tokens));
     renderTimeShare(isObject(data.stages_ms) ? data.stages_ms : {});
     renderRecentRequests(data.recent);
+    var traffic = isObject(data.traffic) ? data.traffic : {};
+    renderTrafficByIp(Array.isArray(traffic.by_ip) ? traffic.by_ip : []);
+    renderHttpRequests(Array.isArray(traffic.recent) ? traffic.recent : []);
     liveState.textContent = "Updated " + formatClock(data.generated_at);
   }
 
@@ -6830,6 +6890,8 @@ _WORKSPACE_JS = """
     clearNode(monitorBlocks);
     clearNode(liveMetrics);
     clearNode(liveRecent);
+    clearNode(liveTraffic);
+    clearNode(liveHttp);
     clearNode(liveStages);
     setStatus(monitorState, "");
     clearNode(integrateCode);
@@ -7474,8 +7536,16 @@ WORKSPACE_HTML = """<!doctype html>
 <dl id="monitor-metrics" class="monitor-metrics" aria-label="Traffic in this period"></dl>
 <p id="admin-monitor-state" class="admin-note" role="status" aria-live="polite"></p>
 </div>
+<div>
+<h4>Traffic by IP, last hour</h4>
+<div id="live-traffic" class="admin-table" aria-label="Traffic by IP address"></div>
+</div>
+<div>
+<h4>Latest HTTP requests</h4>
+<div id="live-http" class="admin-table" aria-label="Latest HTTP requests"></div>
+</div>
 <div class="monitor-columns">
-<div><h4>Latest requests</h4><div id="live-recent" class="admin-table" aria-label="Latest requests"></div></div>
+<div><h4>Latest chat requests</h4><div id="live-recent" class="admin-table" aria-label="Latest chat requests"></div></div>
 <div class="monitor-side">
 <div><h4>Why requests stopped</h4><div id="monitor-codes" class="admin-table" aria-label="Stopped requests by reason"></div></div>
 <div><h4>Latest workspace blocks</h4><div id="monitor-blocks" class="admin-table" aria-label="Latest workspace blocks"></div></div>
