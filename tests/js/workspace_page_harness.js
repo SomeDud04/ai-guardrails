@@ -1338,7 +1338,6 @@ async function respondMonitor(app) {
   const call = app.lastMatching("/workspace/api/admin/monitor?hours=24");
   assert(call, "the monitor must load when administration opens");
   assert(call.options.method === "GET", "the monitor must be a read-only GET");
-  const health = app.lastMatching("/health/ready");
   call.respond(
     {
       hours: 24,
@@ -1358,7 +1357,34 @@ async function respondMonitor(app) {
     },
     200
   );
+  await settle();
+  const health = app.lastMatching("/health/ready");
   health.respond({ status: "ready", mode: "guarded", guards_active: true }, 200);
+  await settle();
+  const live = app.lastMatching("/workspace/api/admin/live");
+  assert(live, "the live figures must load after the monitor");
+  assert(live.options.method === "GET", "the live figures must be a read-only GET");
+  live.respond(
+    {
+      in_flight: 1,
+      capacity: 2,
+      samples: 1,
+      generated_at: 1700000000,
+      last_minute: { requests: 3, reply_tokens: 90 },
+      tokens_per_second: { latest: 42.5, average: 40 },
+      stages_ms: { input: 6000, generation: 8000, output: 5000 },
+      recent: [
+        {
+          at: 1700000000,
+          decision: "allowed",
+          total_ms: 19000,
+          reply_tokens: 340,
+          tokens_per_second: 42.5,
+        },
+      ],
+    },
+    200
+  );
   await settle();
 }
 
@@ -1413,6 +1439,14 @@ async function scenarioAdmin() {
     "stop reasons must use plain words");
   assert(app.elementFor("monitor-blocks").textContent.indexOf("@alice") >= 0,
     "recent blocks must render");
+  assert(app.elementFor("live-metrics").textContent.indexOf("42.5") >= 0,
+    "the latest tokens per second must render");
+  assert(app.elementFor("live-metrics").textContent.indexOf("1 of 2") >= 0,
+    "running requests must show against capacity");
+  assert(app.elementFor("live-stages-legend").textContent.indexOf("Model 8.0 s") >= 0,
+    "time per stage must render");
+  assert(app.elementFor("live-recent").textContent.indexOf("340") >= 0,
+    "the latest requests must render");
   assert(app.callsMatching("/workspace/api/admin/users").length === 0,
     "the monitor must not load account lists");
   app.elementFor("admin-tab-users").dispatch("click");
