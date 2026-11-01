@@ -26,6 +26,14 @@ def tokens_per_second(sample: dict[str, Any]) -> float | None:
     return round(tokens / (generation_ms / 1000.0), 1)
 
 
+def _scan_rate(scans: list[tuple[int, float]]) -> float | None:
+    """Tokens read per second across guard passes, weighted by their length."""
+    seconds = sum(elapsed_ms for _tokens, elapsed_ms in scans) / 1000.0
+    if seconds <= 0:
+        return None
+    return round(sum(tokens for tokens, _elapsed_ms in scans) / seconds, 1)
+
+
 class LiveMetrics:
     """Thread-safe rolling samples of finished requests."""
 
@@ -33,6 +41,7 @@ class LiveMetrics:
         self._clock = clock
         self._lock = threading.Lock()
         self._samples: deque[dict[str, Any]] = deque(maxlen=MAX_SAMPLES)
+        self._guard_scans: deque[tuple[int, float]] = deque(maxlen=STAGE_WINDOW)
         self._in_flight = 0
 
     def enter(self) -> None:
@@ -65,11 +74,17 @@ class LiveMetrics:
                 }
             )
 
+    def note_guard_scan(self, lane: str, tokens: int, elapsed_ms: float) -> None:
+        """Record one guard model pass: the tokens it read and how long it took."""
+        with self._lock:
+            self._guard_scans.append((tokens, elapsed_ms))
+
     def snapshot(self) -> dict[str, Any]:
         now = self._clock()
         with self._lock:
             samples = list(self._samples)
             in_flight = self._in_flight
+            scans = list(self._guard_scans)
         recent = [
             {**sample, "tokens_per_second": tokens_per_second(sample)}
             for sample in samples[-RECENT_ROWS:][::-1]
@@ -96,6 +111,10 @@ class LiveMetrics:
             "tokens_per_second": {
                 "latest": rates[-1] if rates else None,
                 "average": round(sum(rates) / len(rates), 1) if rates else None,
+            },
+            "guard_tokens_per_second": {
+                "latest": _scan_rate(scans[-1:]),
+                "average": _scan_rate(scans),
             },
             "stages_ms": {
                 "input": average("input_ms"),

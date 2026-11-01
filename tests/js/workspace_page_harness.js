@@ -1372,6 +1372,7 @@ async function respondMonitor(app) {
       generated_at: 1700000000,
       last_minute: { requests: 3, reply_tokens: 90 },
       tokens_per_second: { latest: 42.5, average: 40 },
+      guard_tokens_per_second: { latest: 96.2, average: 91.4 },
       stages_ms: { input: 6000, generation: 8000, output: 5000 },
       recent: [
         {
@@ -1441,6 +1442,8 @@ async function scenarioAdmin() {
     "recent blocks must render");
   assert(app.elementFor("live-metrics").textContent.indexOf("42.5") >= 0,
     "the latest tokens per second must render");
+  assert(app.elementFor("live-metrics").textContent.indexOf("96.2") >= 0,
+    "the guard tokens per second must render");
   assert(app.elementFor("live-metrics").textContent.indexOf("1 of 2") >= 0,
     "running requests must show against capacity");
   assert(app.elementFor("live-stages-legend").textContent.indexOf("Model 8.0 s") >= 0,

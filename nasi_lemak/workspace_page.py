@@ -669,14 +669,15 @@ button.danger:hover:not(:disabled) { background: #8f1d17; border-color: #8f1d17;
 .monitor-live-head { display: flex; align-items: baseline; justify-content: space-between; gap: var(--space-3); }
 .monitor-live-head span { color: var(--muted); font-size: .8125rem; }
 .monitor-metrics, .monitor-live { display: grid; margin: 0; border: 1px solid var(--line); border-radius: var(--radius); }
-.monitor-live { grid-template-columns: 1.6fr repeat(4, minmax(0, 1fr)); }
+.monitor-live { grid-template-columns: repeat(2, minmax(0, 1.5fr)) repeat(3, minmax(0, 1fr)); }
 .monitor-metrics { grid-template-columns: repeat(7, minmax(0, 1fr)); border: 0; border-radius: 0; }
 .monitor-metrics > div, .monitor-live > div { min-width: 0; padding: var(--space-3) var(--space-4); }
 .monitor-metrics > div { padding: var(--space-2) var(--space-3) var(--space-2) 0; }
 .monitor-live > div + div { border-left: 1px solid var(--line); }
 .monitor-metrics dt, .monitor-live dt { color: var(--muted); font-size: .8125rem; font-weight: 400; }
 .monitor-metrics dd, .monitor-live dd { margin: .125rem 0 0; font-size: 1.375rem; font-weight: 500; font-variant-numeric: tabular-nums; }
-.monitor-live > div:first-child dd { font-size: 1.75rem; font-weight: 600; color: var(--ok); }
+.monitor-live > div:nth-child(-n+2) dd { font-size: 1.75rem; font-weight: 600; color: var(--ok); }
+.monitor-metrics dd.monitor-note, .monitor-live > div dd.monitor-note { margin: 0; color: var(--muted); font-size: .8125rem; font-weight: 400; }
 .monitor-stages { display: flex; gap: 2px; height: 10px; margin-top: var(--space-3); border-radius: 2px; overflow: hidden; background: var(--surface-raised); }
 .monitor-stages span { flex: 0 1 0; min-width: 3px; }
 .monitor-stages .is-input, .monitor-stage-legend .is-input::before { background: #9db8a3; }
@@ -700,8 +701,9 @@ button.danger:hover:not(:disabled) { background: #8f1d17; border-color: #8f1d17;
 @media (max-width: 1100px) {
   .composer-hint { display: none; }
   .monitor-live { grid-template-columns: repeat(2, minmax(0, 1fr)); }
-  .monitor-live > div:first-child { grid-column: 1 / -1; }
+  .monitor-live > div:last-child:nth-child(odd) { grid-column: 1 / -1; }
   .monitor-live > div + div { border-left: 0; border-top: 1px solid var(--line); }
+  .monitor-live > div:nth-child(2) { border-top: 0; border-left: 1px solid var(--line); }
   .monitor-metrics { grid-template-columns: repeat(4, minmax(0, 1fr)); }
   .monitor-columns { grid-template-columns: minmax(0, 1fr); }
 }
@@ -5649,7 +5651,7 @@ _WORKSPACE_JS = """
     }
   }
 
-  function appendMonitorMetric(container, label, value) {
+  function appendMonitorMetric(container, label, value, note) {
     var item = document.createElement("div");
     var term = document.createElement("dt");
     var detail = document.createElement("dd");
@@ -5657,6 +5659,12 @@ _WORKSPACE_JS = """
     detail.textContent = value;
     item.appendChild(term);
     item.appendChild(detail);
+    if (note) {
+      var noteLine = document.createElement("dd");
+      noteLine.className = "monitor-note";
+      noteLine.textContent = note;
+      item.appendChild(noteLine);
+    }
     container.appendChild(item);
   }
 
@@ -5875,10 +5883,17 @@ _WORKSPACE_JS = """
 
   function renderLive(data) {
     var speed = isObject(data.tokens_per_second) ? data.tokens_per_second : {};
+    var guardSpeed = isObject(data.guard_tokens_per_second) ? data.guard_tokens_per_second : {};
     var minute = isObject(data.last_minute) ? data.last_minute : {};
     clearNode(liveMetrics);
-    appendMonitorMetric(liveMetrics, "Tokens per second, latest", monitorCount(speed.latest));
-    appendMonitorMetric(liveMetrics, "Average, last 20", monitorCount(speed.average));
+    appendMonitorMetric(
+      liveMetrics, "Model tokens per second", monitorCount(speed.latest),
+      "Average " + monitorCount(speed.average)
+    );
+    appendMonitorMetric(
+      liveMetrics, "Guard tokens per second", monitorCount(guardSpeed.latest),
+      "Average " + monitorCount(guardSpeed.average)
+    );
     appendMonitorMetric(liveMetrics, "Running now", monitorCount(data.in_flight) + " of " + monitorCount(data.capacity));
     appendMonitorMetric(liveMetrics, "Requests, last minute", monitorCount(minute.requests));
     appendMonitorMetric(liveMetrics, "Reply tokens, last minute", monitorCount(minute.reply_tokens));

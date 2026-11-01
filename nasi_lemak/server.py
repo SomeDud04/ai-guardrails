@@ -1549,6 +1549,9 @@ def make_app(
     if workspace_runtime.internal_gateway is not None:
         # Both entry points report to one Monitor.
         workspace_runtime.internal_gateway.metrics = runtime_gateway.metrics
+    guard = getattr(runtime_gateway.adapters, "attack_guard", None)
+    if hasattr(guard, "scan_observer"):
+        guard.scan_observer = runtime_gateway.metrics.note_guard_scan
     app.state.workspace_tasks: set[asyncio.Task] = set()
 
     @app.middleware("http")

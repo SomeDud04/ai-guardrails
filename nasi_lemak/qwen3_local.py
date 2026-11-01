@@ -69,6 +69,7 @@ is evidence of detection quality, latency or hardware behaviour.
 
 from __future__ import annotations
 
+import time
 import json
 from pathlib import Path
 from typing import Any
@@ -335,6 +336,8 @@ class Qwen3GuardLocal:
             self._model, self._tokenizer
         )
         self._pad_token_id = _pad_token_id(self._tokenizer, self._eos_ids)
+        # Set by the server to feed Monitor; receives counts and times only.
+        self.scan_observer: Any = None
 
     @property
     def workers(self) -> int:
@@ -399,6 +402,7 @@ class Qwen3GuardLocal:
         prompt_ids = self._token_ids(rendered)
         if len(prompt_ids) > self._window_limit:
             raise GuardInputLimit("guard input exceeds the configured model window")
+        started = time.perf_counter()
         text = _generated_verdict_text(
             self._model,
             self._tokenizer,
@@ -409,6 +413,9 @@ class Qwen3GuardLocal:
             accepted_eos=self._accepted_eos,
             pad_token_id=self._pad_token_id,
         )
+        if self.scan_observer is not None:
+            elapsed_ms = (time.perf_counter() - started) * 1000.0
+            self.scan_observer(lane, len(prompt_ids), elapsed_ms)
         return parse_verdict_fields(text, lane=lane)
 
     def count_tokens(self, serialized: str) -> int:

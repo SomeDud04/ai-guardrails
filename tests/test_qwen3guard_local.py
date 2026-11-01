@@ -393,6 +393,19 @@ class VerdictLaneTests(LocalTransportTestCase):
 
 
 class TransportParityTests(LocalTransportTestCase):
+    def test_each_model_pass_reports_tokens_and_time_only(self) -> None:
+        guard = self._guard(model_kwargs={"output": SAFE})
+        seen: list[tuple] = []
+        guard.scan_observer = lambda *values: seen.append(values)
+        guard.scan_attack("user: hello")
+        guard.scan_response([{"role": "user", "content": "hello"}], "reply")
+        self.assertEqual(len(seen), 2)
+        for lane, tokens, elapsed_ms in seen:
+            self.assertIsInstance(lane, str)
+            self.assertIsInstance(tokens, int)
+            self.assertGreater(tokens, 0)
+            self.assertGreaterEqual(elapsed_ms, 0.0)
+
     def test_a_block_reports_the_verdict_categories(self) -> None:
         guard = self._guard(model_kwargs={"output": UNSAFE})
         self.assertTrue(guard.scan_attack("hello")["categories"])

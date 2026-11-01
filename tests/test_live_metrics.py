@@ -65,6 +65,20 @@ class LiveMetricsTests(unittest.TestCase):
             snapshot["stages_ms"], {"input": 5000, "generation": 2000, "output": 2000}
         )
 
+    def test_guard_rate_is_weighted_by_tokens_read(self) -> None:
+        self.metrics.note_guard_scan("input", 100, 1000.0)
+        self.metrics.note_guard_scan("response", 300, 1000.0)
+        self.assertEqual(
+            self.metrics.snapshot()["guard_tokens_per_second"],
+            {"latest": 300.0, "average": 200.0},
+        )
+
+    def test_no_guard_scan_gives_no_rate(self) -> None:
+        self.assertEqual(
+            self.metrics.snapshot()["guard_tokens_per_second"],
+            {"latest": None, "average": None},
+        )
+
     def test_samples_are_bounded(self) -> None:
         for _ in range(MAX_SAMPLES + 5):
             self.finish()

@@ -806,6 +806,22 @@ class ConcurrencyAndReadinessTests(ServerTestBase):
         asyncio.run(asyncio.wait_for(scenario(), timeout=10))
 
 
+class GuardSpeedWiringTests(unittest.TestCase):
+    def test_the_guard_reports_to_the_monitor(self) -> None:
+        class Guard:
+            scan_observer = None
+
+        adapters = MemoryAdapters()
+        adapters.attack_guard = Guard()
+        with tempfile.TemporaryDirectory() as tmp:
+            store = SqliteAuditStore(Path(tmp) / "audit.sqlite3")
+            app = make_app(gateway=Gateway("key", audit_store=store, adapters=adapters))
+        self.assertEqual(
+            adapters.attack_guard.scan_observer,
+            app.state.gateway.metrics.note_guard_scan,
+        )
+
+
 class TlsTerminatedAtProxyTests(unittest.TestCase):
     def _seen_scheme(self, scope_type: str = "http") -> str:
         seen: dict[str, Any] = {}

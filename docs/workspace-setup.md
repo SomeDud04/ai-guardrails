@@ -368,11 +368,15 @@ traffic comes from the audit log, so it covers the API as well as the workspace,
 and it needs the operator audit reader to be configured. Without one, the screen
 says traffic is unavailable and still shows readiness and blocks.
 
-The **Live** panel refreshes every 5 seconds: tokens per second, requests running
-now, requests and reply tokens in the last minute, how long each stage takes and
-the latest requests. Tokens per second is the reply's token count divided by the
-model's time for that reply, so it updates when a reply finishes, and it needs the
-model endpoint to report `usage`. Live figures are held in memory, cover both
+The **Live** panel refreshes every 5 seconds: tokens per second for the model
+and the guard, requests running now, requests and reply tokens in the last minute,
+how long each stage takes and the latest requests. Model tokens per second is the
+reply's token count divided by the model's time for that reply, so it updates when
+a reply finishes, and it needs the model endpoint to report `usage`. Guard tokens
+per second is the tokens the guard read divided by its model time; a tokenizer
+pass is not included. The two are different work and do not compare directly: the
+model writes tokens, while the guard reads tokens and writes a short verdict.
+Live figures are held in memory, cover both
 the workspace and the API, hold no prompt or reply text, and restart empty.
 
 **Integrate** gives connection examples for curl, Python, JavaScript, test
