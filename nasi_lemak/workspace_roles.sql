@@ -91,7 +91,10 @@ GRANT SELECT, INSERT ON TABLE public.ws_access_log TO nasi_lemak_workspace;
 
 -- Explicit data privileges used by the WorkspaceStore operations.
 GRANT SELECT, INSERT ON TABLE public.ws_departments TO nasi_lemak_workspace;
-GRANT SELECT, INSERT, UPDATE ON TABLE public.ws_users TO nasi_lemak_workspace;
+-- DELETE is for WorkspaceStore.delete_user only.  Its foreign keys remove the
+-- account's sessions, alerts and alert state, which the runtime cannot delete
+-- directly.
+GRANT SELECT, INSERT, UPDATE, DELETE ON TABLE public.ws_users TO nasi_lemak_workspace;
 GRANT SELECT, INSERT, UPDATE ON TABLE public.ws_sessions TO nasi_lemak_workspace;
 GRANT SELECT, INSERT, DELETE ON TABLE public.ws_review_grants TO nasi_lemak_workspace;
 GRANT SELECT, INSERT, UPDATE, DELETE ON TABLE public.ws_conversations TO nasi_lemak_workspace;

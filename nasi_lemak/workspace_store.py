@@ -1230,15 +1230,15 @@ class WorkspaceStore(PolicyAdminMixin, AlertAdminMixin):
             db.execute(
                 "DELETE FROM ws_conversations WHERE owner_id = ?", (user_id,)
             )
-            # Remove this account's own alert metadata and its personal
-            # read/acknowledgement rows; alerts about other users stay.
-            db.execute("DELETE FROM ws_block_alerts WHERE user_id = ?", (user_id,))
-            db.execute("DELETE FROM ws_alert_state WHERE admin_id = ?", (user_id,))
             db.execute("DELETE FROM ws_review_grants WHERE user_id = ?", (user_id,))
             db.execute(
                 "UPDATE ws_sessions SET revoked = 1 WHERE user_id = ? AND revoked = 0",
                 (user_id,),
             )
+            # The foreign keys remove this account's alerts and its personal
+            # read state; alerts about other users stay.  The runtime account
+            # holds no DELETE on those tables, so alert history cannot be erased
+            # any other way.
             applied = db.execute("DELETE FROM ws_users WHERE id = ?", (user_id,))
             if applied != 1:
                 raise NotFound("user not found")

@@ -9,6 +9,7 @@ from __future__ import annotations
 
 import json
 import os
+import re
 import sqlite3
 import tempfile
 import unittest
@@ -1060,6 +1061,32 @@ class MigrationTests(GovernanceTestBase):
 
 
 class RoleGrantTests(unittest.TestCase):
+    def test_every_runtime_write_has_a_postgres_grant(self) -> None:
+        # SQLite has no grants, so a missing privilege only fails on PostgreSQL.
+        root = Path(__file__).resolve().parents[1]
+        package = root / "nasi_lemak"
+        roles = (package / "workspace_roles.sql").read_text(encoding="utf-8")
+        granted: dict[str, set[str]] = {}
+        for privileges, table in re.findall(
+            r"GRANT ([A-Z, ]+) ON TABLE public\.(ws_\w+)", roles
+        ):
+            granted.setdefault(table, set()).update(
+                name.strip() for name in privileges.split(",")
+            )
+        source = "".join(
+            (package / name).read_text(encoding="utf-8")
+            for name in ("workspace_store.py", "workspace_governance.py")
+        )
+        # These two are written only by the separate migration credential.
+        migration_only = {"ws_meta", "ws_schema_migrations"}
+        for verb, table in set(
+            re.findall(r"\b(DELETE FROM|INSERT INTO|UPDATE)\s+(ws_\w+)", source)
+        ):
+            if table in migration_only:
+                continue
+            with self.subTest(table=table, verb=verb):
+                self.assertIn(verb.split()[0], granted.get(table, set()))
+
     def test_new_tables_have_exact_least_privileges(self) -> None:
         root = Path(__file__).resolve().parents[1]
         text = (root / "nasi_lemak" / "workspace_roles.sql").read_text(
