@@ -240,8 +240,13 @@ are reused.
 
 A rerun keeps the workspace, demo and HTTPS overlays when their env files are in
 `.secrets/`. Add `--demo-bind-ip VM_LAN_IP` to write the demo ingress settings.
-The first workspace setup is still manual: see
-[workspace-setup.md](workspace-setup.md).
+
+Add `--workspace` to set up the employee workspace on the first run. The
+installer creates the encryption key, schema, privileges and runtime login, then
+prompts for the first administrator and deletes the privileged DSN. Add
+`--workspace-allow-http` only for a trusted LAN demo without HTTPS. It runs once:
+later reruns keep the existing key and accounts. It refuses a workspace that was
+set up by hand; see [workspace-setup.md](workspace-setup.md) for that path.
 
 The generated `.secrets/compose.pilot.env` also carries the pilot values
 measured on the 4-vCPU guard VM (see

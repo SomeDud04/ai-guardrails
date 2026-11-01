@@ -1012,6 +1012,93 @@ class InstallFlowTests(unittest.TestCase):
         self.assertTrue((self.state / ".active_mode").exists())
         self.assertEqual((self.state / ".active_mode").read_text(encoding="utf-8").strip(), "test")
 
+    def _workspace_install(self, runner: FakeRunner, status: int = 0) -> mock.Mock:
+        with mock.patch.object(install, "run_foreground", return_value=status) as prompt:
+            inst = self._installer(runner, workspace=True, workspace_allow_http=True)
+            self.assertEqual(inst.install(), 0)
+        return prompt
+
+    def _write_roles_sql(self) -> None:
+        package = self.project / "nasi_lemak"
+        package.mkdir(exist_ok=True)
+        (package / "workspace_roles.sql").write_text("-- fixed grants\n", encoding="utf-8")
+
+    def test_workspace_setup_runs_in_order_and_keeps_secrets_out_of_argv(self) -> None:
+        self._write_roles_sql()
+        runner = self._make_runner()
+        prompt = self._workspace_install(runner)
+
+        joined = [" ".join(cmd) for cmd, _ in runner.commands]
+        order = [
+            next(i for i, text in enumerate(joined) if needle in text)
+            for needle in (
+                "up -d --wait --wait-timeout 120 db",
+                " build gateway",
+                "nasi_lemak.workspace_cli init",
+                "up -d --build --wait",
+            )
+        ]
+        self.assertEqual(order, sorted(order))
+        init = next(text for text in joined if "workspace_cli init" in text)
+        self.assertNotIn("--user", init)
+        admin_cmd = prompt.call_args.args[0]
+        self.assertIn("bootstrap-admin", admin_cmd)
+
+        secrets_dir = self.state / "workspace"
+        dsn = (secrets_dir / "workspace_dsn").read_text(encoding="utf-8")
+        password = dsn.split(":", 2)[2].split("@", 1)[0]
+        for cmd, options in runner.commands:
+            self.assertNotIn(password, " ".join(cmd))
+        self.assertTrue(
+            any(password in (options["input_text"] or "") for _, options in runner.commands)
+        )
+        self.assertFalse((secrets_dir / "migration_dsn").exists())
+        self.assertIn(
+            (str(secrets_dir.resolve()), 10001, 10001),
+            [(str(Path(p).resolve()), uid, gid) for p, uid, gid in self.ops.chown_calls],
+        )
+        env_text = (self.state / "compose.workspace.env").read_text(encoding="utf-8")
+        self.assertIn("NASI_LEMAK_WORKSPACE_ALLOW_HTTP='true'", env_text)
+
+    def test_workspace_is_set_up_only_once(self) -> None:
+        self._write_roles_sql()
+        self._workspace_install(self._make_runner())
+        key_path = self.state / "workspace" / "workspace_key"
+        key = key_path.read_text(encoding="utf-8")
+
+        runner = self._make_runner()
+        prompt = self._workspace_install(runner)
+
+        prompt.assert_not_called()
+        self.assertEqual(key_path.read_text(encoding="utf-8"), key)
+        self.assertFalse(any("workspace_cli" in " ".join(c) for c, _ in runner.commands))
+
+    def test_failed_admin_step_keeps_the_dsn_and_allows_a_retry(self) -> None:
+        self._write_roles_sql()
+        self._workspace_install(self._make_runner(), status=1)
+        secrets_dir = self.state / "workspace"
+        self.assertTrue((secrets_dir / "migration_dsn").exists())
+        self.assertFalse((self.state / install.WORKSPACE_MARKER).exists())
+        key = (secrets_dir / "workspace_key").read_text(encoding="utf-8")
+
+        self._workspace_install(self._make_runner())
+
+        self.assertEqual((secrets_dir / "workspace_key").read_text(encoding="utf-8"), key)
+        self.assertTrue((self.state / install.WORKSPACE_MARKER).exists())
+
+    def test_a_hand_made_workspace_is_refused_untouched(self) -> None:
+        self._write_roles_sql()
+        self.state.mkdir(exist_ok=True)
+        env_path = self.state / "compose.workspace.env"
+        env_path.write_text("WORKSPACE_KEY_FILE=/operator/key\n", encoding="utf-8")
+        inst = self._installer(self._make_runner(), workspace=True)
+        with self.assertRaises(InstallError):
+            inst.install()
+        self.assertEqual(
+            env_path.read_text(encoding="utf-8"), "WORKSPACE_KEY_FILE=/operator/key\n"
+        )
+        self.assertFalse((self.state / "workspace" / "workspace_dsn").exists())
+
     def test_second_run_stable_credentials(self) -> None:
         runner = self._make_runner()
         inst = self._installer(runner)

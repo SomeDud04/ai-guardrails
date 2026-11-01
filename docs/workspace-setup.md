@@ -12,6 +12,10 @@ review access must be granted explicitly. Existing audit metadata cannot
 reconstruct prompts or answers that were never saved by this workspace; only
 conversations created after activation are available in `/workspace`.
 
+A new install can do all of this with `install.sh --workspace`; see
+[install-ubuntu.md](install-ubuntu.md). The steps below are for an existing
+deployment.
+
 ## Workspace URLs and navigation
 
 The workspace shell is served at `/workspace` (and `/workspace/`) as the chat
@@ -355,6 +359,18 @@ For a local disposable PostgreSQL verification run, set
 workspace PostgreSQL privilege tests truncate every workspace row; never set the
 flag for a shared database, and note that `TEST_WORKSPACE_DSN` alone never
 authorises destructive setup.
+
+## Monitor and Integrate
+
+Administrators open on **Monitor**: readiness, allowed, blocked and failed
+requests, reply times, why requests stopped and the latest workspace blocks. Its
+traffic comes from the audit log, so it covers the API as well as the workspace,
+and it needs the operator audit reader to be configured. Without one, the screen
+says traffic is unavailable and still shows readiness and blocks.
+
+**Integrate** gives connection examples for curl, Python, JavaScript, test
+harnesses, `nasi-chat` and the smoke test, using this deployment's address and
+model. It never shows a real key.
 
 ## Transcript retention
 
