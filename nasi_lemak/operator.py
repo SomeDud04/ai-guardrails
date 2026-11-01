@@ -16,7 +16,7 @@ import sqlite3
 from abc import ABC, abstractmethod
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Any
+from typing import Any, Sequence
 
 from .audit import AuditError
 from .export import MAX_EXPORT_ROWS
@@ -278,6 +278,82 @@ def _snapshot_from_rows(rows: list[dict[str, Any]]) -> ExportSnapshot:
     return ExportSnapshot(rows=rows, upper_seq=upper_seq)
 
 
+MONITOR_MAX_ROWS = 50_000
+MONITOR_BUCKETS = 24
+MONITOR_WINDOW_HOURS = (1, 24, 168)
+_MONITOR_COLUMNS = "request_id, event_type, timestamp, decision, error_code"
+
+
+def _monitor_sql(placeholder: str) -> str:
+    return (
+        f"SELECT {_MONITOR_COLUMNS} FROM events "
+        f"WHERE app_id = {placeholder} AND timestamp >= {placeholder} "
+        f"ORDER BY seq DESC LIMIT {placeholder}"
+    )
+
+
+def _nearest_rank(ordered: list[float], percent: int) -> int | None:
+    if not ordered:
+        return None
+    rank = max(1, math.ceil(percent / 100.0 * len(ordered)))
+    return round(ordered[rank - 1])
+
+
+def summarize_events(
+    rows: Sequence[dict[str, Any]], *, since: float, now: float
+) -> dict[str, Any]:
+    """Count one window of audit rows.  Rows hold no prompt or reply text.
+
+    A request is counted by its terminal row.  One that has only a start row is
+    reported as unfinished, and it may be in flight or abandoned by a crash.
+    """
+    truncated = len(rows) > MONITOR_MAX_ROWS
+    started: dict[str, float] = {}
+    terminal: dict[str, dict[str, Any]] = {}
+    for row in rows[:MONITOR_MAX_ROWS]:
+        if row["event_type"] == "request_started":
+            started[row["request_id"]] = float(row["timestamp"])
+        else:
+            terminal[row["request_id"]] = row
+
+    width = (now - since) / MONITOR_BUCKETS
+    buckets = [
+        {"start": since + index * width, "allowed": 0, "blocked": 0, "failed": 0}
+        for index in range(MONITOR_BUCKETS)
+    ]
+    counts = {"allowed": 0, "blocked": 0, "failed": 0}
+    codes: dict[str, int] = {}
+    latencies: list[float] = []
+    for request_id, row in terminal.items():
+        decision = row["decision"] if row["decision"] in counts else "failed"
+        counts[decision] += 1
+        index = int((float(row["timestamp"]) - since) / width)
+        buckets[max(0, min(index, MONITOR_BUCKETS - 1))][decision] += 1
+        code = row.get("error_code")
+        if code:
+            codes[code] = codes.get(code, 0) + 1
+        if decision == "allowed" and request_id in started:
+            latencies.append((float(row["timestamp"]) - started[request_id]) * 1000.0)
+    latencies.sort()
+    return {
+        "available": True,
+        "truncated": truncated,
+        "total": sum(counts.values()),
+        **counts,
+        "unfinished": len(started.keys() - terminal.keys()),
+        "codes": [
+            {"code": code, "count": count}
+            for code, count in sorted(codes.items(), key=lambda item: -item[1])
+        ],
+        "latency_ms": {
+            "p50": _nearest_rank(latencies, 50),
+            "p95": _nearest_rank(latencies, 95),
+            "samples": len(latencies),
+        },
+        "buckets": buckets,
+    }
+
+
 class AuditEventReader(ABC):
     """Minimal reader boundary used only by the authenticated operator API."""
 
@@ -339,6 +415,26 @@ class SqliteAuditReader(AuditEventReader):
             rows = [dict(row) for row in conn.execute(sql, params).fetchall()]
             return _page_from_rows(rows, filters.limit)
         except (AuditError, OperatorQueryError):
+            raise
+        except Exception:
+            raise AuditError("audit read unavailable") from None
+        finally:
+            if conn is not None:
+                try:
+                    conn.close()
+                except Exception:
+                    pass
+
+    def fetch_window(self, app_id: str, since: float) -> list[dict[str, Any]]:
+        conn = None
+        try:
+            conn = self._connect()
+            conn.row_factory = sqlite3.Row
+            cursor = conn.execute(
+                _monitor_sql("?"), (app_id, since, MONITOR_MAX_ROWS + 1)
+            )
+            return [dict(row) for row in cursor.fetchall()]
+        except AuditError:
             raise
         except Exception:
             raise AuditError("audit read unavailable") from None
@@ -465,6 +561,27 @@ class PostgresAuditReader(AuditEventReader):
                 rows = [dict(zip(columns, row)) for row in fetched]
             return _page_from_rows(rows, filters.limit)
         except (AuditError, OperatorQueryError):
+            raise
+        except Exception:
+            raise AuditError("audit read unavailable") from None
+        finally:
+            if conn is not None:
+                try:
+                    conn.close()
+                except Exception:
+                    pass
+
+    def fetch_window(self, app_id: str, since: float) -> list[dict[str, Any]]:
+        conn = None
+        try:
+            conn = self._connect()
+            with conn.cursor() as cur:
+                cur.execute(
+                    _monitor_sql("%s"), (app_id, since, MONITOR_MAX_ROWS + 1)
+                )
+                columns = [desc[0] for desc in cur.description]
+                return [dict(zip(columns, row)) for row in cur.fetchall()]
+        except AuditError:
             raise
         except Exception:
             raise AuditError("audit read unavailable") from None

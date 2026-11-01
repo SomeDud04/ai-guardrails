@@ -517,6 +517,84 @@ class LoginAndAdminTests(WorkspaceHTTPBase):
             "FORBIDDEN",
         )
 
+    def test_admin_monitor_is_admin_only_and_holds_no_content(self) -> None:
+        path = "/workspace/api/admin/monitor"
+        self.assert_error(self.client.get(path), 401, "UNAUTHORIZED")
+        alice_token = self.login()
+        self.assert_error(
+            self.client.get(path, headers=self.auth(alice_token)), 403, "FORBIDDEN"
+        )
+        admin_token = self.login("root.admin")
+        headers = self.auth(admin_token)
+        for query in ("?hours=2", "?hours=x", "?other=1", "?hours=1&hours=24"):
+            with self.subTest(query=query):
+                self.assert_error(
+                    self.client.get(path + query, headers=headers),
+                    400,
+                    "INVALID_REQUEST",
+                )
+        response = self.client.get(path + "?hours=1", headers=headers)
+        self.assertEqual(response.status_code, 200, response.text)
+        payload = response.json()
+        self.assertEqual(payload["hours"], 1)
+        self.assertEqual(
+            set(payload),
+            {
+                "hours",
+                "generated_at",
+                "traffic",
+                "alerts",
+                "recent_blocks",
+                "diagnostics",
+            },
+        )
+        self.assertEqual(
+            self.client.post(path, headers=headers).status_code, 405
+        )
+
+    def test_admin_monitor_without_an_audit_reader_still_answers(self) -> None:
+        token = self.login("root.admin")
+        response = self.client.get(
+            "/workspace/api/admin/monitor", headers=self.auth(token)
+        )
+        self.assertEqual(response.status_code, 200, response.text)
+        self.assertEqual(response.json()["traffic"], {"available": False})
+
+    def test_admin_monitor_survives_a_failing_audit_reader(self) -> None:
+        class BrokenReader:
+            def fetch_window(self, app_id: str, since: float) -> list:
+                raise RuntimeError("private database detail")
+
+        self.app.state.operator.reader = BrokenReader()
+        token = self.login("root.admin")
+        response = self.client.get(
+            "/workspace/api/admin/monitor", headers=self.auth(token)
+        )
+        self.assertEqual(response.status_code, 200, response.text)
+        self.assertEqual(response.json()["traffic"], {"available": False})
+        self.assertNotIn("private database detail", response.text)
+
+    def test_admin_monitor_reports_traffic_from_the_reader(self) -> None:
+        class Reader:
+            def fetch_window(self, app_id: str, since: float) -> list:
+                return [
+                    {
+                        "request_id": "a",
+                        "event_type": "request_blocked",
+                        "timestamp": since + 1.0,
+                        "decision": "blocked",
+                        "error_code": "POLICY_BLOCK",
+                    }
+                ]
+
+        self.app.state.operator.reader = Reader()
+        token = self.login("root.admin")
+        traffic = self.client.get(
+            "/workspace/api/admin/monitor", headers=self.auth(token)
+        ).json()["traffic"]
+        self.assertTrue(traffic["available"])
+        self.assertEqual(traffic["blocked"], 1)
+
     def test_admin_settings_are_read_only_and_redacted(self) -> None:
         path = "/workspace/api/admin/settings"
         self.assert_error(self.client.get(path), 401, "UNAUTHORIZED")

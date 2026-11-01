@@ -30,6 +30,7 @@ _WORKSPACE_CSS = """:root {
   --text-soft: #c9c9c2;
   --muted: #9f9f97;
   --muted-dim: #7c7c74;
+  --ok: #9dcf9a;
   --amber: #e6b15c;
   --amber-soft: #241c0f;
   --amber-line: #584424;
@@ -394,10 +395,36 @@ textarea:focus-visible { outline-offset: -2px; }
 .admin-table-row .cell-actions { display: flex; flex-wrap: wrap; gap: var(--space-1); align-content: center; justify-content: flex-start; }
 .admin-table-row .cell-actions button { min-height: 28px; padding: 0 6px; font-size: .7rem; white-space: nowrap; }
 .admin-table-empty { margin: 0; padding: var(--space-3); color: var(--muted-dim); font-size: .78rem; }
-.settings-snippet { display: grid; gap: var(--space-1); margin-bottom: var(--space-3); }
-.settings-snippet label { color: var(--muted); font-size: .74rem; }
-.settings-snippet .settings-code { width: 100%; min-height: 72px; margin: 0; padding: var(--space-2); border: 1px solid var(--line); border-radius: var(--radius); background: var(--surface); color: var(--text-soft); font-family: ui-monospace, SFMono-Regular, Consolas, monospace; font-size: .74rem; resize: vertical; }
-.settings-snippet button { justify-self: start; }
+.monitor-head { display: flex; flex-wrap: wrap; align-items: center; justify-content: space-between; gap: var(--space-3); }
+.monitor-head label { display: flex; align-items: center; gap: var(--space-2); color: var(--muted); font-size: .78rem; }
+.monitor-head select { width: auto; }
+.monitor-status { padding: var(--space-3) var(--space-4); border: 1px solid var(--line); border-left-width: 3px; border-radius: var(--radius); background: var(--panel); }
+.monitor-status strong { display: block; font-size: 1.05rem; }
+.monitor-status p { margin: 0; color: var(--text-soft); font-size: .82rem; }
+.monitor-status[data-state="ok"] { border-left-color: var(--ok); }
+.monitor-status[data-state="warn"] { border-left-color: var(--amber); }
+.monitor-status[data-state="bad"] { border-left-color: var(--danger); }
+.monitor-metrics { display: grid; grid-template-columns: repeat(7, minmax(0, 1fr)); margin: 0; border-block: 1px solid var(--line); }
+.monitor-metrics > div { min-width: 0; padding: var(--space-3) var(--space-3) var(--space-3) 0; }
+.monitor-metrics dt { color: var(--muted); font-size: .72rem; }
+.monitor-metrics dd { margin: 0; font-size: 1.4rem; font-weight: 650; font-variant-numeric: tabular-nums; }
+.monitor-chart { display: grid; grid-template-columns: repeat(24, minmax(0, 1fr)); gap: 2px; align-items: end; height: 120px; padding-bottom: 1px; border-bottom: 1px solid var(--line-strong); }
+.monitor-bar { display: flex; flex-direction: column; justify-content: flex-end; height: 100%; min-width: 0; }
+.monitor-bar span { display: block; min-height: 1px; }
+.monitor-bar .is-allowed { background: var(--ok); }
+.monitor-bar .is-blocked { background: var(--amber); }
+.monitor-bar .is-failed { background: var(--danger); }
+.monitor-legend { display: flex; flex-wrap: wrap; gap: var(--space-3); margin: 0; color: var(--muted); font-size: .74rem; }
+.monitor-legend span::before { content: ""; display: inline-block; width: 8px; height: 8px; margin-right: var(--space-1); }
+.monitor-legend .is-allowed::before { background: var(--ok); }
+.monitor-legend .is-blocked::before { background: var(--amber); }
+.monitor-legend .is-failed::before { background: var(--danger); }
+.monitor-columns { display: grid; grid-template-columns: minmax(0, 2fr) minmax(0, 3fr); gap: var(--space-4); }
+.monitor-columns > div { display: grid; gap: var(--space-2); align-content: start; min-width: 0; }
+.monitor-columns .admin-table-head.cols-2, .monitor-columns .admin-table-row.cols-2 { min-width: 0; }
+.integrate-options { display: flex; flex-wrap: wrap; gap: var(--space-1); }
+.integrate-options button[aria-pressed="true"] { color: var(--text); background: var(--surface); border-color: var(--line-strong); }
+.integrate-code { max-height: 440px; margin: 0; padding: var(--space-3); overflow: auto; border: 1px solid var(--line); border-radius: var(--radius); background: var(--surface); color: var(--text-soft); font: .78rem/1.6 ui-monospace, Consolas, monospace; white-space: pre; }
 .admin-inline { display: inline-flex; align-items: center; gap: var(--space-1); color: var(--text-soft); font-size: .76rem; }
 .admin-details { border: 1px solid var(--line); border-radius: var(--radius); background: var(--panel); padding: var(--space-2) var(--space-3); }
 .admin-details > summary { cursor: pointer; color: var(--text-soft); font-size: .8rem; font-weight: 600; }
@@ -486,6 +513,8 @@ textarea:focus-visible { outline-offset: -2px; }
   .admin-view { padding: var(--space-3); }
   .admin-grid { grid-template-columns: minmax(0, 1fr); }
   .admin-table-head, .admin-table-row { min-width: 560px; }
+  .monitor-metrics { grid-template-columns: repeat(2, minmax(0, 1fr)); }
+  .monitor-columns { grid-template-columns: minmax(0, 1fr); }
   /* At narrow widths the Users, Alerts and Access history lists become
      labelled cards: no inner horizontal scroll, every action stays on screen,
      and each value keeps its column heading as an inline label. */
@@ -670,10 +699,27 @@ _WORKSPACE_JS = """
   var settingsSummary = byId("settings-summary");
   var settingsState = byId("admin-settings-state");
   var settingsRefresh = byId("settings-refresh");
-  var settingsCurl = byId("settings-curl");
-  var settingsChat = byId("settings-nasi-chat");
-  var settingsCopyCurl = byId("settings-copy-curl");
-  var settingsCopyChat = byId("settings-copy-chat");
+  var adminTabMonitor = byId("admin-tab-monitor");
+  var adminMonitorPanel = byId("admin-monitor-panel");
+  var monitorWindow = byId("monitor-window");
+  var monitorRefresh = byId("monitor-refresh");
+  var monitorState = byId("admin-monitor-state");
+  var monitorStatus = byId("monitor-status");
+  var monitorMetrics = byId("monitor-metrics");
+  var monitorChart = byId("monitor-chart");
+  var monitorCodes = byId("monitor-codes");
+  var monitorBlocks = byId("monitor-blocks");
+  var monitorSeq = 0;
+  var monitorTimer = null;
+  var adminTabIntegrate = byId("admin-tab-integrate");
+  var adminIntegratePanel = byId("admin-integrate-panel");
+  var integrateOptions = byId("integrate-options");
+  var integrateHelp = byId("integrate-help");
+  var integrateCode = byId("integrate-code");
+  var integrateCopy = byId("integrate-copy");
+  var integrateFacts = byId("integrate-facts");
+  var integrateState = byId("admin-integrate-state");
+  var integrateChoice = "curl";
   var newUserToggle = byId("new-user-toggle");
   var userCancel = byId("user-cancel");
   var newDepartmentToggle = byId("new-department-toggle");
@@ -824,7 +870,7 @@ _WORKSPACE_JS = """
   var resettingPassword = false;
   var adminActiveConfirm = null;
   var adminListChain = Promise.resolve();
-  var adminSection = "users";
+  var adminSection = "monitor";
   var adminStateEpoch = 0;
   var adminDepartmentsLoaded = false;
   var adminUsersLoaded = false;
@@ -3890,12 +3936,16 @@ _WORKSPACE_JS = """
   }
 
   function setAdminSectionTabs(section) {
+    adminTabMonitor.setAttribute("aria-selected", section === "monitor" ? "true" : "false");
+    adminTabIntegrate.setAttribute("aria-selected", section === "integrate" ? "true" : "false");
     adminTabUsers.setAttribute("aria-selected", section === "users" ? "true" : "false");
     adminTabDepartments.setAttribute("aria-selected", section === "departments" ? "true" : "false");
     adminTabPolicies.setAttribute("aria-selected", section === "policies" ? "true" : "false");
     adminTabAlerts.setAttribute("aria-selected", section === "alerts" ? "true" : "false");
     adminTabAccess.setAttribute("aria-selected", section === "access" ? "true" : "false");
     adminTabSettings.setAttribute("aria-selected", section === "settings" ? "true" : "false");
+    adminMonitorPanel.hidden = section !== "monitor";
+    adminIntegratePanel.hidden = section !== "integrate";
     adminUsersPanel.hidden = section !== "users";
     adminDepartmentsPanel.hidden = section !== "departments";
     adminPoliciesPanel.hidden = section !== "policies";
@@ -3916,6 +3966,18 @@ _WORKSPACE_JS = """
 
   function loadAdminSection(section) {
     if (!signedIn || !profile || !profile.user || profile.user.role !== "admin") { return; }
+    if (section !== "monitor") { clearMonitorTimer(); }
+    if (section === "monitor") {
+      queueAdminList(function () { return loadMonitor(); });
+      return;
+    }
+    if (section === "integrate") {
+      renderIntegrate();
+      queueAdminList(function () {
+        return adminSettingsLoaded ? Promise.resolve(true) : loadAdminSettings(true);
+      }).then(function () { renderIntegrate(); });
+      return;
+    }
     if (section === "users") {
       // Department names are needed by the user table and the create-user form.
       if (!adminDepartmentsLoaded) {
@@ -4113,16 +4175,15 @@ _WORKSPACE_JS = """
   adminTabAccess.addEventListener("click", function () { showAdminSection("access"); });
   adminTabSettings.addEventListener("click", function () { showAdminSection("settings"); });
   settingsRefresh.addEventListener("click", function () { loadAdminSettings(true); });
-  settingsCopyCurl.addEventListener("click", function () {
-    copySettingsSnippet(settingsCurl, "curl snippet");
-  });
-  settingsCopyChat.addEventListener("click", function () {
-    copySettingsSnippet(settingsChat, "nasi-chat snippet");
-  });
+  adminTabMonitor.addEventListener("click", function () { showAdminSection("monitor"); });
+  adminTabIntegrate.addEventListener("click", function () { showAdminSection("integrate"); });
+  monitorRefresh.addEventListener("click", function () { loadMonitor(); });
+  monitorWindow.addEventListener("change", function () { loadMonitor(); });
+  integrateCopy.addEventListener("click", copyIntegrateSnippet);
   alertsBell.addEventListener("click", function () {
     if (!profile || !profile.user || profile.user.role !== "admin") { return; }
+    adminSection = "alerts";
     showView("admin");
-    showAdminSection("alerts");
   });
 
   function renderReviewList(items, reset) {
@@ -5392,51 +5453,376 @@ _WORKSPACE_JS = """
     }
   }
 
-  function settingsSnippets() {
-    // Snippets are display-only and are built from this page's origin.  The
-    // credential is always the literal placeholder, never a configured key.
-    var origin = "";
-    try { origin = String(window.location.origin || ""); } catch (error) { origin = ""; }
-    var header = ["Author", "ization: ", "Bearer", " "].join("");
-    var curl = "curl -sS " + origin + "/chat \\\n" +
-      '  -H "' + header + '$NASI_LEMAK_API_KEY" \\\n' +
-      '  -H "Content-Type: application/json" \\\n' +
-      "  -d '{\\\"prompt\\\":\\\"Hello\\\"}'";
-    var chat = 'NASI_GATEWAY_TOKEN="$NASI_LEMAK_API_KEY" nasi-chat' +
-      ' --base-url ' + origin + ' --prompt "Hello"';
-    if (settingsCurl) {
-      settingsCurl.textContent = curl;
-      settingsCurl.value = curl;
-    }
-    if (settingsChat) {
-      settingsChat.textContent = chat;
-      settingsChat.value = chat;
+  var MONITOR_REFRESH_MS = 30000;
+  var MONITOR_CODE_TEXT = {
+    POLICY_BLOCK: "Blocked by a guard or policy",
+    INPUT_LIMIT: "Request over a size limit",
+    UNAVAILABLE: "A safety control was unavailable"
+  };
+
+  function clearMonitorTimer() {
+    if (monitorTimer !== null) {
+      clearTimeout(monitorTimer);
+      monitorTimer = null;
     }
   }
 
-  function copySettingsSnippet(field, label) {
-    var text = field && typeof field.value === "string" ? field.value : "";
+  function appendMonitorMetric(label, value) {
+    var item = document.createElement("div");
+    var term = document.createElement("dt");
+    var detail = document.createElement("dd");
+    term.textContent = label;
+    detail.textContent = value;
+    item.appendChild(term);
+    item.appendChild(detail);
+    monitorMetrics.appendChild(item);
+  }
+
+  function monitorSeconds(ms) {
+    if (typeof ms !== "number") { return "No data"; }
+    return (ms / 1000).toFixed(1) + " s";
+  }
+
+  function renderMonitorStatus(health, data) {
+    var traffic = isObject(data.traffic) ? data.traffic : {};
+    var ready = isObject(health) && health.status === "ready";
+    var guarded = isObject(health) && health.guards_active === true;
+    var unread = isObject(data.alerts) ? data.alerts.unread : 0;
+    var title = "Operating normally";
+    var detail = "Guards are active and every required control is ready.";
+    var state = "ok";
+    if (!ready || !guarded) {
+      state = "bad";
+      title = "Needs attention now";
+      detail = !isObject(health)
+        ? "The readiness check did not respond. Do not rely on guard protection."
+        : "Mode " + settingsText(health.mode) + ", guards " + (guarded ? "active" : "not active") +
+          ". Chat requests fail closed until this is fixed.";
+    } else if (traffic.available !== true) {
+      state = "warn";
+      title = "Guards are ready, traffic data is missing";
+      detail = "The audit reader is unavailable, so traffic below cannot be shown.";
+    } else if (traffic.failed > 0 || unread > 0) {
+      state = "warn";
+      title = "Guards are ready, review needed";
+      detail = traffic.failed + " failed in this period · " + unread + " unread block alerts.";
+    }
+    clearNode(monitorStatus);
+    monitorStatus.setAttribute("data-state", state);
+    var strong = document.createElement("strong");
+    strong.textContent = title;
+    var text = document.createElement("p");
+    text.textContent = detail;
+    monitorStatus.appendChild(strong);
+    monitorStatus.appendChild(text);
+  }
+
+  function renderMonitorChart(traffic) {
+    clearNode(monitorChart);
+    var buckets = Array.isArray(traffic.buckets) ? traffic.buckets : [];
+    var peak = 0;
+    var index;
+    for (index = 0; index < buckets.length; index += 1) {
+      peak = Math.max(peak, buckets[index].allowed + buckets[index].blocked + buckets[index].failed);
+    }
+    for (index = 0; index < buckets.length; index += 1) {
+      var bucket = buckets[index];
+      var bar = document.createElement("div");
+      bar.className = "monitor-bar";
+      bar.title = formatDate(bucket.start) + ": " + bucket.allowed + " allowed, " +
+        bucket.blocked + " blocked, " + bucket.failed + " failed";
+      var kinds = ["failed", "blocked", "allowed"];
+      for (var kind = 0; kind < kinds.length; kind += 1) {
+        var count = bucket[kinds[kind]];
+        if (count > 0 && peak > 0) {
+          var part = document.createElement("span");
+          part.className = "is-" + kinds[kind];
+          if (part.style) { part.style.height = (100 * count / peak) + "%"; }
+          bar.appendChild(part);
+        }
+      }
+      monitorChart.appendChild(bar);
+    }
+    monitorChart.setAttribute(
+      "aria-label",
+      traffic.available === true
+        ? traffic.total + " requests: " + traffic.allowed + " allowed, " +
+          traffic.blocked + " blocked, " + traffic.failed + " failed"
+        : "Traffic data is unavailable"
+    );
+  }
+
+  function renderMonitorCodes(traffic) {
+    clearNode(monitorCodes);
+    var codes = Array.isArray(traffic.codes) ? traffic.codes : [];
+    if (!codes.length) {
+      var empty = document.createElement("p");
+      empty.className = "admin-table-empty";
+      empty.textContent = traffic.available === true
+        ? "Nothing was stopped in this period."
+        : "Traffic data is unavailable.";
+      monitorCodes.appendChild(empty);
+      return;
+    }
+    renderTableHead(monitorCodes, ["Reason", "Requests"], 2);
+    for (var index = 0; index < codes.length; index += 1) {
+      var row = document.createElement("div");
+      row.className = "admin-table-row cols-2";
+      row.appendChild(tableCell(MONITOR_CODE_TEXT[codes[index].code] || codes[index].code, "", "Reason"));
+      row.appendChild(tableCell(String(codes[index].count), "", "Requests"));
+      monitorCodes.appendChild(row);
+    }
+  }
+
+  function renderMonitorBlocks(items) {
+    clearNode(monitorBlocks);
+    var blocks = Array.isArray(items) ? items : [];
+    if (!blocks.length) {
+      var empty = document.createElement("p");
+      empty.className = "admin-table-empty";
+      empty.textContent = "No workspace blocks recorded.";
+      monitorBlocks.appendChild(empty);
+      return;
+    }
+    renderTableHead(monitorBlocks, ["When and who", "Why"], 2);
+    for (var index = 0; index < blocks.length; index += 1) {
+      var item = blocks[index];
+      var row = document.createElement("div");
+      row.className = "admin-table-row cols-2";
+      row.appendChild(tableCell(
+        formatDate(item.created_at) + " · @" + item.username + " · " + item.department_name,
+        "cell-muted",
+        "When and who"
+      ));
+      row.appendChild(tableCell(item.stage + ": " + item.reason_text, "", "Why"));
+      monitorBlocks.appendChild(row);
+    }
+  }
+
+  function renderMonitor(health, data) {
+    var traffic = isObject(data.traffic) ? data.traffic : {};
+    var available = traffic.available === true;
+    var latency = isObject(traffic.latency_ms) ? traffic.latency_ms : {};
+    var rate = available && traffic.total > 0
+      ? (100 * traffic.blocked / traffic.total).toFixed(1) + "%"
+      : "No data";
+    renderMonitorStatus(health, data);
+    clearNode(monitorMetrics);
+    appendMonitorMetric("Requests", available ? String(traffic.total) : "No data");
+    appendMonitorMetric("Allowed", available ? String(traffic.allowed) : "No data");
+    appendMonitorMetric("Blocked", available ? String(traffic.blocked) : "No data");
+    appendMonitorMetric("Failed", available ? String(traffic.failed) : "No data");
+    appendMonitorMetric("Block rate", rate);
+    appendMonitorMetric("Typical reply", monitorSeconds(latency.p50));
+    appendMonitorMetric("Slowest 5%", monitorSeconds(latency.p95));
+    renderMonitorChart(traffic);
+    renderMonitorCodes(traffic);
+    renderMonitorBlocks(data.recent_blocks);
+    setStatus(
+      monitorState,
+      traffic.truncated === true
+        ? "Showing the latest events only: this period has more than the monitor reads."
+        : "Updated " + formatDate(data.generated_at) + ". Refreshes every 30 seconds."
+    );
+  }
+
+  function loadMonitor() {
+    if (!signedIn) { return Promise.resolve(false); }
+    clearMonitorTimer();
+    var epoch = sessionEpoch;
+    monitorSeq += 1;
+    var seq = monitorSeq;
+    return Promise.all([
+      api("/workspace/api/admin/monitor?hours=" + encodeURIComponent(monitorWindow.value || "24")),
+      api("/health/ready", { independent: true })
+    ]).then(function (results) {
+      if (epoch !== sessionEpoch || seq !== monitorSeq) { return false; }
+      if (adminGuard(results[0], monitorState)) { return false; }
+      if (!results[0].ok || !isObject(results[0].data)) {
+        setStatus(monitorState, serverMessage(results[0], timeoutOrNetwork(results[0])), "error");
+        return false;
+      }
+      // /health/ready answers 503 with its JSON body when something is not ready.
+      renderMonitor(isObject(results[1].data) ? results[1].data : null, results[0].data);
+      if (adminSection === "monitor") {
+        monitorTimer = setTimeout(function () {
+          monitorTimer = null;
+          if (adminSection === "monitor") { queueAdminList(function () { return loadMonitor(); }); }
+        }, MONITOR_REFRESH_MS);
+      }
+      return true;
+    });
+  }
+
+  function integrateOrigin() {
+    try { return String(window.location.origin || ""); } catch (error) { return ""; }
+  }
+
+  function integrateModel() {
+    return adminSettings && typeof adminSettings.model === "string" && adminSettings.model
+      ? adminSettings.model
+      : "MODEL_NAME";
+  }
+
+  function integrateExamples() {
+    var origin = integrateOrigin();
+    var model = integrateModel();
+    var NL = String.fromCharCode(10);
+    var CONT = " " + String.fromCharCode(92) + NL;
+    var header = ["Author", "ization: ", "Bearer", " "].join("");
+    var print = ["con", "sole", ".log"].join("");
+    return [
+      {
+        id: "curl",
+        label: "curl",
+        help: "Fastest way to try it from a terminal. Returns the decision and safety labels.",
+        code: [
+          "curl -sS " + origin + "/chat" + CONT +
+          "  -H \\"" + header + "$NASI_LEMAK_API_KEY\\"" + CONT +
+          "  -H \\"Content-Type: application/json\\"" + CONT +
+          "  -d '{\\"prompt\\":\\"Say hello in one sentence.\\"}'"
+        ]
+      },
+      {
+        id: "python",
+        label: "Python",
+        help: "For applications using the OpenAI Python library. Only the base URL, key and model change.",
+        code: [
+          "import os",
+          "from openai import OpenAI, PermissionDeniedError",
+          "",
+          "client = OpenAI(",
+          "    base_url=\\"" + origin + "/v1\\",",
+          "    api_key=os.environ[\\"NASI_LEMAK_API_KEY\\"],",
+          "    timeout=90,",
+          ")",
+          "try:",
+          "    reply = client.chat.completions.create(",
+          "        model=\\"" + model + "\\",",
+          "        messages=[{\\"role\\": \\"user\\", \\"content\\": \\"Say hello in one sentence.\\"}],",
+          "    )",
+          "    print(reply.choices[0].message.content)",
+          "except PermissionDeniedError:",
+          "    print(\\"Blocked by the guardrail\\")"
+        ]
+      },
+      {
+        id: "javascript",
+        label: "JavaScript",
+        help: "For Node.js applications using the OpenAI library.",
+        code: [
+          "import OpenAI from \\"openai\\";",
+          "",
+          "const client = new OpenAI({",
+          "  baseURL: \\"" + origin + "/v1\\",",
+          "  apiKey: process.env.NASI_LEMAK_API_KEY,",
+          "  timeout: 90000,",
+          "});",
+          "",
+          "try {",
+          "  const reply = await client.chat.completions.create({",
+          "    model: \\"" + model + "\\",",
+          "    messages: [{ role: \\"user\\", content: \\"Say hello in one sentence.\\" }],",
+          "  });",
+          "  " + print + "(reply.choices[0].message.content);",
+          "} catch (error) {",
+          "  if (error.status !== 403) throw error;",
+          "  " + print + "(\\"Blocked by the guardrail\\");",
+          "}"
+        ]
+      },
+      {
+        id: "harness",
+        label: "Test harness",
+        help: "For test and evaluation harnesses that accept an OpenAI-compatible endpoint. Run one request at a time, and count a 403 as a block.",
+        code: [
+          "export OPENAI_BASE_URL=\\"" + origin + "/v1\\"",
+          "export OPENAI_API_KEY=\\"$NASI_LEMAK_API_KEY\\"",
+          "export OPENAI_MODEL=\\"" + model + "\\"",
+          "",
+          "# Harness settings",
+          "# concurrency: 1",
+          "# request timeout: 90 seconds",
+          "# streaming: optional; the reply arrives whole, after the output scan",
+          "# model list: not available; set the model name above by hand"
+        ]
+      },
+      {
+        id: "nasi-chat",
+        label: "nasi-chat",
+        help: "The gateway's own command-line client, installed with the nasi-lemak package.",
+        code: [
+          "NASI_GATEWAY_TOKEN=\\"$NASI_LEMAK_API_KEY\\" nasi-chat" + CONT +
+          "  --base-url " + origin + CONT +
+          "  --prompt \\"Say hello in one sentence.\\""
+        ]
+      },
+      {
+        id: "smoke-test",
+        label: "Smoke test",
+        help: "Runs a normal, a PII and an injection prompt from a repository checkout, and reports pass or fail.",
+        code: [
+          "TEST_GATEWAY_TOKEN=\\"$NASI_LEMAK_API_KEY\\" python scripts/test_gateway.py" + CONT +
+          "  --base-url " + origin
+        ]
+      }
+    ];
+  }
+
+  function appendIntegrateFact(label, value) {
+    var row = document.createElement("div");
+    row.className = "admin-table-row cols-2";
+    row.appendChild(tableCell(label, "cell-muted", "Setting"));
+    row.appendChild(tableCell(value, "", "Value"));
+    integrateFacts.appendChild(row);
+  }
+
+  function renderIntegrate() {
+    var examples = integrateExamples();
+    var chosen = examples[0];
+    clearNode(integrateOptions);
+    for (var index = 0; index < examples.length; index += 1) {
+      (function (example) {
+        var button = document.createElement("button");
+        button.type = "button";
+        button.className = "ghost";
+        button.textContent = example.label;
+        button.setAttribute("aria-pressed", example.id === integrateChoice ? "true" : "false");
+        button.addEventListener("click", function () {
+          integrateChoice = example.id;
+          renderIntegrate();
+        });
+        integrateOptions.appendChild(button);
+        if (example.id === integrateChoice) { chosen = example; }
+      }(examples[index]));
+    }
+    integrateHelp.textContent = chosen.help;
+    integrateCode.textContent = chosen.code.join(String.fromCharCode(10));
+
+    var limits = adminSettings && isObject(adminSettings.chat_limits) ? adminSettings.chat_limits : {};
+    clearNode(integrateFacts);
+    renderTableHead(integrateFacts, ["Setting", "Value"], 2);
+    appendIntegrateFact("OpenAI-compatible base URL", integrateOrigin() + "/v1");
+    appendIntegrateFact("Simple test route", integrateOrigin() + "/chat");
+    appendIntegrateFact("Model", integrateModel());
+    appendIntegrateFact("Maximum reply tokens", settingsText(limits.max_reply_tokens));
+    appendIntegrateFact("Context budget", settingsText(limits.context_budget));
+    appendIntegrateFact("Accepted fields", "model, messages, max_tokens, stream, temperature, top_p");
+  }
+
+  function copyIntegrateSnippet() {
+    var text = integrateCode.textContent || "";
     if (!text) { return; }
-    function done() { setStatus(settingsState, label + " copied.", "ok"); }
+    function done() { setStatus(integrateState, "Example copied.", "ok"); }
     function failed() {
-      setStatus(settingsState, "Copy failed; select the text and copy it manually.", "error");
+      setStatus(integrateState, "Copy failed; select the text and copy it manually.", "error");
     }
     if (typeof navigator !== "undefined" && navigator.clipboard &&
         typeof navigator.clipboard.writeText === "function") {
       navigator.clipboard.writeText(text).then(done, failed);
       return;
     }
-    try {
-      field.focus();
-      if (typeof field.select === "function") { field.select(); }
-      if (typeof document.execCommand === "function" && document.execCommand("copy")) {
-        done();
-      } else {
-        failed();
-      }
-    } catch (error) {
-      failed();
-    }
+    failed();
   }
 
   function loadAdminSettings(reset) {
@@ -5446,9 +5832,6 @@ _WORKSPACE_JS = """
     adminSettingsSeq += 1;
     var seq = adminSettingsSeq;
     adminSettingsLoading = true;
-    // The snippets depend only on the page origin, so they stay available even
-    // if the read-only settings request fails.
-    settingsSnippets();
     if (reset) {
       clearNode(settingsSummary);
       setStatus(settingsState, "Loading settings…");
@@ -5468,7 +5851,6 @@ _WORKSPACE_JS = """
       adminSettings = result.data;
       adminSettingsLoaded = true;
       renderAdminSettings(adminSettings);
-      settingsSnippets();
       setStatus(settingsState, "");
       return true;
     });
@@ -6128,8 +6510,16 @@ _WORKSPACE_JS = """
     clearNode(alertList);
     clearNode(alertDetail);
     clearNode(settingsSummary);
-    if (settingsCurl) { settingsCurl.value = ""; settingsCurl.textContent = ""; }
-    if (settingsChat) { settingsChat.value = ""; settingsChat.textContent = ""; }
+    clearMonitorTimer();
+    monitorSeq += 1;
+    clearNode(monitorStatus);
+    clearNode(monitorMetrics);
+    clearNode(monitorChart);
+    clearNode(monitorCodes);
+    clearNode(monitorBlocks);
+    setStatus(monitorState, "");
+    clearNode(integrateCode);
+    setStatus(integrateState, "");
     setStatus(settingsState, "");
     alertDetail.hidden = true;
     alertMore.hidden = true;
@@ -6729,7 +7119,9 @@ WORKSPACE_HTML = """<!doctype html>
 <h2>Account administration</h2>
 <p class="review-notice">Administrator tools for this workspace. The server verifies the administrator role on every request. Review grants allow reading original confidential chat text, and every access is recorded in the access log.</p>
 <div class="admin-subtabs" role="tablist" aria-label="Administration sections">
-<button id="admin-tab-users" class="admin-subtab" type="button" role="tab" aria-controls="admin-users-panel" aria-selected="true">Users</button>
+<button id="admin-tab-monitor" class="admin-subtab" type="button" role="tab" aria-controls="admin-monitor-panel" aria-selected="true">Monitor</button>
+<button id="admin-tab-integrate" class="admin-subtab" type="button" role="tab" aria-controls="admin-integrate-panel" aria-selected="false">Integrate</button>
+<button id="admin-tab-users" class="admin-subtab" type="button" role="tab" aria-controls="admin-users-panel" aria-selected="false">Users</button>
 <button id="admin-tab-departments" class="admin-subtab" type="button" role="tab" aria-controls="admin-departments-panel" aria-selected="false">Departments</button>
 <button id="admin-tab-policies" class="admin-subtab" type="button" role="tab" aria-controls="admin-policies-panel" aria-selected="false">Policies</button>
 <button id="admin-tab-alerts" class="admin-subtab" type="button" role="tab" aria-controls="admin-alerts-panel" aria-selected="false">Alerts</button>
@@ -6738,7 +7130,54 @@ WORKSPACE_HTML = """<!doctype html>
 </div>
 <p id="admin-status" class="chat-status" role="status" aria-live="polite"></p>
 
-<section id="admin-users-panel" class="admin-panel-section" role="tabpanel" aria-labelledby="admin-tab-users">
+<section id="admin-monitor-panel" class="admin-panel-section" role="tabpanel" aria-labelledby="admin-tab-monitor">
+<div class="monitor-head">
+<h3 id="monitor-heading">Monitor</h3>
+<label>Period
+<select id="monitor-window">
+<option value="1">Last hour</option>
+<option value="24" selected>Last 24 hours</option>
+<option value="168">Last 7 days</option>
+</select>
+<button id="monitor-refresh" class="ghost" type="button">Refresh</button>
+</label>
+</div>
+<p id="admin-monitor-state" class="admin-note" role="status" aria-live="polite"></p>
+<div id="monitor-status" class="monitor-status"></div>
+<dl id="monitor-metrics" class="monitor-metrics" aria-label="Traffic in this period"></dl>
+<div>
+<h4>Requests over time</h4>
+<div id="monitor-chart" class="monitor-chart" role="img"></div>
+<p class="monitor-legend"><span class="is-allowed">Allowed</span><span class="is-blocked">Blocked</span><span class="is-failed">Failed</span></p>
+</div>
+<div class="monitor-columns">
+<div><h4>Why requests stopped</h4><div id="monitor-codes" class="admin-table" aria-label="Stopped requests by reason"></div></div>
+<div><h4>Latest workspace blocks</h4><div id="monitor-blocks" class="admin-table" aria-label="Latest workspace blocks"></div></div>
+</div>
+</section>
+
+<section id="admin-integrate-panel" class="admin-panel-section" role="tabpanel" aria-labelledby="admin-tab-integrate" hidden>
+<div class="admin-section-head"><h3 id="integrate-heading">Integrate</h3></div>
+<p class="admin-note">Connect an application, script or test harness to this gateway. Every option runs the full guard pipeline. Examples use the placeholder <code>$NASI_LEMAK_API_KEY</code>; this page never shows a real key.</p>
+<p id="admin-integrate-state" class="admin-note" role="status" aria-live="polite"></p>
+<div id="integrate-options" class="integrate-options" role="group" aria-label="Integration options"></div>
+<p id="integrate-help" class="admin-note"></p>
+<pre id="integrate-code" class="integrate-code" tabindex="0" aria-label="Example code"></pre>
+<div><button id="integrate-copy" class="ghost" type="button">Copy example</button></div>
+<h4>Connection details</h4>
+<div id="integrate-facts" class="admin-table" aria-label="Connection details"></div>
+<h4>Results your code must handle</h4>
+<div class="admin-table" aria-label="Result codes">
+<div class="admin-table-head cols-2"><div>Status</div><div>Meaning</div></div>
+<div class="admin-table-row cols-2"><div>200</div><div>Allowed. The reply was checked before release.</div></div>
+<div class="admin-table-row cols-2"><div>403</div><div>Blocked by a guard or policy. Treat it as a result, not a crash.</div></div>
+<div class="admin-table-row cols-2"><div>400 / 413</div><div>Unsupported field, or the request is over a limit.</div></div>
+<div class="admin-table-row cols-2"><div>503</div><div>A required safety control is unavailable. Nothing was allowed; do not treat it as a pass.</div></div>
+</div>
+<p class="admin-note">Coding agents such as OpenCode, Claude Code and Codex are not supported yet: they send tool definitions, which the gateway rejects, and their requests exceed the limits.</p>
+</section>
+
+<section id="admin-users-panel" class="admin-panel-section" role="tabpanel" aria-labelledby="admin-tab-users" hidden>
 <div class="admin-section-head">
 <h3 id="users-heading">User accounts</h3>
 <button id="new-user-toggle" type="button">New user</button>
@@ -6995,18 +7434,6 @@ WORKSPACE_HTML = """<!doctype html>
 <p class="admin-note">Read-only. These values are resolved at server startup; this tab cannot change the model, policy, guards or limits.</p>
 <p id="admin-settings-state" class="admin-note" role="status" aria-live="polite"></p>
 <div id="settings-summary" class="admin-table" aria-label="Effective settings"></div>
-<h3>Chat API snippets</h3>
-<p class="admin-note">The snippets use the literal placeholder <code>$NASI_LEMAK_API_KEY</code>. Replace it with your own key; this page never shows or stores a credential.</p>
-<div class="settings-snippet">
-<label for="settings-curl">curl</label>
-<textarea id="settings-curl" class="settings-code" readonly rows="5" spellcheck="false"></textarea>
-<button id="settings-copy-curl" class="ghost" type="button">Copy curl</button>
-</div>
-<div class="settings-snippet">
-<label for="settings-nasi-chat">nasi-chat</label>
-<textarea id="settings-nasi-chat" class="settings-code" readonly rows="3" spellcheck="false"></textarea>
-<button id="settings-copy-chat" class="ghost" type="button">Copy nasi-chat</button>
-</div>
 </section>
 </div>
 </div>

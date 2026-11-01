@@ -21,6 +21,9 @@ from fastapi.testclient import TestClient
 from nasi_lemak.audit import SqliteAuditStore
 from nasi_lemak.gateway import Gateway, Policy
 from nasi_lemak.operator import (
+    MONITOR_BUCKETS,
+    MONITOR_MAX_ROWS,
+    summarize_events,
     EventFilters,
     EventPage,
     OperatorQueryError,
@@ -812,6 +815,89 @@ class ChatRegressionTests(OperatorTestBase):
         self.assertEqual(self.client.post("/admin/events").status_code, 405)
         self.assertEqual(self.client.get("/admin/").status_code, 404)
         self.assertEqual(self.client.get("/admin/events/").status_code, 404)
+
+
+class MonitorSummaryTests(unittest.TestCase):
+    def _rows(self) -> list[dict]:
+        def row(request_id, event_type, timestamp, decision, code=None):
+            return {
+                "request_id": request_id,
+                "event_type": event_type,
+                "timestamp": timestamp,
+                "decision": decision,
+                "error_code": code,
+            }
+
+        return [
+            row("a", "request_started", 100.0, "pending"),
+            row("a", "request_completed", 110.0, "allowed"),
+            row("b", "request_started", 200.0, "pending"),
+            row("b", "request_completed", 220.0, "allowed"),
+            row("c", "request_started", 300.0, "pending"),
+            row("c", "request_blocked", 301.0, "blocked", "POLICY_BLOCK"),
+            row("d", "request_started", 400.0, "pending"),
+            row("d", "request_failed", 402.0, "failed", "UNAVAILABLE"),
+            row("e", "request_started", 500.0, "pending"),
+        ]
+
+    def test_counts_requests_by_their_terminal_row(self) -> None:
+        summary = summarize_events(self._rows(), since=0.0, now=2400.0)
+        self.assertTrue(summary["available"])
+        self.assertEqual(summary["total"], 4)
+        self.assertEqual(
+            (summary["allowed"], summary["blocked"], summary["failed"]), (2, 1, 1)
+        )
+        self.assertEqual(summary["unfinished"], 1)
+        self.assertEqual(
+            {item["code"]: item["count"] for item in summary["codes"]},
+            {"POLICY_BLOCK": 1, "UNAVAILABLE": 1},
+        )
+
+    def test_latency_uses_allowed_requests_only(self) -> None:
+        latency = summarize_events(self._rows(), since=0.0, now=2400.0)["latency_ms"]
+        self.assertEqual(latency, {"p50": 10000, "p95": 20000, "samples": 2})
+
+    def test_buckets_cover_the_window_and_hold_every_request(self) -> None:
+        buckets = summarize_events(self._rows(), since=0.0, now=2400.0)["buckets"]
+        self.assertEqual(len(buckets), MONITOR_BUCKETS)
+        self.assertEqual(
+            sum(b["allowed"] + b["blocked"] + b["failed"] for b in buckets), 4
+        )
+        self.assertEqual(buckets[2]["allowed"], 1)
+        self.assertEqual(buckets[3]["blocked"], 1)
+
+    def test_an_empty_window_has_no_latency(self) -> None:
+        summary = summarize_events([], since=0.0, now=2400.0)
+        self.assertEqual(summary["total"], 0)
+        self.assertIsNone(summary["latency_ms"]["p50"])
+
+    def test_more_rows_than_the_cap_are_flagged(self) -> None:
+        rows = self._rows() * (MONITOR_MAX_ROWS // 9 + 1)
+        self.assertTrue(summarize_events(rows, since=0.0, now=2400.0)["truncated"])
+
+    def test_sqlite_reader_returns_only_this_app_and_window(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            path = Path(tmp) / "audit.sqlite3"
+            SqliteAuditStore(path)
+            with closing(sqlite3.connect(path)) as conn, conn:
+                for request_id, timestamp, app_id in (
+                    ("new", 500.0, "app"),
+                    ("old", 50.0, "app"),
+                    ("other", 500.0, "other-app"),
+                ):
+                    conn.execute(
+                        "INSERT INTO events (request_id, event_type, timestamp, app_id,"
+                        " model, policy_version, policy_digest, decision, error_code)"
+                        " VALUES (?, 'request_completed', ?, ?, 'm', 'v', 'd',"
+                        " 'allowed', NULL)",
+                        (request_id, timestamp, app_id),
+                    )
+            rows = SqliteAuditReader(path).fetch_window("app", 100.0)
+        self.assertEqual([row["request_id"] for row in rows], ["new"])
+        self.assertEqual(
+            set(rows[0]),
+            {"request_id", "event_type", "timestamp", "decision", "error_code"},
+        )
 
 
 if __name__ == "__main__":

@@ -52,6 +52,7 @@ from .diagnostics import BLOCK_PAYLOAD_REJECTED, SafeDiagnostics
 from .gateway import Gateway, serialize_messages
 from .generation import conservative_byte_budget
 from .limits import ChatLimits
+from .operator import MONITOR_WINDOW_HOURS, summarize_events
 from .qwen3guard import FRAMING_VERSION
 from .scan_context import ScanContext
 from .workspace_store import (
@@ -1326,6 +1327,67 @@ def register_workspace_routes(app: FastAPI, runtime: WorkspaceRuntime) -> None:
             "operational": getattr(state, "operational", None),
         }
         return _ok(payload)
+
+    @app.get("/workspace/api/admin/monitor")
+    async def admin_monitor(request: Request):
+        guard = _request_guard(request, runtime)
+        if guard is not None:
+            return guard
+        user, _source, error = await admin_principal(request)
+        if error is not None:
+            return error
+        params = request.query_params.multi_items()
+        try:
+            hours = int(dict(params).get("hours", "24"))
+        except ValueError:
+            return _ws_error(request, "INVALID_REQUEST", 400)
+        if (
+            len(params) != len(dict(params))
+            or set(dict(params)) - {"hours"}
+            or hours not in MONITOR_WINDOW_HOURS
+        ):
+            return _ws_error(request, "INVALID_REQUEST", 400)
+
+        state = request.app.state
+        now = time.time()
+        since = now - hours * 3600.0
+        operator = getattr(state, "operator", None)
+        reader = getattr(operator, "reader", None)
+        traffic: dict[str, Any] = {"available": False}
+        if callable(getattr(reader, "fetch_window", None)):
+            # The rest of the screen stays useful when the audit reader is
+            # down, so a failed read is reported in the payload, not as an error.
+            try:
+                rows = await _db_call(app, reader.fetch_window, state.gateway.app_id, since)
+                traffic = summarize_events(rows, since=since, now=now)
+            except Exception:
+                traffic = {"available": False}
+        try:
+            alerts = await _db_call(app, runtime.store.alert_summary, user["id"])
+            recent = await _db_call(
+                app, runtime.store.list_block_alerts, user["id"], limit=8
+            )
+        except Exception as exc:
+            return admin_body_error(request, exc)
+        return _ok(
+            {
+                "hours": hours,
+                "generated_at": now,
+                "traffic": traffic,
+                "alerts": alerts,
+                "recent_blocks": [
+                    {
+                        "created_at": item["created_at"],
+                        "stage": item["stage"],
+                        "reason_text": item["reason_text"],
+                        "username": item["username"],
+                        "department_name": item["department_name"],
+                    }
+                    for item in recent["items"]
+                ],
+                "diagnostics": runtime.diagnostics.snapshot(),
+            }
+        )
 
     # -- conversations ---------------------------------------------------
     @app.get("/workspace/api/conversations")

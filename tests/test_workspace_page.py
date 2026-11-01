@@ -200,7 +200,7 @@ class WorkspacePageHTTPTests(WorkspaceHTTPBase):
                 f'id="{table_id}" class="admin-table admin-table-list"', html
             )
 
-    def test_admin_settings_tab_is_read_only_and_uses_the_placeholder(self) -> None:
+    def test_admin_settings_tab_is_read_only(self) -> None:
         html = self._page().text
         self.assertRegex(
             html,
@@ -213,19 +213,43 @@ class WorkspacePageHTTPTests(WorkspaceHTTPBase):
             r'<section id="admin-settings-panel"[^>]*role="tabpanel"[^>]*'
             r'aria-labelledby="admin-tab-settings"[^>]*hidden',
         )
-        self.assertIn('id="settings-copy-curl"', html)
-        self.assertIn('id="settings-copy-chat"', html)
-        # The tab is read-only: no form and no mutation control of its own.
         panel = html.split('id="admin-settings-panel"', 1)[1].split("</section>", 1)[0]
         self.assertNotIn("<form", panel)
         self.assertNotIn("<input", panel)
         self.assertNotIn('method="POST"', panel)
-        # Snippets are built in the browser from the current origin and carry
-        # only the literal placeholder, never a configured credential.
-        self.assertIn("window.location.origin", html)
-        self.assertIn("$NASI_LEMAK_API_KEY", html)
-        self.assertIn("NASI_GATEWAY_TOKEN", html)
-        self.assertIn("--base-url", html)
+
+    def test_monitor_is_the_first_admin_tab(self) -> None:
+        html = self._page().text
+        self.assertRegex(
+            html,
+            r'<div class="admin-subtabs"[^>]*>\s*<button id="admin-tab-monitor"[^>]*'
+            r'aria-selected="true"[^>]*>Monitor</button>',
+        )
+        self.assertRegex(
+            html,
+            r'<section id="admin-monitor-panel"[^>]*'
+            r'aria-labelledby="admin-tab-monitor">',
+        )
+        self.assertRegex(html, r'<section id="admin-users-panel"[^>]*hidden>')
+
+    def test_integrate_tab_uses_only_the_key_placeholder(self) -> None:
+        html = self._page().text
+        self.assertRegex(
+            html,
+            r'<section id="admin-integrate-panel"[^>]*role="tabpanel"[^>]*hidden',
+        )
+        panel = html.split('id="admin-integrate-panel"', 1)[1].split("</section>", 1)[0]
+        self.assertNotIn("<form", panel)
+        self.assertNotIn("<input", panel)
+        for text in (
+            "window.location.origin",
+            "$NASI_LEMAK_API_KEY",
+            "NASI_GATEWAY_TOKEN",
+            "TEST_GATEWAY_TOKEN",
+            "--base-url",
+            "OPENAI_BASE_URL",
+        ):
+            self.assertIn(text, html)
         for secret in (self.key, self.db_path, LEGACY_KEY, PASSWORD):
             self.assertNotIn(secret, html)
 

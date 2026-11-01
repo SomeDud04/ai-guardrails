@@ -1321,6 +1321,54 @@ async function scenarioStaleLogin() {
     "stale login must not start a new authenticated session");
 }
 
+const MONITOR_TRAFFIC = {
+  available: true,
+  truncated: false,
+  total: 10,
+  allowed: 7,
+  blocked: 2,
+  failed: 1,
+  unfinished: 0,
+  codes: [{ code: "POLICY_BLOCK", count: 2 }, { code: "UNAVAILABLE", count: 1 }],
+  latency_ms: { p50: 15000, p95: 21000, samples: 7 },
+  buckets: [{ start: 1700000000, allowed: 7, blocked: 2, failed: 1 }],
+};
+
+async function respondMonitor(app) {
+  const call = app.lastMatching("/workspace/api/admin/monitor?hours=24");
+  assert(call, "the monitor must load when administration opens");
+  assert(call.options.method === "GET", "the monitor must be a read-only GET");
+  const health = app.lastMatching("/health/ready");
+  call.respond(
+    {
+      hours: 24,
+      generated_at: 1700000000,
+      traffic: MONITOR_TRAFFIC,
+      alerts: { unread: 1, total: 2, input: 2, output: 0 },
+      recent_blocks: [
+        {
+          created_at: 1700000000,
+          stage: "input",
+          reason_text: "Input classified as unsafe",
+          username: "alice",
+          department_name: "Accounting",
+        },
+      ],
+      diagnostics: {},
+    },
+    200
+  );
+  health.respond({ status: "ready", mode: "guarded", guards_active: true }, 200);
+  await settle();
+}
+
+async function openAdminUsers(app) {
+  app.elementFor("tab-admin").dispatch("click");
+  await settle();
+  await respondMonitor(app);
+  app.elementFor("admin-tab-users").dispatch("click");
+}
+
 async function scenarioAdmin() {
   const app = createApp({ maxInflight: 2 });
   await start(app);
@@ -1351,6 +1399,23 @@ async function scenarioAdmin() {
   );
 
   app.elementFor("tab-admin").dispatch("click");
+  await settle();
+  await respondMonitor(app);
+  assert(app.elementFor("admin-monitor-panel").hidden === false,
+    "administration must open on the monitor");
+  assert(app.elementFor("monitor-status").textContent.indexOf("review needed") >= 0,
+    "a failed request and an unread alert must ask for review");
+  assert(app.elementFor("monitor-metrics").textContent.indexOf("20.0%") >= 0,
+    "the block rate must come from the traffic counts");
+  assert(app.elementFor("monitor-metrics").textContent.indexOf("15.0 s") >= 0,
+    "typical latency must render in seconds");
+  assert(app.elementFor("monitor-codes").textContent.indexOf("Blocked by a guard or policy") >= 0,
+    "stop reasons must use plain words");
+  assert(app.elementFor("monitor-blocks").textContent.indexOf("@alice") >= 0,
+    "recent blocks must render");
+  assert(app.callsMatching("/workspace/api/admin/users").length === 0,
+    "the monitor must not load account lists");
+  app.elementFor("admin-tab-users").dispatch("click");
   await settle();
   const departments = app.lastMatching("/workspace/api/admin/departments?limit=25");
   assert(departments, "all admin list requests must be bounded");
@@ -1471,19 +1536,32 @@ async function scenarioAdmin() {
       settingsText.indexOf("chat_work_timeout") >= 0,
     "settings values must render as text"
   );
-  const curlSnippet = app.elementFor("settings-curl").value;
-  const chatSnippet = app.elementFor("settings-nasi-chat").value;
+  app.elementFor("admin-tab-integrate").dispatch("click");
+  await settle();
+  assert(app.elementFor("admin-integrate-panel").hidden === false,
+    "opening integrate must show its panel");
+  assert(app.elementFor("admin-settings-panel").hidden === true,
+    "opening integrate must hide settings");
+  const curlSnippet = app.elementFor("integrate-code").textContent;
   assert(curlSnippet.indexOf("https://guardrail.example/chat") >= 0,
-    "the curl snippet must use the page origin");
+    "the curl example must use the page origin");
   assert(curlSnippet.indexOf("Bearer $NASI_LEMAK_API_KEY") >= 0,
-    "the curl snippet must use the literal placeholder");
+    "the curl example must use the literal placeholder");
   assert(curlSnippet.indexOf("Content-Type: application/json") >= 0,
-    "the curl snippet must declare JSON");
-  assert(chatSnippet.indexOf('NASI_GATEWAY_TOKEN="$NASI_LEMAK_API_KEY"') >= 0,
-    "the nasi-chat snippet must use the real token variable and placeholder");
-  assert(chatSnippet.indexOf("--base-url https://guardrail.example") >= 0,
-    "the nasi-chat snippet must use the page origin");
-  assert(chatSnippet.indexOf("--prompt") >= 0, "the nasi-chat snippet must include a prompt");
+    "the curl example must declare JSON");
+  const integrateButtons = app.elementFor("integrate-options").children;
+  assert(integrateButtons.length === 6, "every integration option must be offered");
+  integrateButtons[1].dispatch("click");
+  await settle();
+  const pythonSnippet = app.elementFor("integrate-code").textContent;
+  assert(pythonSnippet.indexOf('base_url="https://guardrail.example/v1"') >= 0,
+    "the Python example must use the OpenAI route");
+  assert(pythonSnippet.indexOf('model="qwen2.5-0.5b-instruct"') >= 0,
+    "the Python example must use the configured model");
+  assert(app.elementFor("integrate-options").children[1].getAttribute("aria-pressed") === "true",
+    "the chosen option must be marked");
+  assert(app.elementFor("integrate-facts").textContent.indexOf("https://guardrail.example/v1") >= 0,
+    "connection details must show the base URL");
   app.elementFor("admin-tab-access").dispatch("click");
   await settle();
   assert(app.elementFor("admin-access-panel").hidden === false,
@@ -1937,7 +2015,7 @@ async function scenarioAdminEnableAndDelete() {
   await settle();
   await settleSummarySurfaces(app);
 
-  app.elementFor("tab-admin").dispatch("click");
+  await openAdminUsers(app);
   await settle();
   app.lastMatching("/workspace/api/admin/departments?limit=25").respond(
     { items: [{ id: "dept-accounting", name: "Accounting", created_at: 1700000000 }], next: null },
@@ -2123,7 +2201,7 @@ async function scenarioAdminOwnRoleChange() {
   app.lastMatching("/workspace/api/conversations?limit=25").respond({ items: [], next: null }, 200);
   await settle();
   await settleSummarySurfaces(app);
-  app.elementFor("tab-admin").dispatch("click");
+  await openAdminUsers(app);
   await settle();
   app.lastMatching("/workspace/api/admin/departments?limit=25").respond(
     { items: [{ id: "dept-accounting", name: "Accounting", created_at: 1700000000 }], next: null },
@@ -2193,7 +2271,7 @@ async function scenarioPolicyPostalMask() {
   await settle();
   await settleSummarySurfaces(app);
 
-  app.elementFor("tab-admin").dispatch("click");
+  await openAdminUsers(app);
   await settle();
   app.lastMatching("/workspace/api/admin/departments?limit=25").respond(
     { items: [{ id: "dept-accounting", name: "Accounting", created_at: 1700000000 }], next: null },
@@ -2401,7 +2479,7 @@ async function scenarioPolicyLimits() {
   await settle();
   await settleSummarySurfaces(app);
 
-  app.elementFor("tab-admin").dispatch("click");
+  await openAdminUsers(app);
   await settle();
   app.lastMatching("/workspace/api/admin/departments?limit=25").respond(
     { items: [{ id: "dept-accounting", name: "Accounting", created_at: 1700000000 }], next: null },
@@ -2651,7 +2729,7 @@ async function scenarioEffectivePolicyPreview() {
   await settle();
   await settleSummarySurfaces(app);
 
-  app.elementFor("tab-admin").dispatch("click");
+  await openAdminUsers(app);
   await settle();
   app.lastMatching("/workspace/api/admin/departments?limit=25").respond(
     { items: [{ id: "dept-accounting", name: "Accounting", created_at: 1700000000 }], next: null },
@@ -3372,7 +3450,7 @@ async function scenarioOwnNavigationFromAdmin() {
   );
   await settle();
 
-  app.elementFor("tab-admin").dispatch("click");
+  await openAdminUsers(app);
   await settle();
   assert(app.elementFor("admin-panel").hidden === false, "admin view must open for an admin");
   app.elementFor("sidebar-toggle").dispatch("click");
@@ -3408,7 +3486,7 @@ async function scenarioOwnNavigationFromAdmin() {
     "created conversation from Admin must stay in Chat");
   assert(app.elementFor("composer").focused >= 1, "opening the created conversation must focus its composer");
 
-  app.elementFor("tab-admin").dispatch("click");
+  await openAdminUsers(app);
   await settle();
   assert(app.elementFor("admin-panel").hidden === false, "admin view must reopen");
   const own = app.elementFor("conversation-list").children.find(
@@ -3434,7 +3512,7 @@ async function scenarioOwnNavigationFromAdmin() {
 
   // A failed selection still switches to Chat so its meaningful error is not
   // hidden behind the Admin panel.
-  app.elementFor("tab-admin").dispatch("click");
+  await openAdminUsers(app);
   await settle();
   const denied = app.elementFor("conversation-list").children.find(
     (child) => child.getAttribute("data-conversation") === "conv-other-admin"
@@ -4883,8 +4961,8 @@ async function scenarioViewUrlsAndHistory() {
   assert(adminApp.elementFor("admin-panel").hidden === false &&
     adminApp.elementFor("chat-panel").hidden === true,
     "a permitted admin URL must open Admin");
-  assert(adminApp.callsMatching("/workspace/api/admin/departments").length >= 1,
-    "a permitted admin URL must load the admin lists");
+  assert(adminApp.callsMatching("/workspace/api/admin/monitor").length >= 1,
+    "a permitted admin URL must load the monitor");
 
   // A direct route reached before sign-in is applied after login, and losing
   // review permission replaces the URL with chat.
