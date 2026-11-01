@@ -24,6 +24,7 @@ from nasi_lemak.workspace_store import (
     Conflict,
     NotFound,
     WorkspaceStorageError,
+    WorkspaceConfigError,
     WorkspaceStore,
     _Cipher,
     _SCHEMA_V4_ALTERS,
@@ -978,6 +979,48 @@ class MigrationTests(GovernanceTestBase):
         stored = migrated.get_policy_profile(admin["id"], profile["id"])
         self.assertEqual(stored["settings"]["limits"], {})
 
+    def test_v4_to_v5_adds_api_key_tables_and_keeps_existing_data(self) -> None:
+        path = Path(self._tmp.name) / "legacy-v4.db"
+        fresh = WorkspaceStore(
+            str(path), encryption_key=self.key, clock=self.clock, migrate=True
+        )
+        admin = fresh.bootstrap_admin(
+            username="v4.admin",
+            password=GOOD_PASSWORD,
+            full_name="V4 Admin",
+            department_name="IT",
+        )
+        profile = fresh.create_policy_profile(admin["id"], "Legacy v4")
+        fresh.close()
+
+        conn = sqlite3.connect(path)
+        try:
+            conn.execute("DROP TABLE ws_api_key_uses")
+            conn.execute("DROP TABLE ws_api_keys")
+            conn.execute(
+                "UPDATE ws_schema_migrations SET version = 4 WHERE version = ?",
+                (SCHEMA_VERSION,),
+            )
+            conn.commit()
+        finally:
+            conn.close()
+
+        with self.assertRaises(WorkspaceConfigError):
+            WorkspaceStore(
+                str(path), encryption_key=self.key, clock=self.clock, migrate=False
+            )
+
+        migrated = WorkspaceStore(
+            str(path), encryption_key=self.key, clock=self.clock, migrate=True
+        )
+        self.assertTrue(migrated.ready())
+        self.assertEqual(self._migration_rows(path), [{"version": SCHEMA_VERSION}])
+        self.assertEqual(
+            migrated.get_policy_profile(admin["id"], profile["id"])["name"], "Legacy v4"
+        )
+        created = migrated.create_api_key(admin["id"], "After migration")
+        self.assertEqual(created["item"]["name"], "After migration")
+
     def test_v3_database_is_not_ready_until_migrated(self) -> None:
         conn = sqlite3.connect(self.path)
         try:
@@ -1029,6 +1072,8 @@ class RoleGrantTests(unittest.TestCase):
             "ws_policy_audit": "GRANT SELECT, INSERT ON TABLE public.ws_policy_audit",
             "ws_block_alerts": "GRANT SELECT, INSERT ON TABLE public.ws_block_alerts",
             "ws_alert_state": "GRANT SELECT, INSERT, UPDATE ON TABLE public.ws_alert_state",
+            "ws_api_keys": "GRANT SELECT, INSERT, UPDATE ON TABLE public.ws_api_keys",
+            "ws_api_key_uses": "GRANT SELECT, INSERT ON TABLE public.ws_api_key_uses",
         }
         for table, grant in expected.items():
             with self.subTest(table=table):
@@ -1038,6 +1083,7 @@ class RoleGrantTests(unittest.TestCase):
             "ws_policy_profile_revisions",
             "ws_policy_audit",
             "ws_block_alerts",
+            "ws_api_key_uses",
         ):
             with self.subTest(invariant=invariant):
                 self.assertNotRegex(

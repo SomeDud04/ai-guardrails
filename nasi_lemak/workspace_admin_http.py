@@ -465,6 +465,57 @@ def register_admin_policy_routes(app: FastAPI, runtime: Any) -> None:
             return _store_error(request, exc)
         return _ok(with_limits(result))
 
+    # -- named API keys ---------------------------------------------------
+    @app.get("/workspace/api/admin/api-keys")
+    async def admin_api_keys(request: Request):
+        actor, _source, error = await admin_context(request)
+        if error is not None:
+            return error
+        try:
+            limit, after = _page_query(request)
+            result = await _db_call(
+                app, runtime.store.list_api_keys, actor["id"], limit=limit, after=after
+            )
+        except Exception as exc:
+            return _store_error(request, exc)
+        return _ok(result)
+
+    @app.post("/workspace/api/admin/api-keys")
+    async def admin_create_api_key(request: Request):
+        actor, source, error = await admin_context(request)
+        if error is not None:
+            return error
+        csrf = secure_mutation(request, source)
+        if csrf is not None:
+            return csrf
+        try:
+            body = await _read_json(request, app)
+            _body_fields(body, {"name"}, {"name"})
+            result = await _db_call(
+                app, runtime.store.create_api_key, actor["id"], body["name"]
+            )
+        except _BodyProblem as exc:
+            return _ws_error(request, "INVALID_REQUEST", exc.status)
+        except Exception as exc:
+            return _store_error(request, exc)
+        return _ok(result, 201)
+
+    @app.post("/workspace/api/admin/api-keys/{key_id}/revoke")
+    async def admin_revoke_api_key(request: Request, key_id: str):
+        actor, source, error = await admin_context(request)
+        if error is not None:
+            return error
+        csrf = secure_mutation(request, source)
+        if csrf is not None:
+            return csrf
+        try:
+            result = await _db_call(
+                app, runtime.store.revoke_api_key, actor["id"], key_id
+            )
+        except Exception as exc:
+            return _store_error(request, exc)
+        return _ok(result)
+
     # -- block alerts -----------------------------------------------------
     @app.get("/workspace/api/admin/alerts/summary")
     async def admin_alert_summary(request: Request):

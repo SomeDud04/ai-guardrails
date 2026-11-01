@@ -387,9 +387,45 @@ behind one VPN or NAT address appear as a single row. For the raw record, includ
 unmatched paths and bytes sent, use `nl-compose logs nginx`; see
 [docs/demo-access.md](demo-access.md).
 
+**API keys** generates a named key for each person or tool, with no shared
+secret to hand around. The key is shown once and only its SHA-256 digest is
+stored, so a lost key is revoked and replaced. Names stay reserved after a key is
+revoked, so a name always means one key. Revoking takes effect on the next
+request, and keys are never deleted. Generating or revoking a key is recorded in
+**Access history**. The shared chat key keeps working alongside named keys, and
+its requests show no key name.
+
+Each guarded request sent with a named key adds a row to `ws_api_key_uses` before
+the model is called. If that write fails, the request gets a 503 and never reaches
+the model. The row's `request_id` matches `events.request_id` in the audit log,
+and both tables are in the same database, so this lists each key's requests and
+their outcomes:
+
+```sql
+SELECT to_timestamp(e."timestamp") AS at, k.name, e.request_id, e.event_type,
+       e.decision, e.error_code
+FROM ws_api_key_uses AS u
+JOIN ws_api_keys AS k ON k.id = u.key_id
+JOIN events AS e ON e.request_id = u.request_id
+ORDER BY e.seq DESC LIMIT 50;
+```
+
+Named keys need the workspace database. If it is unavailable, requests with a
+named key get a 503 while the shared chat key keeps working. A key shows which
+credential was used, not who was typing, so give one key to one person or tool.
+
 **Integrate** gives connection examples for curl, Python, JavaScript, test
 harnesses, `nasi-chat` and the smoke test, using this deployment's address and
 model. It never shows a real key.
+
+## Upgrading to schema 5
+
+Named API keys add two tables, so the new gateway refuses a schema 4 database.
+Stop the gateway, take a backup, run `workspace_cli init` with the migration DSN
+as the default UID 10001, then reapply `workspace_roles.sql` so the runtime can use
+the new tables, and start the gateway. The migration only adds tables. To go back
+without a restore, stop the gateway, drop `ws_api_key_uses` and `ws_api_keys`, set
+`ws_schema_migrations.version` back to 4 and run the older code.
 
 ## Transcript retention
 

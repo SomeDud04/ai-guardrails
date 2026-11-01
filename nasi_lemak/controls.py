@@ -48,6 +48,9 @@ BLOCK_REASONS: dict[str, tuple[str, str, str]] = {
 }
 BLOCK_REASON_CODES = tuple(BLOCK_REASONS)
 
+# Marks a named API key, so other bearer values never reach the key store.
+API_KEY_PREFIX = "nlk_"
+
 
 def normalize_masks(value: Iterable[str] | None) -> tuple[str, ...]:
     """Return a canonical, duplicate-free tuple of supported mask names.

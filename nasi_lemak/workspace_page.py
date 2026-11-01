@@ -698,8 +698,14 @@ button.danger:hover:not(:disabled) { background: #8f1d17; border-color: #8f1d17;
 .monitor-columns { grid-template-columns: minmax(0, 3fr) minmax(0, 2fr); gap: var(--space-5); }
 .monitor-side { display: grid; gap: var(--space-4); align-content: start; min-width: 0; }
 #live-traffic .cols-6 { grid-template-columns: minmax(130px, 1.5fr) repeat(4, minmax(72px, 1fr)) 96px; min-width: 620px; }
-#live-http .cols-6 { grid-template-columns: 96px 130px 64px minmax(200px, 1fr) 56px 72px; min-width: 680px; }
-#live-traffic .admin-table-head > div:nth-child(n+2):nth-child(-n+5), #live-http .admin-table-head > div:nth-child(n+5) { text-align: right; }
+#live-http .cols-7 { grid-template-columns: 96px 130px minmax(96px, .5fr) 64px minmax(200px, 1fr) 56px 72px; min-width: 800px; }
+#key-list .cols-6 { grid-template-columns: minmax(140px, 1.2fr) 96px 80px 130px minmax(170px, 1fr) minmax(170px, 1fr); min-width: 860px; }
+#key-list .admin-table-head > div:nth-child(3) { text-align: right; }
+#key-list .admin-confirm { grid-column: 1 / -1; }
+.key-created { display: grid; gap: var(--space-2); margin-bottom: var(--space-3); padding: var(--space-3); border: 1px solid var(--line); border-radius: var(--radius); background: var(--surface-raised); }
+.key-created p { margin: 0; color: var(--text); }
+.key-secret { display: block; padding: var(--space-2); border: 1px solid var(--line); border-radius: var(--radius); background: var(--surface); color: var(--text); font: .875rem/1.5 ui-monospace, Consolas, monospace; overflow-wrap: anywhere; user-select: all; }
+#live-traffic .admin-table-head > div:nth-child(n+2):nth-child(-n+5), #live-http .admin-table-head > div:nth-child(n+6) { text-align: right; }
 .integrate-code { background: var(--surface-raised); color: var(--text); font-size: .8125rem; }
 @media (max-width: 1100px) {
   .composer-hint { display: none; }
@@ -807,6 +813,19 @@ _WORKSPACE_JS = """
   var tabAdmin = byId("tab-admin");
   var adminPanel = byId("admin-panel");
   var adminStatus = byId("admin-status");
+  var adminTabKeys = byId("admin-tab-keys");
+  var adminKeysPanel = byId("admin-keys-panel");
+  var keyForm = byId("key-form");
+  var keyName = byId("key-name");
+  var keySubmit = byId("key-submit");
+  var keyCreated = byId("key-created");
+  var keyCreatedName = byId("key-created-name");
+  var keySecret = byId("key-secret");
+  var keyCopy = byId("key-copy");
+  var keyDone = byId("key-done");
+  var keyState = byId("key-state");
+  var keyList = byId("key-list");
+  var keyMore = byId("key-more");
   var departmentForm = byId("department-form");
   var departmentName = byId("department-name");
   var departmentSubmit = byId("department-submit");
@@ -1042,6 +1061,10 @@ _WORKSPACE_JS = """
   var adminActiveConfirm = null;
   var adminListChain = Promise.resolve();
   var adminSection = "monitor";
+  var adminKeys = [];
+  var keyCursor = null;
+  var keyLoading = false;
+  var creatingKey = false;
   var adminStateEpoch = 0;
   var adminDepartmentsLoaded = false;
   var adminUsersLoaded = false;
@@ -4120,6 +4143,7 @@ _WORKSPACE_JS = """
   function setAdminSectionTabs(section) {
     adminTabMonitor.setAttribute("aria-selected", section === "monitor" ? "true" : "false");
     adminTabIntegrate.setAttribute("aria-selected", section === "integrate" ? "true" : "false");
+    adminTabKeys.setAttribute("aria-selected", section === "keys" ? "true" : "false");
     adminTabUsers.setAttribute("aria-selected", section === "users" ? "true" : "false");
     adminTabDepartments.setAttribute("aria-selected", section === "departments" ? "true" : "false");
     adminTabPolicies.setAttribute("aria-selected", section === "policies" ? "true" : "false");
@@ -4128,6 +4152,7 @@ _WORKSPACE_JS = """
     adminTabSettings.setAttribute("aria-selected", section === "settings" ? "true" : "false");
     adminMonitorPanel.hidden = section !== "monitor";
     adminIntegratePanel.hidden = section !== "integrate";
+    adminKeysPanel.hidden = section !== "keys";
     adminUsersPanel.hidden = section !== "users";
     adminDepartmentsPanel.hidden = section !== "departments";
     adminPoliciesPanel.hidden = section !== "policies";
@@ -4143,6 +4168,7 @@ _WORKSPACE_JS = """
     }
     adminSection = section;
     setAdminSectionTabs(section);
+    if (section !== "keys") { hideCreatedKey(); }
     loadAdminSection(section);
   }
 
@@ -4158,6 +4184,11 @@ _WORKSPACE_JS = """
       queueAdminList(function () {
         return adminSettingsLoaded ? Promise.resolve(true) : loadAdminSettings(true);
       }).then(function () { renderIntegrate(); });
+      return;
+    }
+    if (section === "keys") {
+      // Reloaded on every visit: usage counts change while the tab is closed.
+      queueAdminList(function () { return loadApiKeys(true); });
       return;
     }
     if (section === "users") {
@@ -4354,6 +4385,7 @@ _WORKSPACE_JS = """
   adminTabDepartments.addEventListener("click", function () { showAdminSection("departments"); });
   adminTabPolicies.addEventListener("click", function () { showAdminSection("policies"); });
   adminTabAlerts.addEventListener("click", function () { showAdminSection("alerts"); });
+  adminTabKeys.addEventListener("click", function () { showAdminSection("keys"); });
   adminTabAccess.addEventListener("click", function () { showAdminSection("access"); });
   adminTabSettings.addEventListener("click", function () { showAdminSection("settings"); });
   settingsRefresh.addEventListener("click", function () { loadAdminSettings(true); });
@@ -5181,7 +5213,9 @@ _WORKSPACE_JS = """
     "admin.reset_password": "Reset an account password",
     "admin.grant_review": "Granted review access",
     "admin.revoke_review": "Revoked review access",
-    "admin.set_user_role": "Changed an account role"
+    "admin.set_user_role": "Changed an account role",
+    "admin.create_api_key": "Generated an API key",
+    "admin.revoke_api_key": "Revoked an API key"
   };
 
   function accessActionLabel(action) {
@@ -5407,6 +5441,106 @@ _WORKSPACE_JS = """
         ? "No loaded access events match this search. Search applies only to rows loaded so far."
         : "The access log is empty.");
     }
+  }
+
+  function hideCreatedKey() {
+    // The key exists only here, and only until the administrator leaves.
+    keySecret.textContent = "";
+    keyCreatedName.textContent = "";
+    keyCreated.hidden = true;
+  }
+
+  function revokeApiKey(row, item) {
+    askConfirm(row, "Revoke " + item.name + "? Anything using this key stops working at once. " +
+      "Its usage record is kept.", "Confirm revoke", function () {
+      var epoch = sessionEpoch;
+      var token = adminStateEpoch;
+      setStatus(adminStatus, "Revoking " + item.name + "…");
+      api("/workspace/api/admin/api-keys/" + encodeURIComponent(item.id) + "/revoke", {
+        method: "POST",
+        body: "{}"
+      }).then(function (result) {
+        if (epoch !== sessionEpoch || token !== adminStateEpoch) { return; }
+        if (adminGuard(result, adminStatus)) { return; }
+        if (!result.ok) {
+          setStatus(adminStatus, serverMessage(result, timeoutOrNetwork(result)), "error");
+          return;
+        }
+        setStatus(adminStatus, item.name + " revoked.", "ok");
+        queueAdminList(function () { return loadApiKeys(true); });
+      });
+    });
+  }
+
+  function renderApiKeys() {
+    clearNode(keyList);
+    if (!adminKeys.length) {
+      appendEmpty(keyList, "No API keys have been generated.");
+      return;
+    }
+    renderTableHead(keyList, ["Name", "Key", "Requests", "Last used", "Created", "Status"], 6);
+    for (var index = 0; index < adminKeys.length; index += 1) {
+      var item = adminKeys[index];
+      var row = document.createElement("div");
+      row.className = "admin-table-row cols-6";
+      row.appendChild(tableCell(item.name, "", "Name"));
+      row.appendChild(tableCell(item.key_hint + "…", "cell-muted", "Key"));
+      row.appendChild(tableCell(monitorCount(item.requests), "cell-num", "Requests"));
+      row.appendChild(tableCell(
+        typeof item.last_used_at === "number" ? formatDate(item.last_used_at) : "Never",
+        "cell-muted", "Last used"
+      ));
+      row.appendChild(tableCell(
+        formatDate(item.created_at) + " by " + (item.created_by || "deleted account"),
+        "cell-muted", "Created"
+      ));
+      if (typeof item.revoked_at === "number") {
+        row.appendChild(tableCell(
+          "Revoked " + formatDate(item.revoked_at) + " by " + (item.revoked_by || "deleted account"),
+          "cell-muted", "Status"
+        ));
+      } else {
+        var actions = document.createElement("div");
+        actions.className = "cell-actions";
+        actions.setAttribute("data-label", "Status");
+        var revoke = document.createElement("button");
+        revoke.type = "button";
+        revoke.className = "danger";
+        revoke.textContent = "Revoke";
+        revoke.addEventListener("click", function (target, keyItem) {
+          return function () { revokeApiKey(target, keyItem); };
+        }(row, item));
+        actions.appendChild(revoke);
+        row.appendChild(actions);
+      }
+      keyList.appendChild(row);
+    }
+  }
+
+  function loadApiKeys(reset) {
+    if (!signedIn || keyLoading) { return Promise.resolve(false); }
+    var epoch = sessionEpoch;
+    var token = adminStateEpoch;
+    keyLoading = true;
+    if (reset) { keyCursor = null; }
+    setStatus(keyState, "Loading API keys…");
+    var path = "/workspace/api/admin/api-keys?limit=" + LIST_LIMIT +
+      (keyCursor ? "&after=" + encodeURIComponent(keyCursor) : "");
+    return api(path).then(function (result) {
+      if (epoch !== sessionEpoch || token !== adminStateEpoch) { return false; }
+      keyLoading = false;
+      if (adminGuard(result, keyState)) { return false; }
+      if (!result.ok || !isObject(result.data) || !Array.isArray(result.data.items)) {
+        setStatus(keyState, serverMessage(result, timeoutOrNetwork(result)), "error");
+        return false;
+      }
+      adminKeys = reset ? result.data.items : adminKeys.concat(result.data.items);
+      renderApiKeys();
+      keyCursor = typeof result.data.next === "string" && result.data.next ? result.data.next : null;
+      keyMore.hidden = !keyCursor;
+      setStatus(keyState, keyCursor ? "More API keys available." : "");
+      return true;
+    });
   }
 
   function loadDepartments(reset) {
@@ -5920,14 +6054,15 @@ _WORKSPACE_JS = """
       appendTrafficEmpty(liveHttp);
       return;
     }
-    renderTableHead(liveHttp, ["Time", "IP address", "Method", "Path", "Status", "Took"], 6);
+    renderTableHead(liveHttp, ["Time", "IP address", "Key", "Method", "Path", "Status", "Took"], 7);
     for (var index = 0; index < rows.length; index += 1) {
       var item = rows[index];
       var row = document.createElement("div");
       var outcome = item.status >= 500 ? " is-failed" : item.status >= 400 ? " is-blocked" : "";
-      row.className = "admin-table-row cols-6";
+      row.className = "admin-table-row cols-7";
       row.appendChild(tableCell(formatClock(item.at), "cell-muted", "Time"));
       row.appendChild(tableCell(item.ip, "", "IP address"));
+      row.appendChild(tableCell(item.key || "–", "", "Key"));
       row.appendChild(tableCell(item.method, "", "Method"));
       row.appendChild(tableCell(item.route, "", "Path"));
       row.appendChild(tableCell(monitorCount(item.status), "cell-num monitor-result" + outcome, "Status"));
@@ -6827,6 +6962,16 @@ _WORKSPACE_JS = """
     userSearchText = "";
     departmentSearchText = "";
     accessSearchText = "";
+    adminKeys = [];
+    keyCursor = null;
+    keyLoading = false;
+    creatingKey = false;
+    keySubmit.disabled = false;
+    keyName.value = "";
+    keyMore.hidden = true;
+    clearNode(keyList);
+    setStatus(keyState, "");
+    hideCreatedKey();
     if (departmentName) { departmentName.value = ""; }
     if (userUsername) { userUsername.value = ""; }
     if (userFullName) { userFullName.value = ""; }
@@ -6922,6 +7067,70 @@ _WORKSPACE_JS = """
     syncGrantForm();
     syncAssignmentScope();
   }
+
+  keyForm.addEventListener("submit", function (event) {
+    event.preventDefault();
+    if (!signedIn || creatingKey) { return; }
+    var name = keyName.value.trim();
+    if (!name) {
+      setStatus(adminStatus, "Enter a name for this key.", "error");
+      keyName.focus();
+      return;
+    }
+    creatingKey = true;
+    keySubmit.disabled = true;
+    hideCreatedKey();
+    setStatus(adminStatus, "Generating key…");
+    var epoch = sessionEpoch;
+    api("/workspace/api/admin/api-keys", {
+      method: "POST",
+      body: JSON.stringify({ name: name })
+    }).then(function (result) {
+      if (epoch !== sessionEpoch) { return; }
+      creatingKey = false;
+      keySubmit.disabled = false;
+      if (adminGuard(result, adminStatus)) { return; }
+      if (result.status === 409) {
+        setStatus(adminStatus, "That name is already used. Names stay reserved after a key is revoked.", "error");
+        return;
+      }
+      if (!result.ok || !isObject(result.data) || typeof result.data.key !== "string") {
+        setStatus(adminStatus, serverMessage(result, timeoutOrNetwork(result)), "error");
+        return;
+      }
+      keyName.value = "";
+      keyCreatedName.textContent = name;
+      keySecret.textContent = result.data.key;
+      keyCreated.hidden = false;
+      setStatus(adminStatus, "Key generated. Copy it now.", "ok");
+      queueAdminList(function () { return loadApiKeys(true); });
+    });
+  });
+
+  keyCopy.addEventListener("click", function () {
+    var value = keySecret.textContent;
+    if (!value) { return; }
+    if (typeof navigator !== "undefined" && navigator.clipboard &&
+        typeof navigator.clipboard.writeText === "function") {
+      navigator.clipboard.writeText(value).then(function () {
+        setStatus(adminStatus, "Key copied.", "ok");
+      }, function () {
+        setStatus(adminStatus, "Copy failed. Select the key and copy it by hand.", "error");
+      });
+      return;
+    }
+    setStatus(adminStatus, "Select the key and copy it by hand.", "warning");
+  });
+
+  keyDone.addEventListener("click", function () {
+    hideCreatedKey();
+    setStatus(adminStatus, "");
+    keyName.focus();
+  });
+
+  keyMore.addEventListener("click", function () {
+    queueAdminList(function () { return loadApiKeys(false); });
+  });
 
   departmentForm.addEventListener("submit", function (event) {
     event.preventDefault();
@@ -7495,6 +7704,7 @@ WORKSPACE_HTML = """<!doctype html>
 <div class="admin-subtabs" role="tablist" aria-label="Administration sections">
 <button id="admin-tab-monitor" class="admin-subtab" type="button" role="tab" aria-controls="admin-monitor-panel" aria-selected="true">Monitor</button>
 <button id="admin-tab-integrate" class="admin-subtab" type="button" role="tab" aria-controls="admin-integrate-panel" aria-selected="false">Integrate</button>
+<button id="admin-tab-keys" class="admin-subtab" type="button" role="tab" aria-controls="admin-keys-panel" aria-selected="false">API keys</button>
 <button id="admin-tab-users" class="admin-subtab" type="button" role="tab" aria-controls="admin-users-panel" aria-selected="false">Users</button>
 <button id="admin-tab-departments" class="admin-subtab" type="button" role="tab" aria-controls="admin-departments-panel" aria-selected="false">Departments</button>
 <button id="admin-tab-policies" class="admin-subtab" type="button" role="tab" aria-controls="admin-policies-panel" aria-selected="false">Policies</button>
@@ -7553,9 +7763,30 @@ WORKSPACE_HTML = """<!doctype html>
 </div>
 </section>
 
+<section id="admin-keys-panel" class="admin-panel-section" role="tabpanel" aria-labelledby="admin-tab-keys" hidden>
+<div class="admin-section-head"><h3 id="keys-heading">API keys</h3></div>
+<p class="admin-note">Give each person or tool its own key, so every request can be traced to a name. The log shows which key was used, so a shared key cannot tell you who sent a request.</p>
+<form id="key-form" class="admin-form policy-form" novalidate>
+<label for="key-name">Key name</label>
+<input id="key-name" name="key-name" type="text" maxlength="80" autocomplete="off" spellcheck="false" placeholder="Ali, laptop" required>
+<div class="policy-actions"><button id="key-submit" class="primary" type="submit">Generate key</button></div>
+</form>
+<div id="key-created" class="key-created" role="group" aria-label="New API key" hidden>
+<p><strong id="key-created-name"></strong>: copy this key now. It is not stored and cannot be shown again.</p>
+<code id="key-secret" class="key-secret"></code>
+<div class="policy-actions">
+<button id="key-copy" class="primary" type="button">Copy key</button>
+<button id="key-done" class="ghost" type="button">Done</button>
+</div>
+</div>
+<p id="key-state" class="admin-note" role="status" aria-live="polite"></p>
+<div id="key-list" class="admin-table" aria-label="API keys"></div>
+<button id="key-more" class="admin-more" type="button" hidden>Load more keys</button>
+</section>
+
 <section id="admin-integrate-panel" class="admin-panel-section" role="tabpanel" aria-labelledby="admin-tab-integrate" hidden>
 <div class="admin-section-head"><h3 id="integrate-heading">Integrate</h3></div>
-<p class="admin-note">Connect an application, script or test harness to this gateway. Every option runs the full guard pipeline. Examples use the placeholder <code>$NASI_LEMAK_API_KEY</code>; this page never shows a real key.</p>
+<p class="admin-note">Connect an application, script or test harness to this gateway. Every option runs the full guard pipeline. Examples use the placeholder <code>$NASI_LEMAK_API_KEY</code>; this page never shows a real key. Generate a named key under API keys.</p>
 <p id="admin-integrate-state" class="admin-note" role="status" aria-live="polite"></p>
 <div id="integrate-options" class="integrate-options" role="group" aria-label="Integration options"></div>
 <p id="integrate-help" class="admin-note"></p>

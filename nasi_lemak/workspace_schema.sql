@@ -213,6 +213,30 @@ CREATE TABLE IF NOT EXISTS ws_alert_state (
     CHECK (acknowledged_at IS NULL OR read_at IS NOT NULL)
 );
 
+-- Named API keys.  Only a SHA-256 digest of each key is stored, so a key can be
+-- shown once and never again.  Rows are never deleted: a revoked key keeps its
+-- name, so an old usage row always resolves to one key.  ``created_by`` and
+-- ``revoked_by`` are plain IDs so deleting an account cannot erase the record.
+CREATE TABLE IF NOT EXISTS ws_api_keys (
+    id TEXT PRIMARY KEY,
+    name TEXT NOT NULL,
+    name_key TEXT NOT NULL UNIQUE,
+    key_digest TEXT NOT NULL UNIQUE,
+    key_hint TEXT NOT NULL,
+    created_by TEXT NOT NULL,
+    created_at DOUBLE PRECISION NOT NULL,
+    revoked_by TEXT,
+    revoked_at DOUBLE PRECISION
+);
+
+-- One row per guarded request sent with a named key.  ``request_id`` matches the
+-- audit log's ``events.request_id``.
+CREATE TABLE IF NOT EXISTS ws_api_key_uses (
+    request_id TEXT PRIMARY KEY,
+    key_id TEXT NOT NULL REFERENCES ws_api_keys(id),
+    created_at DOUBLE PRECISION NOT NULL
+);
+
 CREATE INDEX IF NOT EXISTS idx_ws_users_department ON ws_users(department_id);
 CREATE INDEX IF NOT EXISTS idx_ws_sessions_user ON ws_sessions(user_id);
 CREATE INDEX IF NOT EXISTS idx_ws_review_grants_user ON ws_review_grants(user_id);
@@ -237,3 +261,5 @@ CREATE INDEX IF NOT EXISTS idx_ws_block_alerts_department
     ON ws_block_alerts(department_id, created_at);
 CREATE INDEX IF NOT EXISTS idx_ws_alert_state_admin
     ON ws_alert_state(admin_id, alert_id);
+CREATE INDEX IF NOT EXISTS idx_ws_api_key_uses_key
+    ON ws_api_key_uses(key_id, created_at);

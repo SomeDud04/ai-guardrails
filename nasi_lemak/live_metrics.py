@@ -126,7 +126,13 @@ class LiveMetrics:
             self._guard_scans.append((tokens, elapsed_ms))
 
     def note_http(
-        self, ip: str, method: str, route: str, status: int, elapsed_ms: float
+        self,
+        ip: str,
+        method: str,
+        route: str,
+        status: int,
+        elapsed_ms: float,
+        key: str | None = None,
     ) -> None:
         """Record one HTTP request: where it came from and how it ended."""
         if route in QUIET_ROUTES:
@@ -134,6 +140,7 @@ class LiveMetrics:
         row = {
             "at": self._clock(),
             "ip": ip,
+            "key": key,
             "method": method,
             "route": route,
             "status": status,

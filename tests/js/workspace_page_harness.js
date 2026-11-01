@@ -1379,7 +1379,7 @@ async function respondMonitor(app) {
           { ip: "192.168.90.50", requests: 12, chat: 3, refused: 2, failed: 1, last_seen: 1700000000 },
         ],
         recent: [
-          { at: 1700000000, ip: "192.168.90.50", method: "POST", route: "/chat", status: 403, ms: 850 },
+          { at: 1700000000, ip: "192.168.90.50", key: "Ali, laptop", method: "POST", route: "/chat", status: 403, ms: 850 },
         ],
       },
       recent: [
@@ -1464,6 +1464,8 @@ async function scenarioAdmin() {
     "the latest HTTP requests must render");
   assert(app.elementFor("live-http").textContent.indexOf("850 ms") >= 0,
     "a short request must show in milliseconds");
+  assert(app.elementFor("live-http").textContent.indexOf("Ali, laptop") >= 0,
+    "the key name must show beside the request");
   assert(app.callsMatching("/workspace/api/admin/users").length === 0,
     "the monitor must not load account lists");
   app.elementFor("admin-tab-users").dispatch("click");
@@ -1613,8 +1615,49 @@ async function scenarioAdmin() {
     "the chosen option must be marked");
   assert(app.elementFor("integrate-facts").textContent.indexOf("https://guardrail.example/v1") >= 0,
     "connection details must show the base URL");
+  const keyRow = {
+    id: "key-1",
+    name: "Ali, laptop",
+    key_hint: "nlk_Ab12",
+    created_at: 1700000000,
+    created_by: "admin",
+    revoked_at: null,
+    revoked_by: null,
+    requests: 7,
+    last_used_at: 1700000100,
+  };
+  app.elementFor("admin-tab-keys").dispatch("click");
+  await settle();
+  assert(app.elementFor("admin-keys-panel").hidden === false,
+    "opening API keys must show its panel");
+  app.lastMatching("/workspace/api/admin/api-keys?limit=25").respond({ items: [keyRow], next: null }, 200);
+  await settle();
+  assert(app.elementFor("key-list").textContent.indexOf("nlk_Ab12") >= 0,
+    "the key list must show the hint");
+  assert(app.elementFor("key-created").hidden === true,
+    "no key may be on screen before one is generated");
+  app.elementFor("key-name").value = "Harness";
+  app.elementFor("key-form").dispatch("submit");
+  await settle();
+  const createdKey = app.lastMatching("/workspace/api/admin/api-keys");
+  assert(createdKey.options.method === "POST" &&
+      JSON.parse(createdKey.options.body).name === "Harness",
+    "generating a key must post only its name");
+  createdKey.respond({ key: "nlk_synthetic_value", item: { ...keyRow, id: "key-2", name: "Harness" } }, 201);
+  await settle();
+  assert(app.elementFor("key-secret").textContent === "nlk_synthetic_value",
+    "the new key must be shown once");
+  assert(app.elementFor("key-created").hidden === false, "the new key panel must open");
+  app.lastMatching("/workspace/api/admin/api-keys?limit=25").respond(
+    { items: [{ ...keyRow, id: "key-2", name: "Harness" }, keyRow], next: null }, 200
+  );
+  await settle();
+  assert(app.elementFor("key-list").textContent.indexOf("nlk_synthetic_value") < 0,
+    "the list must never hold the full key");
   app.elementFor("admin-tab-access").dispatch("click");
   await settle();
+  assert(app.elementFor("key-secret").textContent === "",
+    "leaving the tab must clear the key from the page");
   assert(app.elementFor("admin-access-panel").hidden === false,
     "selecting access must restore the access panel");
   assert(app.elementFor("department-list").textContent.indexOf("Human Resources") >= 0,

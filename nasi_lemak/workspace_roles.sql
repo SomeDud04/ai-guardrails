@@ -77,7 +77,9 @@ REVOKE ALL PRIVILEGES ON TABLE
     public.ws_policy_assignments,
     public.ws_policy_audit,
     public.ws_block_alerts,
-    public.ws_alert_state
+    public.ws_alert_state,
+    public.ws_api_keys,
+    public.ws_api_key_uses
 FROM nasi_lemak_workspace;
 
 -- Migration metadata is read-only to the runtime.
@@ -109,3 +111,8 @@ GRANT SELECT, INSERT ON TABLE public.ws_policy_audit TO nasi_lemak_workspace;
 -- per-administrator read/acknowledgement state is mutable.
 GRANT SELECT, INSERT ON TABLE public.ws_block_alerts TO nasi_lemak_workspace;
 GRANT SELECT, INSERT, UPDATE ON TABLE public.ws_alert_state TO nasi_lemak_workspace;
+
+-- Named API keys may be created and revoked but never deleted.  The per-request
+-- usage record is append-only, like the access log.
+GRANT SELECT, INSERT, UPDATE ON TABLE public.ws_api_keys TO nasi_lemak_workspace;
+GRANT SELECT, INSERT ON TABLE public.ws_api_key_uses TO nasi_lemak_workspace;

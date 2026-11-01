@@ -17,7 +17,7 @@ from pathlib import Path
 from typing import Any
 
 from .audit import AuditStore, SqliteAuditStore
-from .controls import GatewayControl, block_detail
+from .controls import API_KEY_PREFIX, GatewayControl, block_detail
 from .live_metrics import LiveMetrics
 from .diagnostics import SIGNAL_CODES, record_signal
 from .generation import GenerationError, conservative_byte_budget
@@ -398,6 +398,8 @@ class Gateway:
 
         self.adapters = adapters
         self.metrics = LiveMetrics()
+        # Set by the server when the workspace store can answer for named keys.
+        self.api_keys: Any = None
         if not isinstance(policy, Policy):
             raise ValueError("invalid policy")
         if limits is None:
@@ -512,6 +514,11 @@ class Gateway:
         finally:
             self.metrics.leave(timing, status)
 
+    def _named_key(self, candidate: str, digest: bytes) -> dict[str, Any] | None:
+        if self.api_keys is None or not candidate.startswith(API_KEY_PREFIX):
+            return None
+        return self.api_keys.resolve_api_key(digest.hex())
+
     def _pipeline(
         self,
         method: str,
@@ -533,7 +540,7 @@ class Gateway:
         verdict ``allow``/``block``), ``output_safe`` (the validated output
         verdict boolean), ``sanitized_messages`` (the exact masked messages
         passed to generation), ``audit_started_at`` and ``audit_terminal_at``
-        (the timestamps the audit store itself wrote).  Raw withheld output and
+        (the timestamps the audit store itself wrote) and ``api_key_name``.  Raw withheld output and
         classifier text are never written.  Fields for stages that did not run
         stay absent.
         """
@@ -549,9 +556,20 @@ class Gateway:
             return self._error(401, "UNAUTHORIZED", request_id)
         candidate = supplied[7:] if supplied.startswith("Bearer ") else ""
         candidate_digest = hashlib.sha256(candidate.encode()).digest()
+        named_key = None
         if not self._key_valid or not hmac.compare_digest(candidate_digest, self._key_digest):
-            log_rejection(request_id, 401, "unauthorized")
-            return self._error(401, "UNAUTHORIZED", request_id)
+            # The shared key is checked first and needs no database, so a
+            # workspace outage can only affect named keys.
+            try:
+                named_key = self._named_key(candidate, candidate_digest)
+            except Exception:
+                log_rejection(request_id, 503, "not_ready")
+                return self._error(503, "UNAVAILABLE", request_id)
+            if named_key is None:
+                log_rejection(request_id, 401, "unauthorized")
+                return self._error(401, "UNAUTHORIZED", request_id)
+            if result_sink is not None:
+                result_sink["api_key_name"] = named_key["name"]
         if self.adapters is None:
             log_rejection(request_id, 503, "not_ready")
             return self._error(503, "UNAVAILABLE", request_id)
@@ -592,6 +610,9 @@ class Gateway:
             return timestamp
 
         try:
+            # Written first, so no request can reach the model unattributed.
+            if named_key is not None:
+                self.api_keys.record_api_key_use(named_key["id"], request_id)
             _audit_sink("request_started", "pending")
         except Exception:
             return self._error(503, "UNAVAILABLE", request_id)

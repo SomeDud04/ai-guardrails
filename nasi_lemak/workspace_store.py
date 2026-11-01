@@ -47,11 +47,11 @@ from functools import wraps
 from pathlib import Path
 from typing import Any, Callable
 
-from .controls import block_detail
+from .controls import API_KEY_PREFIX, block_detail
 from .workspace_governance import AlertAdminMixin, PolicyAdminMixin
 
 SCHEMA_PATH = Path(__file__).with_name("workspace_schema.sql")
-SCHEMA_VERSION = 4
+SCHEMA_VERSION = 5
 MAX_RETENTION_DAYS = 36500
 # Version 2 adds outcome/request_id/error_code to ws_messages. Runtime stores
 # open with ``migrate=False`` and therefore require an explicit provisioning
@@ -88,6 +88,8 @@ TEXT_MAX_LENGTH = 65536
 TITLE_MAX_LENGTH = 120
 FULL_NAME_MAX_LENGTH = 120
 DEPARTMENT_NAME_MAX_LENGTH = 80
+API_KEY_NAME_MAX_LENGTH = 80
+API_KEY_HINT_LENGTH = 8
 USERNAME_MAX_LENGTH = 64
 
 _SCRYPT_N = 1 << 15
@@ -248,6 +250,19 @@ def _schema_v3_statements() -> list[str]:
         "CREATE INDEX IF NOT EXISTS IDX_WS_POLICY_",
         "CREATE INDEX IF NOT EXISTS IDX_WS_BLOCK_ALERTS",
         "CREATE INDEX IF NOT EXISTS IDX_WS_ALERT_STATE",
+    )
+    return [
+        statement
+        for statement in _schema_statements()
+        if statement.upper().startswith(prefixes)
+    ]
+
+
+def _schema_v5_statements() -> list[str]:
+    """Additive version-5 DDL for named API keys, from the shared schema file."""
+    prefixes = (
+        "CREATE TABLE IF NOT EXISTS WS_API_KEY",
+        "CREATE INDEX IF NOT EXISTS IDX_WS_API_KEY",
     )
     return [
         statement
@@ -628,7 +643,7 @@ class WorkspaceStore(PolicyAdminMixin, AlertAdminMixin):
             version = int(current)
             if version == SCHEMA_VERSION:
                 return
-            if version not in (1, 2, 3):
+            if version not in (1, 2, 3, 4):
                 raise WorkspaceConfigError("unsupported workspace schema version")
             if version == 1:
                 # Preserve the original v1 -> v2 data migration, then add the
@@ -648,6 +663,8 @@ class WorkspaceStore(PolicyAdminMixin, AlertAdminMixin):
                     db, "ws_policy_profile_revisions", column
                 ):
                     continue
+                db.execute(statement)
+            for statement in _schema_v5_statements():
                 db.execute(statement)
             db.execute(
                 "UPDATE ws_schema_migrations SET version = ? WHERE version = ?",
@@ -2265,6 +2282,161 @@ class WorkspaceStore(PolicyAdminMixin, AlertAdminMixin):
             return db.execute(
                 f"DELETE FROM ws_conversations WHERE {expired}", (cutoff, now)
             )
+
+    # -- named API keys ---------------------------------------------------
+    _API_KEY_COLUMNS = (
+        "SELECT k.id, k.name, k.key_hint, k.created_at, k.revoked_at, "
+        "creator.username AS created_by, revoker.username AS revoked_by, "
+        "(SELECT COUNT(*) FROM ws_api_key_uses AS u WHERE u.key_id = k.id) "
+        "AS requests, "
+        "(SELECT MAX(u.created_at) FROM ws_api_key_uses AS u WHERE u.key_id = k.id) "
+        "AS last_used_at "
+        "FROM ws_api_keys AS k "
+        "LEFT JOIN ws_users AS creator ON creator.id = k.created_by "
+        "LEFT JOIN ws_users AS revoker ON revoker.id = k.revoked_by "
+    )
+
+    @staticmethod
+    def _public_api_key(row: dict[str, Any]) -> dict[str, Any]:
+        """Display metadata only; the key digest is never selected."""
+        return {
+            "id": row["id"],
+            "name": row["name"],
+            "key_hint": row["key_hint"],
+            "created_at": float(row["created_at"]),
+            "created_by": row["created_by"],
+            "revoked_at": (
+                float(row["revoked_at"]) if row["revoked_at"] is not None else None
+            ),
+            "revoked_by": row["revoked_by"],
+            "requests": int(row["requests"]),
+            "last_used_at": (
+                float(row["last_used_at"]) if row["last_used_at"] is not None else None
+            ),
+        }
+
+    @_guard
+    def create_api_key(self, actor_id: str, name: str) -> dict[str, Any]:
+        """Create a named key.  This is the only time the key itself is returned."""
+        key_name = _require_text(
+            name, maximum=API_KEY_NAME_MAX_LENGTH, field="key name"
+        )
+        name_key = key_name.casefold()
+        secret = API_KEY_PREFIX + secrets.token_urlsafe(32)
+        key_id = str(uuid.uuid4())
+        now = self._now()
+        with self._backend.transaction() as db:
+            self._require_admin(db, actor_id)
+            # A revoked key keeps its name, so a name always means one key.
+            if db.query_one(
+                "SELECT id FROM ws_api_keys WHERE name_key = ?", (name_key,)
+            ):
+                raise Conflict("key name is already used")
+            db.execute(
+                """
+                INSERT INTO ws_api_keys(
+                    id, name, name_key, key_digest, key_hint, created_by, created_at
+                ) VALUES (?, ?, ?, ?, ?, ?, ?)
+                """,
+                (
+                    key_id,
+                    key_name,
+                    name_key,
+                    hashlib.sha256(secret.encode()).hexdigest(),
+                    secret[:API_KEY_HINT_LENGTH],
+                    actor_id,
+                    now,
+                ),
+            )
+            self._log_access(
+                db,
+                actor_id,
+                f"admin.create_api_key:{key_id}",
+                conversation_id=None,
+                department_id=None,
+                now=now,
+            )
+            row = db.query_one(
+                self._API_KEY_COLUMNS + "WHERE k.id = ?", (key_id,)
+            )
+            return {"key": secret, "item": self._public_api_key(row)}
+
+    @_guard
+    def list_api_keys(
+        self, actor_id: str, *, limit: int = 50, after: str | None = None
+    ) -> dict[str, Any]:
+        limit = _validate_limit(limit)
+        with self._backend.transaction() as db:
+            self._require_admin(db, actor_id)
+            params: list[Any] = []
+            sql = self._API_KEY_COLUMNS + "WHERE 1 = 1"
+            if after is not None:
+                created_at, last_id = _decode_cursor(after)
+                sql += " AND (k.created_at < ? OR (k.created_at = ? AND k.id < ?))"
+                params.extend((created_at, created_at, last_id))
+            sql += " ORDER BY k.created_at DESC, k.id DESC LIMIT ?"
+            params.append(limit + 1)
+            rows = db.query(sql, tuple(params))
+            next_cursor = (
+                _encode_cursor(rows[limit - 1]["created_at"], rows[limit - 1]["id"])
+                if len(rows) > limit
+                else None
+            )
+            return {
+                "items": [self._public_api_key(row) for row in rows[:limit]],
+                "next": next_cursor,
+            }
+
+    @_guard
+    def revoke_api_key(self, actor_id: str, key_id: str) -> dict[str, Any]:
+        now = self._now()
+        with self._backend.transaction() as db:
+            self._require_admin(db, actor_id)
+            row = db.query_one(
+                "SELECT revoked_at FROM ws_api_keys WHERE id = ?", (key_id,)
+            )
+            if row is None:
+                raise NotFound("api key not found")
+            if row["revoked_at"] is not None:
+                raise Conflict("api key is already revoked")
+            db.execute(
+                "UPDATE ws_api_keys SET revoked_by = ?, revoked_at = ? "
+                "WHERE id = ? AND revoked_at IS NULL",
+                (actor_id, now, key_id),
+            )
+            self._log_access(
+                db,
+                actor_id,
+                f"admin.revoke_api_key:{key_id}",
+                conversation_id=None,
+                department_id=None,
+                now=now,
+            )
+            return self._public_api_key(
+                db.query_one(self._API_KEY_COLUMNS + "WHERE k.id = ?", (key_id,))
+            )
+
+    @_guard
+    def resolve_api_key(self, key_digest: str) -> dict[str, Any] | None:
+        """Return the active key with this digest, or ``None``."""
+        with self._backend.transaction() as db:
+            row = db.query_one(
+                "SELECT id, name FROM ws_api_keys "
+                "WHERE key_digest = ? AND revoked_at IS NULL",
+                (key_digest,),
+            )
+            return {"id": row["id"], "name": row["name"]} if row else None
+
+    @_guard
+    def record_api_key_use(self, key_id: str, request_id: str) -> None:
+        with self._backend.transaction() as db:
+            applied = db.execute(
+                "INSERT INTO ws_api_key_uses(request_id, key_id, created_at) "
+                "VALUES (?, ?, ?)",
+                (request_id, key_id, self._now()),
+            )
+            if applied != 1:
+                raise WorkspaceStorageError("api key use was not recorded")
 
     @_guard
     def list_access_log(

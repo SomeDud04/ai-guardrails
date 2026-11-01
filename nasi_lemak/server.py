@@ -657,7 +657,14 @@ def _note_http(request: Request, status: int, elapsed_ms: float) -> None:
     # The catch-all that answers unknown paths is not a route worth naming.
     if not route or route.endswith(":path}"):
         route = "unmatched"
-    metrics.note_http(_client_address(request), request.method, route, status, elapsed_ms)
+    metrics.note_http(
+        _client_address(request),
+        request.method,
+        route,
+        status,
+        elapsed_ms,
+        getattr(request.state, "api_key_name", None),
+    )
 
 
 def _mode_from_env(env: dict[str, str]) -> str:
@@ -1581,6 +1588,8 @@ def make_app(
     if workspace_runtime.internal_gateway is not None:
         # Both entry points report to one Monitor.
         workspace_runtime.internal_gateway.metrics = runtime_gateway.metrics
+    if workspace_runtime.ready:
+        runtime_gateway.api_keys = workspace_runtime.store
     guard = getattr(runtime_gateway.adapters, "attack_guard", None)
     if hasattr(guard, "scan_observer"):
         guard.scan_observer = runtime_gateway.metrics.note_guard_scan
@@ -1941,6 +1950,7 @@ def make_app(
         error mapping for the ``/chat`` testing surface.
         """
         request_id = request.state.request_id
+        sink: dict[str, Any] = {} if result_sink is None else result_sink
 
         content_type = request.headers.get("content-type", "")
         media_type = content_type.split(";", 1)[0].strip().lower()
@@ -2030,7 +2040,7 @@ def make_app(
                     "/v1/chat/completions",
                     headers,
                     chat_body,
-                    result_sink=result_sink,
+                    result_sink=sink,
                 )
             )
             dispatched = True
@@ -2041,6 +2051,7 @@ def make_app(
                 request.app.state.chat_work_timeout,
                 release_when_worker_done,
             )
+            request.state.api_key_name = sink.get("api_key_name")
             if result is _CONTROL_TIMEOUT:
                 # The HTTP deadline expired, but the shielded worker keeps its
                 # admission slot until the native call really returns.  Any late
