@@ -1248,6 +1248,15 @@ class PolicyAdminMixin:
         """
 
         data = self.resolve_effective_policy(actor_id, user_id)
+        limits = dict(data.get("limits", {}))
+        # Saved settings tighten every profile, so context trimming sees them too.
+        saved = self.current_system_settings()["values"] or {}
+        for name, value in saved.get("chat_limits", {}).items():
+            limits[name] = min(limits.get(name, value), value)
+        if limits.get("default_reply_tokens", 0) > limits.get(
+            "max_reply_tokens", limits.get("default_reply_tokens", 0)
+        ):
+            limits["default_reply_tokens"] = limits["max_reply_tokens"]
         return GatewayControl(
             input_check_enabled=data["input_check_enabled"],
             output_check_enabled=data["output_check_enabled"],
@@ -1263,7 +1272,7 @@ class PolicyAdminMixin:
                 )
                 for source in data["sources"]
             ),
-            limits=tuple(sorted(data.get("limits", {}).items())),
+            limits=tuple(sorted(limits.items())),
         )
 
 
@@ -1343,9 +1352,10 @@ class AlertAdminMixin:
         *,
         user_id: str,
         department_id: str,
-        conversation_id: str,
-        message_id: str,
+        conversation_id: str | None,
+        message_id: str | None,
         now: float,
+        api_key_id: str | None = None,
     ) -> str:
         alert_id = str(uuid.uuid4())
         applied = db.execute(
@@ -1353,8 +1363,8 @@ class AlertAdminMixin:
             INSERT INTO ws_block_alerts(
                 id, request_id, user_id, department_id, conversation_id,
                 message_id, stage, reason_code, reason_text, control_revision,
-                control_digest, control_sources, created_at
-            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                control_digest, control_sources, created_at, api_key_id
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
             ON CONFLICT (request_id) DO NOTHING
             """,
             (
@@ -1371,6 +1381,7 @@ class AlertAdminMixin:
                 prepared["digest"],
                 prepared["sources"],
                 now,
+                api_key_id,
             ),
         )
         if applied == 1:
@@ -1406,6 +1417,8 @@ class AlertAdminMixin:
             "control_digest": row["control_digest"],
             "control_sources": _parse_sources(row["control_sources"]),
             "created_at": float(row["created_at"]),
+            "api_key_id": row["api_key_id"],
+            "api_key_name": row["api_key_name"],
             "read": read_at is not None,
             "read_at": float(read_at) if read_at is not None else None,
             "acknowledged": acknowledged_at is not None,
@@ -1421,8 +1434,10 @@ class AlertAdminMixin:
             "a.conversation_id, a.message_id, a.stage, a.reason_code, "
             "a.reason_text, a.control_revision, a.control_digest, "
             "a.control_sources, a.created_at, u.username, u.full_name, "
-            "d.name AS department_name, s.read_at, s.acknowledged_at "
+            "d.name AS department_name, s.read_at, s.acknowledged_at, "
+            "a.api_key_id, k.name AS api_key_name "
             "FROM ws_block_alerts AS a "
+            "LEFT JOIN ws_api_keys AS k ON k.id = a.api_key_id "
             "JOIN ws_users AS u ON u.id = a.user_id "
             "JOIN ws_departments AS d ON d.id = a.department_id "
             "LEFT JOIN ws_alert_state AS s ON s.alert_id = a.id "

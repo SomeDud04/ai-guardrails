@@ -243,6 +243,7 @@ class WorkspaceRuntime:
         "internal_gateway",
         "chat_limits",
         "_internal_key",
+        "settings",
         "allow_http",
         "job_deadline",
         "error",
@@ -260,6 +261,7 @@ class WorkspaceRuntime:
         self.internal_gateway: Gateway | None = None
         self.chat_limits: ChatLimits | None = None
         self._internal_key: str | None = None
+        self.settings: Any = None
         self.allow_http = False
         self.job_deadline = 0.0
         self.error: str | None = None

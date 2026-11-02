@@ -199,7 +199,8 @@ CREATE TABLE IF NOT EXISTS ws_block_alerts (
     control_revision TEXT NOT NULL,
     control_digest TEXT NOT NULL,
     control_sources TEXT NOT NULL,
-    created_at DOUBLE PRECISION NOT NULL
+    created_at DOUBLE PRECISION NOT NULL,
+    api_key_id TEXT
 );
 
 -- Per-administrator read/acknowledgement state.  Absence of a row means unread
@@ -226,7 +227,12 @@ CREATE TABLE IF NOT EXISTS ws_api_keys (
     created_by TEXT NOT NULL,
     created_at DOUBLE PRECISION NOT NULL,
     revoked_by TEXT,
-    revoked_at DOUBLE PRECISION
+    revoked_at DOUBLE PRECISION,
+    owner_id TEXT,
+    expires_at DOUBLE PRECISION,
+    store_text INTEGER NOT NULL DEFAULT 0,
+    allowed_ips TEXT,
+    requests_per_minute INTEGER
 );
 
 -- One row per guarded request sent with a named key.  ``request_id`` matches the
@@ -234,6 +240,34 @@ CREATE TABLE IF NOT EXISTS ws_api_keys (
 CREATE TABLE IF NOT EXISTS ws_api_key_uses (
     request_id TEXT PRIMARY KEY,
     key_id TEXT NOT NULL REFERENCES ws_api_keys(id),
+    created_at DOUBLE PRECISION NOT NULL,
+    client_ip TEXT
+);
+
+-- How each key's request ended, written when it finishes.  Append-only.
+CREATE TABLE IF NOT EXISTS ws_api_key_outcomes (
+    request_id TEXT PRIMARY KEY,
+    outcome TEXT NOT NULL CHECK (outcome IN ('allowed', 'blocked', 'failed')),
+    error_code TEXT,
+    created_at DOUBLE PRECISION NOT NULL
+);
+
+-- Encrypted prompts and replies, only for keys with ``store_text`` switched on.
+CREATE TABLE IF NOT EXISTS ws_api_key_text (
+    request_id TEXT PRIMARY KEY,
+    key_id TEXT NOT NULL,
+    prompt_ciphertext TEXT NOT NULL,
+    reply_ciphertext TEXT,
+    created_at DOUBLE PRECISION NOT NULL
+);
+
+-- Administrator-editable settings.  Append-only: the highest revision is active,
+-- and a rollback saves an older revision's values as a new one.
+CREATE TABLE IF NOT EXISTS ws_system_settings (
+    revision INTEGER PRIMARY KEY CHECK (revision >= 1),
+    settings TEXT NOT NULL,
+    actor_id TEXT NOT NULL,
+    reason TEXT NOT NULL,
     created_at DOUBLE PRECISION NOT NULL
 );
 
@@ -263,3 +297,5 @@ CREATE INDEX IF NOT EXISTS idx_ws_alert_state_admin
     ON ws_alert_state(admin_id, alert_id);
 CREATE INDEX IF NOT EXISTS idx_ws_api_key_uses_key
     ON ws_api_key_uses(key_id, created_at);
+CREATE INDEX IF NOT EXISTS idx_ws_api_key_text_created
+    ON ws_api_key_text(created_at);

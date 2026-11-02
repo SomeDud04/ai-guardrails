@@ -33,6 +33,7 @@ from __future__ import annotations
 
 import base64
 import hashlib
+import ipaddress
 import hmac
 import json
 import math
@@ -51,7 +52,7 @@ from .controls import API_KEY_PREFIX, block_detail
 from .workspace_governance import AlertAdminMixin, PolicyAdminMixin
 
 SCHEMA_PATH = Path(__file__).with_name("workspace_schema.sql")
-SCHEMA_VERSION = 5
+SCHEMA_VERSION = 6
 MAX_RETENTION_DAYS = 36500
 # Version 2 adds outcome/request_id/error_code to ws_messages. Runtime stores
 # open with ``migrate=False`` and therefore require an explicit provisioning
@@ -72,6 +73,16 @@ _SCHEMA_V4_ALTERS = (
     "ALTER TABLE ws_policy_profile_revisions ADD COLUMN max_reply_tokens INTEGER "
     "CHECK (max_reply_tokens IS NULL OR max_reply_tokens > 0)",
 )
+# Version 6 gives each named key an owner and adds per-request key history.
+_SCHEMA_V6_ALTERS = (
+    ("ws_api_keys", "ALTER TABLE ws_api_keys ADD COLUMN owner_id TEXT"),
+    ("ws_api_keys", "ALTER TABLE ws_api_keys ADD COLUMN expires_at DOUBLE PRECISION"),
+    ("ws_api_keys", "ALTER TABLE ws_api_keys ADD COLUMN store_text INTEGER NOT NULL DEFAULT 0"),
+    ("ws_api_keys", "ALTER TABLE ws_api_keys ADD COLUMN allowed_ips TEXT"),
+    ("ws_api_keys", "ALTER TABLE ws_api_keys ADD COLUMN requests_per_minute INTEGER"),
+    ("ws_api_key_uses", "ALTER TABLE ws_api_key_uses ADD COLUMN client_ip TEXT"),
+    ("ws_block_alerts", "ALTER TABLE ws_block_alerts ADD COLUMN api_key_id TEXT"),
+)
 
 SESSION_TTL_SECONDS = 8 * 60 * 60
 LEASE_TTL_SECONDS = 120.0
@@ -90,6 +101,8 @@ FULL_NAME_MAX_LENGTH = 120
 DEPARTMENT_NAME_MAX_LENGTH = 80
 API_KEY_NAME_MAX_LENGTH = 80
 API_KEY_HINT_LENGTH = 8
+MAX_API_KEY_IPS = 32
+MAX_API_KEY_REQUESTS_PER_MINUTE = 600
 USERNAME_MAX_LENGTH = 64
 
 _SCRYPT_N = 1 << 15
@@ -259,9 +272,10 @@ def _schema_v3_statements() -> list[str]:
 
 
 def _schema_v5_statements() -> list[str]:
-    """Additive version-5 DDL for named API keys, from the shared schema file."""
+    """Additive DDL for named API keys and settings, from the shared schema file."""
     prefixes = (
         "CREATE TABLE IF NOT EXISTS WS_API_KEY",
+        "CREATE TABLE IF NOT EXISTS WS_SYSTEM_SETTINGS",
         "CREATE INDEX IF NOT EXISTS IDX_WS_API_KEY",
     )
     return [
@@ -643,7 +657,7 @@ class WorkspaceStore(PolicyAdminMixin, AlertAdminMixin):
             version = int(current)
             if version == SCHEMA_VERSION:
                 return
-            if version not in (1, 2, 3, 4):
+            if version not in (1, 2, 3, 4, 5):
                 raise WorkspaceConfigError("unsupported workspace schema version")
             if version == 1:
                 # Preserve the original v1 -> v2 data migration, then add the
@@ -666,6 +680,15 @@ class WorkspaceStore(PolicyAdminMixin, AlertAdminMixin):
                 db.execute(statement)
             for statement in _schema_v5_statements():
                 db.execute(statement)
+            for table, statement in _SCHEMA_V6_ALTERS:
+                column = _alter_added_column(statement)
+                if column and self._column_exists(db, table, column):
+                    continue
+                db.execute(statement)
+            # A key made before owners existed belongs to whoever generated it.
+            db.execute(
+                "UPDATE ws_api_keys SET owner_id = created_by WHERE owner_id IS NULL"
+            )
             db.execute(
                 "UPDATE ws_schema_migrations SET version = ? WHERE version = ?",
                 (SCHEMA_VERSION, version),
@@ -1234,6 +1257,12 @@ class WorkspaceStore(PolicyAdminMixin, AlertAdminMixin):
             db.execute(
                 "UPDATE ws_sessions SET revoked = 1 WHERE user_id = ? AND revoked = 0",
                 (user_id,),
+            )
+            # A key must not outlive its owner.  The row and its usage stay.
+            db.execute(
+                "UPDATE ws_api_keys SET revoked_by = ?, revoked_at = ? "
+                "WHERE owner_id = ? AND revoked_at IS NULL",
+                (actor_id, now, user_id),
             )
             # The foreign keys remove this account's alerts and its personal
             # read state; alerts about other users stay.  The runtime account
@@ -2285,8 +2314,11 @@ class WorkspaceStore(PolicyAdminMixin, AlertAdminMixin):
 
     # -- named API keys ---------------------------------------------------
     _API_KEY_COLUMNS = (
-        "SELECT k.id, k.name, k.key_hint, k.created_at, k.revoked_at, "
+        "SELECT k.id, k.name, k.key_hint, k.created_at, k.revoked_at, k.owner_id, "
+        "k.expires_at, k.store_text, k.allowed_ips, k.requests_per_minute, "
         "creator.username AS created_by, revoker.username AS revoked_by, "
+        "owner.username AS owner_username, owner.full_name AS owner_full_name, "
+        "owner.disabled AS owner_disabled, d.name AS owner_department, "
         "(SELECT COUNT(*) FROM ws_api_key_uses AS u WHERE u.key_id = k.id) "
         "AS requests, "
         "(SELECT MAX(u.created_at) FROM ws_api_key_uses AS u WHERE u.key_id = k.id) "
@@ -2294,29 +2326,106 @@ class WorkspaceStore(PolicyAdminMixin, AlertAdminMixin):
         "FROM ws_api_keys AS k "
         "LEFT JOIN ws_users AS creator ON creator.id = k.created_by "
         "LEFT JOIN ws_users AS revoker ON revoker.id = k.revoked_by "
+        "LEFT JOIN ws_users AS owner ON owner.id = k.owner_id "
+        "LEFT JOIN ws_departments AS d ON d.id = owner.department_id "
     )
 
-    @staticmethod
-    def _public_api_key(row: dict[str, Any]) -> dict[str, Any]:
+    def _public_api_key(self, row: dict[str, Any]) -> dict[str, Any]:
         """Display metadata only; the key digest is never selected."""
+        expires_at = row["expires_at"]
+        if row["revoked_at"] is not None:
+            status = "revoked"
+        elif row["owner_username"] is None or int(row["owner_disabled"]) != 0:
+            status = "owner_disabled"
+        elif expires_at is not None and float(expires_at) <= self._now():
+            status = "expired"
+        else:
+            status = "active"
         return {
             "id": row["id"],
             "name": row["name"],
             "key_hint": row["key_hint"],
+            "status": status,
+            "owner_id": row["owner_id"],
+            "owner_username": row["owner_username"],
+            "owner_full_name": row["owner_full_name"],
+            "owner_department": row["owner_department"],
             "created_at": float(row["created_at"]),
             "created_by": row["created_by"],
             "revoked_at": (
                 float(row["revoked_at"]) if row["revoked_at"] is not None else None
             ),
             "revoked_by": row["revoked_by"],
+            "expires_at": float(expires_at) if expires_at is not None else None,
+            "store_text": int(row["store_text"]) != 0,
+            "allowed_ips": json.loads(row["allowed_ips"]) if row["allowed_ips"] else [],
+            "requests_per_minute": row["requests_per_minute"],
             "requests": int(row["requests"]),
             "last_used_at": (
                 float(row["last_used_at"]) if row["last_used_at"] is not None else None
             ),
         }
 
+    @staticmethod
+    def _api_key_options(
+        *,
+        expires_at: Any,
+        store_text: Any,
+        allowed_ips: Any,
+        requests_per_minute: Any,
+        now: float,
+    ) -> tuple[float | None, int, str | None, int | None]:
+        if expires_at is not None:
+            if (
+                isinstance(expires_at, bool)
+                or not isinstance(expires_at, (int, float))
+                or not math.isfinite(expires_at)
+                or expires_at <= now
+            ):
+                raise ValueError("expiry is invalid")
+            expires_at = float(expires_at)
+        if not isinstance(store_text, bool):
+            raise ValueError("store_text is invalid")
+        networks: list[str] = []
+        if not isinstance(allowed_ips, (list, tuple)) or len(allowed_ips) > MAX_API_KEY_IPS:
+            raise ValueError("allowed addresses are invalid")
+        for item in allowed_ips:
+            if not isinstance(item, str):
+                raise ValueError("allowed addresses are invalid")
+            networks.append(str(ipaddress.ip_network(item.strip(), strict=False)))
+        if requests_per_minute is not None and (
+            isinstance(requests_per_minute, bool)
+            or not isinstance(requests_per_minute, int)
+            or not 1 <= requests_per_minute <= MAX_API_KEY_REQUESTS_PER_MINUTE
+        ):
+            raise ValueError("rate limit is invalid")
+        return (
+            expires_at,
+            int(store_text),
+            json.dumps(networks) if networks else None,
+            requests_per_minute,
+        )
+
+    @staticmethod
+    def _require_key_owner(db: _Db, owner_id: Any) -> None:
+        if not isinstance(owner_id, str) or not 1 <= len(owner_id) <= 64:
+            raise ValueError("owner is invalid")
+        row = db.query_one("SELECT disabled FROM ws_users WHERE id = ?", (owner_id,))
+        if not row or int(row["disabled"]) != 0:
+            raise ValueError("owner is invalid")
+
     @_guard
-    def create_api_key(self, actor_id: str, name: str) -> dict[str, Any]:
+    def create_api_key(
+        self,
+        actor_id: str,
+        name: str,
+        owner_id: str | None = None,
+        *,
+        expires_at: float | None = None,
+        store_text: bool = False,
+        allowed_ips: Any = (),
+        requests_per_minute: int | None = None,
+    ) -> dict[str, Any]:
         """Create a named key.  This is the only time the key itself is returned."""
         key_name = _require_text(
             name, maximum=API_KEY_NAME_MAX_LENGTH, field="key name"
@@ -2325,8 +2434,17 @@ class WorkspaceStore(PolicyAdminMixin, AlertAdminMixin):
         secret = API_KEY_PREFIX + secrets.token_urlsafe(32)
         key_id = str(uuid.uuid4())
         now = self._now()
+        options = self._api_key_options(
+            expires_at=expires_at,
+            store_text=store_text,
+            allowed_ips=allowed_ips,
+            requests_per_minute=requests_per_minute,
+            now=now,
+        )
+        owner = actor_id if owner_id is None else owner_id
         with self._backend.transaction() as db:
             self._require_admin(db, actor_id)
+            self._require_key_owner(db, owner)
             # A revoked key keeps its name, so a name always means one key.
             if db.query_one(
                 "SELECT id FROM ws_api_keys WHERE name_key = ?", (name_key,)
@@ -2335,8 +2453,9 @@ class WorkspaceStore(PolicyAdminMixin, AlertAdminMixin):
             db.execute(
                 """
                 INSERT INTO ws_api_keys(
-                    id, name, name_key, key_digest, key_hint, created_by, created_at
-                ) VALUES (?, ?, ?, ?, ?, ?, ?)
+                    id, name, name_key, key_digest, key_hint, created_by, created_at,
+                    owner_id, expires_at, store_text, allowed_ips, requests_per_minute
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                 """,
                 (
                     key_id,
@@ -2346,6 +2465,8 @@ class WorkspaceStore(PolicyAdminMixin, AlertAdminMixin):
                     secret[:API_KEY_HINT_LENGTH],
                     actor_id,
                     now,
+                    owner,
+                    *options,
                 ),
             )
             self._log_access(
@@ -2360,6 +2481,54 @@ class WorkspaceStore(PolicyAdminMixin, AlertAdminMixin):
                 self._API_KEY_COLUMNS + "WHERE k.id = ?", (key_id,)
             )
             return {"key": secret, "item": self._public_api_key(row)}
+
+    @_guard
+    def update_api_key(
+        self,
+        actor_id: str,
+        key_id: str,
+        *,
+        owner_id: str,
+        expires_at: float | None,
+        store_text: bool,
+        allowed_ips: Any,
+        requests_per_minute: int | None,
+    ) -> dict[str, Any]:
+        """Replace a key's owner and options.  The secret and name never change."""
+        now = self._now()
+        options = self._api_key_options(
+            expires_at=expires_at,
+            store_text=store_text,
+            allowed_ips=allowed_ips,
+            requests_per_minute=requests_per_minute,
+            now=now,
+        )
+        with self._backend.transaction() as db:
+            self._require_admin(db, actor_id)
+            self._require_key_owner(db, owner_id)
+            row = db.query_one(
+                "SELECT revoked_at FROM ws_api_keys WHERE id = ?", (key_id,)
+            )
+            if row is None:
+                raise NotFound("api key not found")
+            if row["revoked_at"] is not None:
+                raise Conflict("api key is revoked")
+            db.execute(
+                "UPDATE ws_api_keys SET owner_id = ?, expires_at = ?, store_text = ?, "
+                "allowed_ips = ?, requests_per_minute = ? WHERE id = ?",
+                (owner_id, *options, key_id),
+            )
+            self._log_access(
+                db,
+                actor_id,
+                f"admin.update_api_key:{key_id}",
+                conversation_id=None,
+                department_id=None,
+                now=now,
+            )
+            return self._public_api_key(
+                db.query_one(self._API_KEY_COLUMNS + "WHERE k.id = ?", (key_id,))
+            )
 
     @_guard
     def list_api_keys(
@@ -2418,25 +2587,264 @@ class WorkspaceStore(PolicyAdminMixin, AlertAdminMixin):
 
     @_guard
     def resolve_api_key(self, key_digest: str) -> dict[str, Any] | None:
-        """Return the active key with this digest, or ``None``."""
+        """Return the usable key with this digest, or ``None``.
+
+        The owner is joined on every request, so disabling or deleting the
+        account stops its keys at once, and they recover if it is re-enabled.
+        """
         with self._backend.transaction() as db:
             row = db.query_one(
-                "SELECT id, name FROM ws_api_keys "
-                "WHERE key_digest = ? AND revoked_at IS NULL",
+                "SELECT k.id, k.name, k.owner_id, k.expires_at, k.store_text, "
+                "k.allowed_ips, k.requests_per_minute, u.department_id "
+                "FROM ws_api_keys AS k JOIN ws_users AS u ON u.id = k.owner_id "
+                "WHERE k.key_digest = ? AND k.revoked_at IS NULL AND u.disabled = 0",
                 (key_digest,),
             )
-            return {"id": row["id"], "name": row["name"]} if row else None
+            if row is None:
+                return None
+            if row["expires_at"] is not None and float(row["expires_at"]) <= self._now():
+                return None
+            return {
+                "id": row["id"],
+                "name": row["name"],
+                "owner_id": row["owner_id"],
+                "department_id": row["department_id"],
+                "store_text": int(row["store_text"]) != 0,
+                "allowed_ips": (
+                    json.loads(row["allowed_ips"]) if row["allowed_ips"] else []
+                ),
+                "requests_per_minute": row["requests_per_minute"],
+            }
 
     @_guard
-    def record_api_key_use(self, key_id: str, request_id: str) -> None:
+    def record_api_key_use(
+        self, key_id: str, request_id: str, client_ip: str | None = None
+    ) -> None:
         with self._backend.transaction() as db:
             applied = db.execute(
-                "INSERT INTO ws_api_key_uses(request_id, key_id, created_at) "
-                "VALUES (?, ?, ?)",
-                (request_id, key_id, self._now()),
+                "INSERT INTO ws_api_key_uses(request_id, key_id, created_at, client_ip) "
+                "VALUES (?, ?, ?, ?)",
+                (request_id, key_id, self._now(), client_ip),
             )
             if applied != 1:
                 raise WorkspaceStorageError("api key use was not recorded")
+
+    @_guard
+    def record_api_key_result(
+        self,
+        key: dict[str, Any],
+        request_id: str,
+        *,
+        outcome: str,
+        error_code: str | None = None,
+        alert: dict[str, Any] | None = None,
+        prompt: str | None = None,
+        reply: str | None = None,
+    ) -> None:
+        """Store how a key's request ended, in one transaction."""
+        prepared = self._prepare_block_alert(
+            alert, outcome=outcome, request_id=request_id
+        )
+        now = self._now()
+        with self._backend.transaction() as db:
+            db.execute(
+                "INSERT INTO ws_api_key_outcomes(request_id, outcome, error_code, created_at) "
+                "VALUES (?, ?, ?, ?)",
+                (request_id, outcome, error_code, now),
+            )
+            if prepared is not None:
+                self._insert_block_alert(
+                    db,
+                    prepared,
+                    user_id=key["owner_id"],
+                    department_id=key["department_id"],
+                    conversation_id=None,
+                    message_id=None,
+                    now=now,
+                    api_key_id=key["id"],
+                )
+            if prompt is not None:
+                db.execute(
+                    "INSERT INTO ws_api_key_text("
+                    "request_id, key_id, prompt_ciphertext, reply_ciphertext, created_at"
+                    ") VALUES (?, ?, ?, ?, ?)",
+                    (
+                        request_id,
+                        key["id"],
+                        self._cipher.encrypt(key["id"], request_id, "user", prompt),
+                        (
+                            self._cipher.encrypt(key["id"], request_id, "assistant", reply)
+                            if reply
+                            else None
+                        ),
+                        now,
+                    ),
+                )
+
+    @_guard
+    def list_api_key_requests(
+        self, actor_id: str, key_id: str, *, limit: int = 50, after: str | None = None
+    ) -> dict[str, Any]:
+        """One key's requests, newest first.  Metadata only, never text."""
+        limit = _validate_limit(limit)
+        with self._backend.transaction() as db:
+            self._require_admin(db, actor_id)
+            if not db.query_one("SELECT id FROM ws_api_keys WHERE id = ?", (key_id,)):
+                raise NotFound("api key not found")
+            params: list[Any] = [key_id]
+            sql = (
+                "SELECT u.request_id, u.created_at, u.client_ip, o.outcome, o.error_code, "
+                "t.request_id AS text_id FROM ws_api_key_uses AS u "
+                "LEFT JOIN ws_api_key_outcomes AS o ON o.request_id = u.request_id "
+                "LEFT JOIN ws_api_key_text AS t ON t.request_id = u.request_id "
+                "WHERE u.key_id = ?"
+            )
+            if after is not None:
+                created_at, last_id = _decode_cursor(after)
+                sql += (
+                    " AND (u.created_at < ? OR "
+                    "(u.created_at = ? AND u.request_id < ?))"
+                )
+                params.extend((created_at, created_at, last_id))
+            sql += " ORDER BY u.created_at DESC, u.request_id DESC LIMIT ?"
+            params.append(limit + 1)
+            rows = db.query(sql, tuple(params))
+            next_cursor = (
+                _encode_cursor(
+                    rows[limit - 1]["created_at"], rows[limit - 1]["request_id"]
+                )
+                if len(rows) > limit
+                else None
+            )
+            return {
+                "items": [
+                    {
+                        "request_id": row["request_id"],
+                        "created_at": float(row["created_at"]),
+                        "client_ip": row["client_ip"],
+                        "outcome": row["outcome"],
+                        "error_code": row["error_code"],
+                        "has_text": row["text_id"] is not None,
+                    }
+                    for row in rows[:limit]
+                ],
+                "next": next_cursor,
+            }
+
+    @_guard
+    def read_api_key_text(
+        self, actor_id: str, key_id: str, request_id: str
+    ) -> dict[str, Any]:
+        """Decrypt one stored request.  Every read is in the access log."""
+        now = self._now()
+        with self._backend.transaction() as db:
+            self._require_admin(db, actor_id)
+            row = db.query_one(
+                "SELECT prompt_ciphertext, reply_ciphertext FROM ws_api_key_text "
+                "WHERE key_id = ? AND request_id = ?",
+                (key_id, request_id),
+            )
+            if row is None:
+                raise NotFound("stored text not found")
+            self._log_access(
+                db,
+                actor_id,
+                f"admin.read_api_key_text:{key_id}",
+                conversation_id=None,
+                department_id=None,
+                now=now,
+            )
+            reply = row["reply_ciphertext"]
+            return {
+                "request_id": request_id,
+                "prompt": self._cipher.decrypt(
+                    key_id, request_id, "user", row["prompt_ciphertext"]
+                ),
+                "reply": (
+                    self._cipher.decrypt(key_id, request_id, "assistant", reply)
+                    if reply
+                    else None
+                ),
+            }
+
+    # -- system settings --------------------------------------------------
+    @_guard
+    def current_system_settings(self) -> dict[str, Any]:
+        """The active revision.  ``revision`` 0 means nothing has been saved."""
+        with self._backend.transaction() as db:
+            row = db.query_one(
+                "SELECT revision, settings FROM ws_system_settings "
+                "ORDER BY revision DESC LIMIT 1"
+            )
+            if row is None:
+                return {"revision": 0, "values": None}
+            return {"revision": int(row["revision"]), "values": json.loads(row["settings"])}
+
+    @_guard
+    def save_system_settings(
+        self,
+        actor_id: str,
+        values: dict[str, Any],
+        reason: str,
+        *,
+        expected_revision: int,
+    ) -> dict[str, Any]:
+        """Append one validated revision; a stale form is refused, not merged."""
+        now = self._now()
+        with self._backend.transaction() as db:
+            self._lock_admin_roles(db)
+            self._require_admin(db, actor_id)
+            row = db.query_one(
+                "SELECT MAX(revision) AS revision FROM ws_system_settings"
+            )
+            current = int(row["revision"]) if row and row["revision"] is not None else 0
+            if current != expected_revision:
+                raise Conflict("settings changed since this form was opened")
+            revision = current + 1
+            db.execute(
+                "INSERT INTO ws_system_settings("
+                "revision, settings, actor_id, reason, created_at"
+                ") VALUES (?, ?, ?, ?, ?)",
+                (revision, json.dumps(values, sort_keys=True), actor_id, reason, now),
+            )
+            self._log_access(
+                db,
+                actor_id,
+                f"admin.save_settings:{revision}",
+                conversation_id=None,
+                department_id=None,
+                now=now,
+            )
+            return {"revision": revision, "values": values}
+
+    @_guard
+    def list_system_settings(
+        self, actor_id: str, *, limit: int = 50
+    ) -> dict[str, Any]:
+        """Saved revisions, newest first, with who changed them and why."""
+        limit = _validate_limit(limit)
+        with self._backend.transaction() as db:
+            self._require_admin(db, actor_id)
+            rows = db.query(
+                "SELECT s.revision, s.settings, s.reason, s.created_at, s.actor_id, "
+                "u.username AS actor_username FROM ws_system_settings AS s "
+                "LEFT JOIN ws_users AS u ON u.id = s.actor_id "
+                "ORDER BY s.revision DESC LIMIT ?",
+                (limit,),
+            )
+            return {
+                "items": [
+                    {
+                        "revision": int(row["revision"]),
+                        "values": json.loads(row["settings"]),
+                        "reason": row["reason"],
+                        "created_at": float(row["created_at"]),
+                        "actor_id": row["actor_id"],
+                        "actor_username": row["actor_username"],
+                    }
+                    for row in rows
+                ]
+            }
 
     @_guard
     def list_access_log(

@@ -45,6 +45,7 @@ from .admin_page import ADMIN_SECURITY_HEADERS, admin_html
 from .audit import PostgresAuditStore, UnreadyAuditStore
 from .controls import audit_latency_ms as _latency_ms
 from .demo_page import DEMO_SECURITY_HEADERS, demo_html
+from .system_settings import RuntimeSettings
 from .workspace_page import WORKSPACE_SECURITY_HEADERS, workspace_html
 from .export import (
     EXPORT_FILENAME,
@@ -1494,6 +1495,34 @@ def make_app(
         # internal gateway.  Share the one fixed-code counter store so their
         # generation failures appear in the same ``/health/ready`` diagnostics.
         runtime_gateway.diagnostics = workspace_runtime.diagnostics
+    runtime_settings = RuntimeSettings()
+    workspace_runtime.settings = runtime_settings
+    # Captured first: a saved setting may lower these, but never past them.
+    settings_ceilings = {
+        "chat_limits": {
+            name: getattr(runtime_gateway.limits, name) for name in LIMIT_FIELDS
+        },
+        "input_allow_categories": list(runtime_gateway.policy.input_allow_categories),
+        "output_allow_categories": list(runtime_gateway.policy.output_allow_categories),
+        "max_concurrency": concurrency,
+        "chat_timeout_seconds": chat_timeout,
+    }
+    if workspace_runtime.ready:
+        try:
+            saved = workspace_runtime.store.current_system_settings()
+        except Exception:
+            # Saved settings may be tighter than the defaults, so never guess.
+            workspace_runtime.ready = False
+            workspace_runtime.error = "configuration is invalid"
+        else:
+            if saved["values"] is not None:
+                runtime_settings.load(saved["revision"], saved["values"])
+                concurrency = min(
+                    concurrency, saved["values"]["max_concurrency"] or concurrency
+                )
+                chat_timeout = min(
+                    chat_timeout, saved["values"]["chat_timeout_seconds"] or chat_timeout
+                )
 
     @asynccontextmanager
     async def lifespan(_app: FastAPI):
@@ -1570,6 +1599,7 @@ def make_app(
         str(env.get(ENV_TRUST_PROXY_CLIENT_IP, "")).strip().lower() == "true"
     )
     app.state.chat_work_timeout = chat_timeout
+    app.state.settings_ceilings = settings_ceilings
     # Read-only resolved operational bounds for the authenticated admin view.
     app.state.operational = {
         "chat_work_timeout": chat_timeout,
@@ -1590,6 +1620,9 @@ def make_app(
         workspace_runtime.internal_gateway.metrics = runtime_gateway.metrics
     if workspace_runtime.ready:
         runtime_gateway.api_keys = workspace_runtime.store
+    runtime_gateway.settings = runtime_settings
+    if workspace_runtime.internal_gateway is not None:
+        workspace_runtime.internal_gateway.settings = runtime_settings
     guard = getattr(runtime_gateway.adapters, "attack_guard", None)
     if hasattr(guard, "scan_observer"):
         guard.scan_observer = runtime_gateway.metrics.note_guard_scan
@@ -2041,6 +2074,7 @@ def make_app(
                     headers,
                     chat_body,
                     result_sink=sink,
+                    client_ip=_client_address(request),
                 )
             )
             dispatched = True

@@ -79,7 +79,10 @@ REVOKE ALL PRIVILEGES ON TABLE
     public.ws_block_alerts,
     public.ws_alert_state,
     public.ws_api_keys,
-    public.ws_api_key_uses
+    public.ws_api_key_uses,
+    public.ws_api_key_outcomes,
+    public.ws_api_key_text,
+    public.ws_system_settings
 FROM nasi_lemak_workspace;
 
 -- Migration metadata is read-only to the runtime.
@@ -119,3 +122,10 @@ GRANT SELECT, INSERT, UPDATE ON TABLE public.ws_alert_state TO nasi_lemak_worksp
 -- usage record is append-only, like the access log.
 GRANT SELECT, INSERT, UPDATE ON TABLE public.ws_api_keys TO nasi_lemak_workspace;
 GRANT SELECT, INSERT ON TABLE public.ws_api_key_uses TO nasi_lemak_workspace;
+GRANT SELECT, INSERT ON TABLE public.ws_api_key_outcomes TO nasi_lemak_workspace;
+
+-- Stored API text is removed by the retention purge, like conversations.
+GRANT SELECT, INSERT, DELETE ON TABLE public.ws_api_key_text TO nasi_lemak_workspace;
+
+-- Settings changes are append-only, so the history cannot be rewritten.
+GRANT SELECT, INSERT ON TABLE public.ws_system_settings TO nasi_lemak_workspace;

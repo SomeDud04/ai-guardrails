@@ -385,6 +385,7 @@ class NoMetadataGateway(Gateway):
         scan_context: Any = None,
         control: Any = None,
         result_sink: dict[str, Any] | None = None,
+        client_ip: str | None = None,
     ):
         return self.response
 

@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import hashlib
 import hmac
+import ipaddress
 import json
 import logging
 import re
@@ -12,7 +13,8 @@ import threading
 import time
 import unicodedata
 import uuid
-from dataclasses import dataclass, field
+from collections import deque
+from dataclasses import dataclass, field, replace
 from pathlib import Path
 from typing import Any
 
@@ -26,6 +28,7 @@ from .limits import LIMIT_FIELDS, ChatLimits, tighten
 from .pii import mask_text
 from .qwen3guard import serialize_messages
 from .scan_context import ScanContext
+from .system_settings import RuntimeSettings
 
 
 LOGGER = logging.getLogger(__name__)
@@ -45,6 +48,8 @@ REJECTION_REASONS = (
     "invalid_json",
     "invalid_body",
     "unauthorized",
+    "paused",
+    "rate_limited",
     "model_mismatch",
     "unknown_field",
     "invalid_request",
@@ -302,6 +307,17 @@ def _elapsed_ms(started: float) -> int:
     return round((time.perf_counter() - started) * 1000.0)
 
 
+def _ip_allowed(client_ip: str | None, networks: list[str]) -> bool:
+    """True when a key has no allowlist, or the caller is inside it."""
+    if not networks:
+        return True
+    try:
+        address = ipaddress.ip_address(client_ip or "")
+    except ValueError:
+        return False
+    return any(address in ipaddress.ip_network(network) for network in networks)
+
+
 def _policy_allows(result: dict[str, Any], allowed: tuple[str, ...]) -> bool:
     """True when every category behind a block is one the policy allows.
 
@@ -400,6 +416,11 @@ class Gateway:
         self.metrics = LiveMetrics()
         # Set by the server when the workspace store can answer for named keys.
         self.api_keys: Any = None
+        # Replaced by the server with the instance both gateways share.
+        self.settings = RuntimeSettings()
+        self._key_hits: dict[str, deque[float]] = {}
+        self._key_hits_lock = threading.Lock()
+        self._extra_denies: tuple[int, Policy] | None = None
         if not isinstance(policy, Policy):
             raise ValueError("invalid policy")
         if limits is None:
@@ -431,14 +452,17 @@ class Gateway:
         stage = "initial" if event_type == "request_started" else "terminal"
         if self.fail_audit_stage == stage:
             raise OSError("audit unavailable")
+        version, digest = self.settings.effective_policy(
+            self.policy.version, self.policy.digest
+        )
         with self._audit_lock:
             if event_type == "request_started":
                 return self.audit_store.record_initial(
                     request_id,
                     self.app_id,
                     self.policy.model,
-                    self.policy.version,
-                    self.policy.digest,
+                    version,
+                    digest,
                 )
             return self.audit_store.record_terminal(
                 request_id,
@@ -447,8 +471,8 @@ class Gateway:
                 code,
                 app_id=self.app_id,
                 model=self.policy.model,
-                policy_version=self.policy.version,
-                policy_digest=self.policy.digest,
+                policy_version=version,
+                policy_digest=digest,
             )
 
     def audit_events(self) -> list[dict[str, Any]]:
@@ -464,7 +488,7 @@ class Gateway:
 
     @staticmethod
     def _error(status: int, code: str, request_id: str):
-        messages = {"INVALID_REQUEST": "Request is not supported.", "UNAUTHORIZED": "Authentication required.", "INPUT_LIMIT": "Request exceeds the supported input limit.", "UNAVAILABLE": "Required safety control is unavailable.", "POLICY_BLOCK": "Request did not pass safety checks."}
+        messages = {"INVALID_REQUEST": "Request is not supported.", "UNAUTHORIZED": "Authentication required.", "INPUT_LIMIT": "Request exceeds the supported input limit.", "UNAVAILABLE": "Required safety control is unavailable.", "POLICY_BLOCK": "Request did not pass safety checks.", "RATE_LIMITED": "Too many requests for this key."}
         return status, {"error": {"code": code, "message": messages[code], "request_id": request_id}}
 
     @classmethod
@@ -493,10 +517,12 @@ class Gateway:
         scan_context: ScanContext | None = None,
         control: GatewayControl | None = None,
         result_sink: dict[str, Any] | None = None,
+        client_ip: str | None = None,
     ):
         """Run the pipeline and record its timing for the Monitor screen."""
         timing: dict[str, Any] = {}
         status = 0
+        sink = {} if result_sink is None else result_sink
         self.metrics.enter()
         try:
             outcome = self._pipeline(
@@ -507,17 +533,114 @@ class Gateway:
                 timing,
                 scan_context=scan_context,
                 control=control,
-                result_sink=result_sink,
+                result_sink=sink,
+                client_ip=client_ip,
             )
+            outcome = self._finish_named_key(timing, outcome, sink)
             status = outcome[0]
             return outcome
         finally:
             self.metrics.leave(timing, status)
 
-    def _named_key(self, candidate: str, digest: bytes) -> dict[str, Any] | None:
+    def _named_key(
+        self, candidate: str, digest: bytes, client_ip: str | None
+    ) -> dict[str, Any] | None:
         if self.api_keys is None or not candidate.startswith(API_KEY_PREFIX):
             return None
-        return self.api_keys.resolve_api_key(digest.hex())
+        key = self.api_keys.resolve_api_key(digest.hex())
+        if key is None or not _ip_allowed(client_ip, key["allowed_ips"]):
+            return None
+        return key
+
+    def _shared_key_allowed(self) -> bool:
+        # The workspace's internal gateway has no ``api_keys`` and keeps working.
+        return self.api_keys is None or self.settings.snapshot()[1]["shared_key_enabled"]
+
+    def _within_rate(self, key: dict[str, Any]) -> bool:
+        limit = key["requests_per_minute"]
+        if limit is None:
+            limit = self.settings.snapshot()[1]["key_requests_per_minute"]
+        if limit is None:
+            return True
+        now = time.monotonic()
+        with self._key_hits_lock:
+            hits = self._key_hits.setdefault(key["id"], deque())
+            while hits and now - hits[0] >= 60.0:
+                hits.popleft()
+            if len(hits) >= limit:
+                return False
+            hits.append(now)
+            return True
+
+    def _denied(self, text: str) -> bool:
+        """Check the policy file's phrases, then any added in Settings."""
+        if self.policy.denies(text):
+            return True
+        revision, values = self.settings.snapshot()
+        if not values["deny_phrases"]:
+            return False
+        cached = self._extra_denies
+        if cached is None or cached[0] != revision:
+            cached = (
+                revision,
+                replace(self.policy, deny_phrases=tuple(values["deny_phrases"])),
+            )
+            self._extra_denies = cached
+        return cached[1].denies(text)
+
+    def _allowed_categories(self, lane: str) -> tuple[str, ...]:
+        """The file's allowed categories, narrowed by Settings, never widened."""
+        allowed = getattr(self.policy, f"{lane}_allow_categories")
+        chosen = self.settings.snapshot()[1][f"{lane}_allow_categories"]
+        return allowed if chosen is None else tuple(c for c in allowed if c in chosen)
+
+    def _finish_named_key(
+        self, timing: dict[str, Any], outcome: Any, sink: dict[str, Any]
+    ) -> Any:
+        """Record how a key's request ended, before anything is released.
+
+        The audit log stays the authority, so this is best effort, unless the
+        key's text must be kept: a reply that cannot be stored is withheld.
+        """
+        key = timing.get("named_key")
+        if key is None:
+            return outcome
+        request_id = timing["request_id"]
+        status, body = outcome
+        result = "allowed" if status == 200 else "blocked" if status in (403, 413) else "failed"
+        error = body.get("error", {}) if isinstance(body, dict) else {}
+        alert = None
+        if isinstance(error.get("block"), dict):
+            metadata = timing["control"].metadata()
+            alert = {
+                "stage": error["block"]["stage"],
+                "reason_code": error["block"]["reason_code"],
+                "revision": metadata["revision"],
+                "digest": metadata["digest"],
+                "sources": metadata["sources"],
+            }
+        prompt = reply = None
+        if key["store_text"]:
+            prompt = json.dumps(
+                sink.get("sanitized_messages") or timing["messages"], ensure_ascii=False
+            )
+            if status == 200:
+                reply = body["choices"][0]["message"]["content"]
+        try:
+            self.api_keys.record_api_key_result(
+                key,
+                request_id,
+                outcome=result,
+                error_code=error.get("code"),
+                alert=alert,
+                prompt=prompt,
+                reply=reply,
+            )
+        except Exception:
+            self._log_failure(request_id, "other", None)
+            if key["store_text"] and status == 200:
+                return self._error(503, "UNAVAILABLE", request_id)
+        return outcome
 
     def _pipeline(
         self,
@@ -530,6 +653,7 @@ class Gateway:
         scan_context: ScanContext | None = None,
         control: GatewayControl | None = None,
         result_sink: dict[str, Any] | None = None,
+        client_ip: str | None = None,
     ):
         """Run the one guarded pipeline for one request.
 
@@ -557,11 +681,15 @@ class Gateway:
         candidate = supplied[7:] if supplied.startswith("Bearer ") else ""
         candidate_digest = hashlib.sha256(candidate.encode()).digest()
         named_key = None
-        if not self._key_valid or not hmac.compare_digest(candidate_digest, self._key_digest):
+        if (
+            not self._key_valid
+            or not hmac.compare_digest(candidate_digest, self._key_digest)
+            or not self._shared_key_allowed()
+        ):
             # The shared key is checked first and needs no database, so a
             # workspace outage can only affect named keys.
             try:
-                named_key = self._named_key(candidate, candidate_digest)
+                named_key = self._named_key(candidate, candidate_digest, client_ip)
             except Exception:
                 log_rejection(request_id, 503, "not_ready")
                 return self._error(503, "UNAVAILABLE", request_id)
@@ -573,12 +701,28 @@ class Gateway:
         if self.adapters is None:
             log_rejection(request_id, 503, "not_ready")
             return self._error(503, "UNAVAILABLE", request_id)
+        settings = self.settings.snapshot()[1]
+        if settings["paused"]:
+            log_rejection(request_id, 503, "paused")
+            return self._error(503, "UNAVAILABLE", request_id)
+        if named_key is not None:
+            if not self._within_rate(named_key):
+                log_rejection(request_id, 429, "rate_limited")
+                return self._error(429, "RATE_LIMITED", request_id)
+            try:
+                # A key follows its owner's policy, the same as their chats.
+                control = self.api_keys.resolve_gateway_control(named_key["owner_id"])
+            except Exception:
+                log_rejection(request_id, 503, "not_ready")
+                return self._error(503, "UNAVAILABLE", request_id)
         try:
             control = self._resolve_control(control)
         except ValueError:
             log_rejection(request_id, 503, "not_ready")
             return self._error(503, "UNAVAILABLE", request_id)
-        effective_limits = tighten(self.limits, dict(control.limits))
+        effective_limits = tighten(
+            tighten(self.limits, settings["chat_limits"]), dict(control.limits)
+        )
         parsed = self._validate(body, effective_limits)
         if parsed == "input_limit":
             log_rejection(request_id, 413, "input_limit")
@@ -612,7 +756,13 @@ class Gateway:
         try:
             # Written first, so no request can reach the model unattributed.
             if named_key is not None:
-                self.api_keys.record_api_key_use(named_key["id"], request_id)
+                self.api_keys.record_api_key_use(named_key["id"], request_id, client_ip)
+                timing.update(
+                    named_key=named_key,
+                    request_id=request_id,
+                    control=control,
+                    messages=messages,
+                )
             _audit_sink("request_started", "pending")
         except Exception:
             return self._error(503, "UNAVAILABLE", request_id)
@@ -662,7 +812,7 @@ class Gateway:
                 if not isinstance(result, dict) or result.get("decision") not in ("allow", "block"):
                     raise ValueError("invalid attack result")
                 if result["decision"] == "block" and not _policy_allows(
-                    result, self.policy.input_allow_categories
+                    result, self._allowed_categories("input")
                 ):
                     _sink("input_decision", "block")
                     _audit_sink("request_blocked", "blocked", "POLICY_BLOCK")
@@ -672,7 +822,7 @@ class Gateway:
             # Deny phrases are literal policy text, checked across every accepted
             # input turn before generation.  Disabling the model classifier never
             # disables this server-side policy control.
-            if any(self.policy.denies(message["content"]) for message in messages):
+            if any(self._denied(message["content"]) for message in messages):
                 _audit_sink("request_blocked", "blocked", "POLICY_BLOCK")
                 return self._blocked(request_id, "INPUT_POLICY_BLOCK")
             # A cancelled/deadlined workspace request must not launch new
@@ -742,7 +892,7 @@ class Gateway:
                 if not isinstance(result, dict) or not isinstance(result.get("safe"), bool):
                     raise ValueError("invalid output result")
                 safe = result["safe"] or _policy_allows(
-                    result, self.policy.output_allow_categories
+                    result, self._allowed_categories("output")
                 )
                 _sink("output_safe", safe)
                 if not safe:
@@ -751,7 +901,7 @@ class Gateway:
             # The complete buffered output is checked before any release.
             # Disabling the model output classifier never bypasses the literal
             # policy deny list.
-            if self.policy.denies(output):
+            if self._denied(output):
                 _audit_sink("request_blocked", "blocked", "POLICY_BLOCK")
                 return self._blocked(request_id, "OUTPUT_POLICY_BLOCK")
             masked_output = mask_pii(output, control.output_masks)
