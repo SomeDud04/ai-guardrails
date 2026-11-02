@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# Rehearse the schema 6 upgrade on a throwaway copy of the live database.
+# Rehearse the schema 7 upgrade on a throwaway copy of the live database.
 #
 # Run as root on the VM after building the new image.  The live gateway and
 # database keep running: this only reads a pg_dump of the live database, then
@@ -44,7 +44,7 @@ rm -f "$WORK/live.dump"
 before_version=$(sql -c 'SELECT MAX(version) FROM ws_schema_migrations')
 before_users=$(sql -c 'SELECT COUNT(*) FROM ws_users')
 echo "copied the live database: schema $before_version, $before_users accounts"
-test "$before_version" = 5
+test "$before_version" = 6
 
 mkdir "$WORK/workspace"
 cp .secrets/workspace/workspace_key "$WORK/workspace/workspace_key"
@@ -67,10 +67,10 @@ sql -c "CREATE ROLE nl_rehearsal_runtime LOGIN PASSWORD '$PASSWORD' IN ROLE nasi
 after_version=$(sql -c 'SELECT MAX(version) FROM ws_schema_migrations')
 after_users=$(sql -c 'SELECT COUNT(*) FROM ws_users')
 echo "after the migration: schema $after_version, $after_users accounts"
-test "$after_version" = 6
+test "$after_version" = 7
 test "$after_users" = "$before_users"
-test "$(sql -c 'SELECT COUNT(*) FROM ws_api_keys WHERE owner_id IS NULL')" = 0
-echo "every existing key now has an owner: $(sql -c 'SELECT COUNT(*) FROM ws_api_keys') keys"
+test "$(sql -c 'SELECT COUNT(*) FROM ws_users WHERE auditor <> 0')" = 0
+echo "no existing account became an auditor"
 
 ADMIN_ID=$(sql -c "SELECT id FROM ws_users WHERE role = 'admin' AND disabled = 0 ORDER BY created_at LIMIT 1")
 test -n "$ADMIN_ID"
@@ -82,6 +82,7 @@ import os
 
 from nasi_lemak import workspace_cli as cli
 from nasi_lemak.system_settings import DEFAULT_SETTINGS
+from nasi_lemak.workspace_store import AccessDenied
 
 admin = os.environ["ADMIN_ID"]
 key = cli._read_secret_file("/secrets/workspace_key", label="key")
@@ -122,14 +123,53 @@ assert text["prompt"] == "rehearsal prompt"
 alerts = store.list_block_alerts(admin)["items"]
 assert any(item["api_key_name"] == "Rehearsal key" for item in alerts)
 saved = store.save_system_settings(
-    admin, dict(DEFAULT_SETTINGS), "Rehearsal", expected_revision=0
+    admin,
+    dict(DEFAULT_SETTINGS),
+    "Rehearsal",
+    expected_revision=store.current_system_settings()["revision"],
 )
 assert store.current_system_settings()["revision"] == saved["revision"]
 store.purge_expired_conversations(36500)
 store.revoke_api_key(admin, resolved["id"])
 assert store.resolve_api_key(digest) is None
+
+department = store.get_profile(admin)["department"]["id"]
+auditor = store.create_user(
+    admin,
+    "rehearsal.auditor",
+    "rehearsal-password-only",
+    "Rehearsal Auditor",
+    department,
+    role="auditor",
+)
+reader = auditor["id"]
+assert auditor["role"] == "auditor"
+assert store.list_users(reader)["items"]
+assert store.list_api_keys(reader)["items"]
+assert store.list_api_key_requests(reader, resolved["id"])["items"]
+assert store.list_system_settings(reader)["items"]
+assert store.list_access_log(reader)["items"]
+assert store.list_block_alerts(reader)["items"]
+store.alert_summary(reader)
+store.list_policy_audit(reader)
+rows = store.export_audit(reader, 0.0)
+assert {row["source"] for row in rows} >= {"access", "settings", "api_key", "alert"}
+try:
+    store.read_api_key_text(reader, resolved["id"], "req_rehearsal")
+except AccessDenied:
+    pass
+else:
+    raise AssertionError("an auditor must not read stored text")
+try:
+    store.create_department(reader, "Rehearsal refused")
+except AccessDenied:
+    pass
+else:
+    raise AssertionError("an auditor must not change anything")
+store.set_user_role(admin, reader, "employee")
+store.delete_user(admin, reader)
 store.close()
-print("runtime account: keys, history, alerts, stored text and settings all worked")
+print("runtime account: keys, history, alerts, settings, auditor and export all worked")
 PY
 
 refused() {

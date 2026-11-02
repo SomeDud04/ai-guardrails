@@ -333,6 +333,7 @@ textarea:focus-visible { outline-offset: -2px; }
 }
 .admin-subtab[aria-selected="true"] { color: var(--text); background: var(--surface); border-color: var(--line); border-bottom-color: var(--surface); }
 .admin-panel-section { display: grid; gap: var(--space-3); min-width: 0; padding: var(--space-3) 0 var(--space-5); }
+#admin-panel[data-read-only] [data-admin-write] { display: none !important; }
 .admin-section-head { display: flex; flex-wrap: wrap; align-items: center; gap: var(--space-2); }
 .admin-section-head h3 { margin: 0; color: var(--text-soft); font-size: .875rem; }
 .admin-toolbar { display: flex; flex-wrap: wrap; align-items: flex-end; gap: var(--space-2); min-width: 0; }
@@ -1102,6 +1103,8 @@ _WORKSPACE_JS = """
   var alertMore = byId("alert-more");
   var alertDetail = byId("alert-detail");
   var accessRefresh = byId("access-refresh");
+  var auditExport = byId("audit-export");
+  var auditExportDays = byId("audit-export-days");
 
   var signedIn = false;
   var profile = null;
@@ -1895,6 +1898,7 @@ _WORKSPACE_JS = """
       editButton.type = "button";
       editButton.className = "ghost";
       editButton.textContent = "Edit";
+      editButton.setAttribute("data-admin-write", "");
       editButton.addEventListener("click", function (target) {
         return function () { editPolicyProfile(target.id); };
       }(profile));
@@ -2318,6 +2322,7 @@ _WORKSPACE_JS = """
         rollbackButton.type = "button";
         rollbackButton.className = "ghost";
         rollbackButton.textContent = "Roll back to r" + raw.revision;
+        rollbackButton.setAttribute("data-admin-write", "");
         rollbackButton.addEventListener("click", function (targetRevision) {
           return function () {
             rollbackPolicyProfile(policyHistoryFor ? policyHistoryFor.id : "", targetRevision);
@@ -2931,7 +2936,7 @@ _WORKSPACE_JS = """
 
   function scheduleAlertRefresh() {
     clearAlertRefresh();
-    if (!signedIn || !profile || !profile.user || profile.user.role !== "admin" ||
+    if (!signedIn || !canViewAdmin() ||
         document.hidden) {
       return;
     }
@@ -2940,7 +2945,7 @@ _WORKSPACE_JS = """
     alertRefreshTimer = setTimeout(function () {
       alertRefreshTimer = null;
       if (epoch !== sessionEpoch || !signedIn || document.hidden ||
-          !profile || !profile.user || profile.user.role !== "admin") {
+          !canViewAdmin()) {
         return;
       }
       loadAlertSummary().then(function (ok) {
@@ -3033,7 +3038,7 @@ _WORKSPACE_JS = """
   }
 
   function loadAlertSummary() {
-    if (!signedIn || !profile || !profile.user || profile.user.role !== "admin") {
+    if (!signedIn || !canViewAdmin()) {
       return Promise.resolve(false);
     }
     if (alertSummaryLoading) { return Promise.resolve(false); }
@@ -3089,7 +3094,7 @@ _WORKSPACE_JS = """
     // One policy read, and for an administrator exactly one alert count read.
     // The alert count is not requested again from inside loadPolicySummary.
     loadPolicySummary();
-    if (profile && profile.user && profile.user.role === "admin") {
+    if (canViewAdmin()) {
       scheduleAlertRefresh();
       loadAlertSummary();
     }
@@ -3168,14 +3173,21 @@ _WORKSPACE_JS = """
     );
     identityName.textContent = data.user.full_name;
     identityMeta.textContent = data.department.name + " · " + data.user.username +
-      (data.user.role === "admin" ? " · Administrator" : "");
+      (data.user.role === "employee" ? "" : " · " + accessRoleLabel(data.user.role));
     tabReview.hidden = !profile.reviewScope;
     if (scopeChanged) { clearReviewAccessState(); }
     if (!profile.reviewScope && currentView === "review") {
       showView("chat", { urlMode: "replace" });
     }
-    var isAdmin = data.user.role === "admin";
-    if (previous && previous.user && previous.user.role === "admin" && !isAdmin) {
+    var isAdmin = canViewAdmin();
+    var readOnlyAdmin = data.user.role === "auditor";
+    if (readOnlyAdmin) {
+      adminPanel.setAttribute("data-read-only", "");
+    } else {
+      adminPanel.removeAttribute("data-read-only");
+    }
+    keyEditForm.inert = readOnlyAdmin;
+    if (previous && previous.user && previous.user.role !== data.user.role) {
       resetAdminState();
     }
     if (previous && previous.user && previous.user.id !== data.user.id) {
@@ -4137,7 +4149,7 @@ _WORKSPACE_JS = """
         // this is a safe read of the first page and does not touch the current
         // conversation, its draft or the message transcript.
         loadConversations(true);
-        if (profile && profile.user && profile.user.role === "admin") {
+        if (canViewAdmin()) {
           loadAlertSummary();
         }
         contextNotice.textContent = noticeText;
@@ -4274,8 +4286,13 @@ _WORKSPACE_JS = """
     adminSettingsPanel.hidden = section !== "settings";
   }
 
+  function canViewAdmin() {
+    return !!(profile && profile.user &&
+      (profile.user.role === "admin" || profile.user.role === "auditor"));
+  }
+
   function showAdminSection(section) {
-    if (!profile || !profile.user || profile.user.role !== "admin") {
+    if (!canViewAdmin()) {
       setStatus(globalStatus, "Administrator access is not available for this account.", "denied");
       return;
     }
@@ -4286,7 +4303,7 @@ _WORKSPACE_JS = """
   }
 
   function loadAdminSection(section) {
-    if (!signedIn || !profile || !profile.user || profile.user.role !== "admin") { return; }
+    if (!signedIn || !canViewAdmin()) { return; }
     if (section !== "monitor") { clearMonitorTimer(); }
     if (section === "monitor") {
       queueAdminList(function () { return loadMonitor(); });
@@ -4430,7 +4447,7 @@ _WORKSPACE_JS = """
   function canShowView(view) {
     if (view === "review") { return !!(profile && profile.reviewScope); }
     if (view === "admin") {
-      return !!(profile && profile.user && profile.user.role === "admin");
+      return canViewAdmin();
     }
     return true;
   }
@@ -4527,7 +4544,7 @@ _WORKSPACE_JS = """
   monitorWindow.addEventListener("change", function () { loadMonitor(); });
   integrateCopy.addEventListener("click", copyIntegrateSnippet);
   alertsBell.addEventListener("click", function () {
-    if (!profile || !profile.user || profile.user.role !== "admin") { return; }
+    if (!canViewAdmin()) { return; }
     adminSection = "alerts";
     showView("admin");
   });
@@ -4965,7 +4982,7 @@ _WORKSPACE_JS = """
   }
 
   function currentAdmin(uid) {
-    return signedIn && profile && profile.user && profile.user.role === "admin" &&
+    return signedIn && canViewAdmin() &&
       (typeof uid !== "string" || !uid || profile.user.id === uid);
   }
 
@@ -5086,23 +5103,24 @@ _WORKSPACE_JS = """
     try { row.focus(); } catch (error) { /* non-fatal */ }
   }
 
-  function openRoleChange(row, item, fullName) {
-    var nextRole = item.role === "admin" ? "employee" : "admin";
-    var nextLabel = nextRole === "admin" ? "Administrator" : "Employee";
+  function openRoleChange(row, item, fullName, requestedRole) {
+    var nextRole = requestedRole || (item.role === "admin" ? "employee" : "admin");
+    var nextLabel = accessRoleLabel(nextRole);
     var selfChange = !!(profile && profile.user && profile.user.id === item.id);
-    var question = (nextRole === "admin"
-      ? "Grant administrator access to "
-      : "Revoke administrator access from ") +
+    var granting = nextRole !== "employee";
+    var accessName = nextRole === "auditor" || (item.role === "auditor" && !granting)
+      ? "read-only auditor access" : "administrator access";
+    var question = (granting ? "Grant " : "Revoke ") + accessName +
+      (granting ? " to " : " from ") +
       fullName + " (@" + item.username + ")? Their role will be " + nextLabel + "." +
-      (selfChange && nextRole === "employee"
+      (selfChange && nextRole !== "admin"
         ? " You will lose account administration access. The server refuses a change that would leave the workspace without an administrator."
         : "");
-    askConfirm(row, question, nextRole === "admin" ? "Confirm grant" : "Confirm revoke", function (box) {
+    askConfirm(row, question, granting ? "Confirm grant" : "Confirm revoke", function (box) {
       var epoch = sessionEpoch;
       var token = adminStateEpoch;
-      setStatus(adminStatus, (nextRole === "admin"
-        ? "Granting administrator access to "
-        : "Revoking administrator access from ") + fullName + "…");
+      setStatus(adminStatus, (granting ? "Granting " : "Revoking ") + accessName +
+        (granting ? " to " : " from ") + fullName + "…");
       api("/workspace/api/admin/users/" + encodeURIComponent(item.id) + "/role", {
         method: "POST",
         body: JSON.stringify({ role: nextRole })
@@ -5121,9 +5139,8 @@ _WORKSPACE_JS = """
           closeRoleConfirm(box, row);
           return;
         }
-        var success = (nextRole === "admin"
-          ? "Administrator access granted to "
-          : "Administrator access revoked from ") +
+        var success = accessName.charAt(0).toUpperCase() + accessName.slice(1) +
+          (granting ? " granted to " : " revoked from ") +
           fullName + " (@" + item.username + ").";
         setStatus(adminStatus, success);
         closeRoleConfirm(box, row);
@@ -5139,7 +5156,7 @@ _WORKSPACE_JS = """
                 "warning");
               return;
             }
-            if (!profile || !profile.user || profile.user.role !== "admin") {
+            if (!canViewAdmin()) {
               setStatus(globalStatus, success + " Administrator tools are no longer available.", "ok");
               return;
             }
@@ -5173,7 +5190,7 @@ _WORKSPACE_JS = """
       if (!isObject(item) || typeof item.id !== "string" || typeof item.username !== "string") { continue; }
       var fullName = typeof item.full_name === "string" ? item.full_name : "Unknown name";
       var department = departmentLabel(item.department_id);
-      var role = item.role === "admin" ? "Administrator" : "Employee";
+      var role = accessRoleLabel(item.role);
       var status = item.disabled ? "Disabled" : "Active";
       var haystack = (fullName + " " + item.username + " " + role + " " + department + " " + status).toLowerCase();
       if (query && haystack.indexOf(query) < 0) { continue; }
@@ -5190,6 +5207,7 @@ _WORKSPACE_JS = """
       var actions = document.createElement("div");
       actions.className = "cell-actions";
       actions.setAttribute("data-label", "Actions");
+      actions.setAttribute("data-admin-write", "");
       if (item.disabled) {
         var enableButton = document.createElement("button");
         enableButton.type = "button";
@@ -5246,6 +5264,19 @@ _WORKSPACE_JS = """
           return function () { openRoleChange(target, userItem, displayName); };
         }(row, item, fullName));
         actions.appendChild(roleButton);
+        if (item.role !== "admin") {
+          var auditorButton = document.createElement("button");
+          auditorButton.type = "button";
+          auditorButton.className = "ghost";
+          auditorButton.textContent = item.role === "auditor" ? "Revoke auditor" : "Make auditor";
+          auditorButton.addEventListener("click", function (target, userItem, displayName) {
+            return function () {
+              openRoleChange(target, userItem, displayName,
+                userItem.role === "auditor" ? "employee" : "auditor");
+            };
+          }(row, item, fullName));
+          actions.appendChild(auditorButton);
+        }
       }
       var resetButton = document.createElement("button");
       resetButton.type = "button";
@@ -5301,6 +5332,7 @@ _WORKSPACE_JS = """
       revokeButton.type = "button";
       revokeButton.className = "danger";
       revokeButton.textContent = "Revoke";
+      revokeButton.setAttribute("data-admin-write", "");
       revokeButton.addEventListener("click", function (target, grant) {
         return function () {
           askConfirm(target, "Revoke review access for @" + grant.username +
@@ -5348,7 +5380,8 @@ _WORKSPACE_JS = """
     "admin.revoke_review": "Revoked review access",
     "admin.set_user_role": "Changed an account role",
     "admin.create_api_key": "Generated an API key",
-    "admin.revoke_api_key": "Revoked an API key"
+    "admin.revoke_api_key": "Revoked an API key",
+    "admin.export_audit": "Exported the audit log"
   };
 
   function accessActionLabel(action) {
@@ -5361,6 +5394,7 @@ _WORKSPACE_JS = """
 
   function accessRoleLabel(role) {
     if (role === "admin") { return "Administrator"; }
+    if (role === "auditor") { return "Auditor"; }
     if (role === "employee") { return "Employee"; }
     return "";
   }
@@ -5772,6 +5806,7 @@ _WORKSPACE_JS = """
         view.type = "button";
         view.className = "ghost";
         view.textContent = "View";
+        view.setAttribute("data-admin-write", "");
         view.addEventListener("click", function (target) {
           return function () { loadKeyText(target); };
         }(request));
@@ -5830,14 +5865,30 @@ _WORKSPACE_JS = """
 
   function exportKeyHistory() {
     if (!signedIn || !keyExportPath) { return; }
-    var path = keyExportPath;
+    downloadCsv(keyExportPath, "api-key-requests.csv", "Request history", adminStatus);
+  }
+
+  function exportAudit() {
+    if (!signedIn) { return; }
+    downloadCsv("/workspace/api/admin/audit-export.csv?days=" +
+      encodeURIComponent(auditExportDays.value), "workspace-audit.csv", "Audit log", adminStatus
+    ).then(function (done) {
+      if (done) { reloadAccessLog(); }
+    });
+  }
+
+  function reloadAccessLog() {
+    queueAdminList(function () { return loadAccessLog(true); });
+  }
+
+  function downloadCsv(path, filename, label, statusEl) {
     var epoch = sessionEpoch;
     var expectedUser = profile && profile.user && typeof profile.user.id === "string"
       ? profile.user.id : "";
     var headers = {};
     if (expectedUser) { headers["X-Workspace-User"] = expectedUser; }
-    setStatus(adminStatus, "Preparing request history export…");
-    fetch(path, {
+    setStatus(statusEl, "Preparing export…");
+    return fetch(path, {
       method: "GET",
       credentials: "same-origin",
       cache: "no-store",
@@ -5845,29 +5896,30 @@ _WORKSPACE_JS = """
     }).then(function (response) {
       if (epoch !== sessionEpoch) { return false; }
       if (!response.ok) {
-        setStatus(adminStatus, "The request history could not be exported (HTTP " +
-          response.status + ").", "error");
+        setStatus(statusEl, response.status === 409
+          ? "That range has too many records for one export. Choose a shorter range."
+          : label + " could not be exported (HTTP " + response.status + ").", "error");
         return false;
       }
       return response.blob().then(function (blob) {
         if (epoch !== sessionEpoch) { return false; }
         if (typeof window.URL === "undefined" ||
             typeof window.URL.createObjectURL !== "function") {
-          setStatus(adminStatus, "This browser cannot download the export.", "error");
+          setStatus(statusEl, "This browser cannot download the export.", "error");
           return false;
         }
         var url = window.URL.createObjectURL(blob);
         var link = document.createElement("a");
         link.href = url;
-        link.download = "api-key-requests.csv";
+        link.download = filename;
         link.click();
         window.URL.revokeObjectURL(url);
-        setStatus(adminStatus, "Request history export downloaded.", "ok");
+        setStatus(statusEl, label + " export downloaded.", "ok");
         return true;
       });
     }).catch(function () {
       if (epoch !== sessionEpoch) { return; }
-      setStatus(adminStatus, "The request history could not be exported.", "error");
+      setStatus(statusEl, label + " could not be exported.", "error");
     });
   }
 
@@ -6017,6 +6069,7 @@ _WORKSPACE_JS = """
         revoke.type = "button";
         revoke.className = "danger";
         revoke.textContent = "Revoke";
+        revoke.setAttribute("data-admin-write", "");
         revoke.addEventListener("click", function (target, keyItem) {
           return function () { revokeApiKey(target, keyItem); };
         }(row, item));
@@ -6414,6 +6467,7 @@ _WORKSPACE_JS = """
         button.type = "button";
         button.className = "ghost";
         button.textContent = "Roll back";
+        button.setAttribute("data-admin-write", "");
         button.addEventListener("click", function (target) {
           return function () { rollbackSystemSettings(target); };
         }(item.revision));
@@ -7729,6 +7783,7 @@ _WORKSPACE_JS = """
         readButton.type = "button";
         readButton.className = "ghost";
         readButton.textContent = "Mark read";
+        readButton.setAttribute("data-admin-write", "");
         readButton.addEventListener("click", function (alertItem, controls) {
           return function () { runAlertAction(alertItem, "read", controls); };
         }(item, buttons));
@@ -7740,6 +7795,7 @@ _WORKSPACE_JS = """
         ackButton.type = "button";
         ackButton.className = "ghost";
         ackButton.textContent = "Acknowledge";
+        ackButton.setAttribute("data-admin-write", "");
         ackButton.addEventListener("click", function (alertItem, controls) {
           return function () { runAlertAction(alertItem, "ack", controls); };
         }(item, buttons));
@@ -7842,7 +7898,7 @@ _WORKSPACE_JS = """
   }
 
   function loadAdminPanels() {
-    if (!signedIn || !profile || !profile.user || profile.user.role !== "admin") { return; }
+    if (!signedIn || !canViewAdmin()) { return; }
     adminLoaded = true;
     setStatus(adminStatus, "Loading account administration data…");
     var epoch = sessionEpoch;
@@ -8183,6 +8239,12 @@ _WORKSPACE_JS = """
     exportKeyHistory();
   });
 
+  auditExport.addEventListener("click", function () {
+    exportAudit();
+  });
+
+  accessRefresh.addEventListener("click", reloadAccessLog);
+
   keyEditForm.addEventListener("submit", function (event) {
     event.preventDefault();
     if (!signedIn || keySaving || !keyDetailsFor || keyEditForm.hidden) { return; }
@@ -8281,7 +8343,8 @@ _WORKSPACE_JS = """
     var username = userUsername.value.trim();
     var fullName = userFullName.value.trim();
     var departmentId = userDepartment.value;
-    var role = userRole.value === "admin" ? "admin" : "employee";
+    var role = userRole.value === "admin" || userRole.value === "auditor"
+      ? userRole.value : "employee";
     var password = userPassword.value;
     if (!username || !fullName || !departmentId) {
       setStatus(adminStatus, "Enter a username, full name and department.", "error");
@@ -8878,7 +8941,7 @@ WORKSPACE_HTML = """<!doctype html>
 <section id="admin-keys-panel" class="admin-panel-section" role="tabpanel" aria-labelledby="admin-tab-keys" hidden>
 <div class="admin-section-head"><h3 id="keys-heading">API keys</h3></div>
 <p class="admin-note">Give each person or tool its own key, so every request can be traced to a name. The log shows which key was used, so a shared key cannot tell you who sent a request.</p>
-<form id="key-form" class="admin-form policy-form" novalidate>
+<form id="key-form" data-admin-write class="admin-form policy-form" novalidate>
 <div class="key-create-row">
 <div class="key-field">
 <label for="key-name">Key name</label>
@@ -8926,7 +8989,7 @@ WORKSPACE_HTML = """<!doctype html>
 <textarea id="key-edit-allowed-ips" name="key-edit-allowed-ips" rows="2" spellcheck="false" placeholder="One IP address or CIDR per line"></textarea>
 <label for="key-edit-rpm">Requests per minute</label>
 <input id="key-edit-rpm" name="key-edit-rpm" type="number" min="1" step="1">
-<div class="policy-actions"><button id="key-edit-submit" class="primary" type="submit">Save changes</button></div>
+<div class="policy-actions"><button id="key-edit-submit" data-admin-write class="primary" type="submit">Save changes</button></div>
 </form>
 <p id="key-details-state" class="admin-note" role="status" aria-live="polite"></p>
 <h4>Request history</h4>
@@ -8962,7 +9025,7 @@ WORKSPACE_HTML = """<!doctype html>
 <section id="admin-users-panel" class="admin-panel-section" role="tabpanel" aria-labelledby="admin-tab-users" hidden>
 <div class="admin-section-head">
 <h3 id="users-heading">User accounts</h3>
-<button id="new-user-toggle" type="button">New user</button>
+<button id="new-user-toggle" data-admin-write type="button">New user</button>
 </div>
 <p class="admin-note">Loaded accounts only. Use Load more to extend the list.</p>
 <details class="admin-help"><summary>What disable, enable and delete do</summary><p class="admin-note">Disable keeps saved conversations but revokes existing sign-ins. Enable restores sign-in with the same password, role and conversations; previously revoked sessions stay revoked. Delete permanently erases the account's saved conversations, messages and owned alert metadata, while access and policy audit events are retained. Deletion is refused for your own account, the last active administrator, an account with an in-progress turn, or an account whose retained policy, grant or user-scoped assignment history would otherwise be cascaded.</p></details>
@@ -8970,7 +9033,7 @@ WORKSPACE_HTML = """<!doctype html>
 <label class="admin-search" for="user-search">Search users<input id="user-search" type="search" autocomplete="off" spellcheck="false"></label>
 </div>
 <p class="admin-search-note">Search applies only to user rows loaded so far; it is not a global account search.</p>
-<form id="user-form" class="admin-form policy-form" novalidate hidden>
+<form id="user-form" data-admin-write class="admin-form policy-form" novalidate hidden>
 <label for="new-user-username">Username</label>
 <input id="new-user-username" name="new-user-username" type="text" maxlength="128" autocomplete="off" autocapitalize="none" spellcheck="false" required>
 <label for="new-user-fullname">Full name</label>
@@ -8981,6 +9044,7 @@ WORKSPACE_HTML = """<!doctype html>
 <select id="new-user-role" name="new-user-role">
 <option value="employee">Employee</option>
 <option value="admin">Administrator</option>
+<option value="auditor">Auditor (read-only)</option>
 </select>
 <label for="new-user-password">Initial password (at least 12 characters)</label>
 <input id="new-user-password" name="new-user-password" type="password" minlength="12" maxlength="128" autocomplete="new-password" required>
@@ -8998,14 +9062,14 @@ WORKSPACE_HTML = """<!doctype html>
 <section id="admin-departments-panel" class="admin-panel-section" role="tabpanel" aria-labelledby="admin-tab-departments" hidden>
 <div class="admin-section-head">
 <h3 id="department-heading">Departments</h3>
-<button id="new-department-toggle" type="button">New department</button>
+<button id="new-department-toggle" data-admin-write type="button">New department</button>
 </div>
 <p class="admin-note">Loaded departments only. Use Load more to extend the list.</p>
 <div class="admin-toolbar">
 <label class="admin-search" for="department-search">Search departments<input id="department-search" type="search" autocomplete="off" spellcheck="false"></label>
 </div>
 <p class="admin-search-note">Search applies only to department rows loaded so far; it is not a global directory search.</p>
-<form id="department-form" class="admin-form policy-form" novalidate hidden>
+<form id="department-form" data-admin-write class="admin-form policy-form" novalidate hidden>
 <label for="department-name">Department name</label>
 <input id="department-name" name="department-name" type="text" maxlength="80" autocomplete="off" required>
 <div class="policy-actions">
@@ -9021,7 +9085,7 @@ WORKSPACE_HTML = """<!doctype html>
 <section id="admin-policies-panel" class="admin-panel-section" role="tabpanel" aria-labelledby="admin-tab-policies" hidden>
 <div class="admin-section-head">
 <h3>Check profiles</h3>
-<button id="policy-new" type="button">New profile</button>
+<button id="policy-new" data-admin-write type="button">New profile</button>
 <button id="policy-refresh" class="ghost" type="button">Refresh profiles</button>
 </div>
 <p class="policy-note">A profile records input/output classifier and masking settings. Creating a profile does not assign it to anyone; use the assignment section below.</p>
@@ -9029,7 +9093,7 @@ WORKSPACE_HTML = """<!doctype html>
 <label class="admin-search" for="policy-search">Search profiles<input id="policy-search" type="search" autocomplete="off" spellcheck="false"></label>
 </div>
 <p class="admin-search-note">Search applies only to profile rows loaded so far; it is not a global profile search.</p>
-<form id="policy-form" class="admin-form policy-form" novalidate hidden>
+<form id="policy-form" data-admin-write class="admin-form policy-form" novalidate hidden>
 <label for="policy-name">Profile name</label>
 <input id="policy-name" name="policy-name" type="text" maxlength="80" autocomplete="off" required>
 <div class="policy-grid">
@@ -9098,7 +9162,7 @@ WORKSPACE_HTML = """<!doctype html>
 
 <h3>Policy assignment</h3>
 <p class="policy-note">Assignments pin an exact profile revision. Saving reads the current assignment version first. If the profile later changes, this assignment keeps its pinned revision until you explicitly reapply a newer revision. Choose the revision explicitly; changing a profile never auto-applies to this scope.</p>
-<form id="policy-assignment-form" class="admin-form policy-form" novalidate>
+<form id="policy-assignment-form" data-admin-write class="admin-form policy-form" novalidate>
 <div class="policy-grid">
 <label for="assignment-scope">Scope<select id="assignment-scope" name="assignment-scope">
 <option value="workspace">Workspace</option>
@@ -9159,7 +9223,7 @@ WORKSPACE_HTML = """<!doctype html>
 </div>
 <div class="alert-summary-row">
 <div id="alert-summary" class="alert-summary" role="status" aria-live="polite">Alert summary loading…</div>
-<button id="alert-mark-all" class="ghost alert-summary-action" type="button" aria-label="Mark all alerts read" hidden>Mark all read</button>
+<button id="alert-mark-all" data-admin-write class="ghost alert-summary-action" type="button" aria-label="Mark all alerts read" hidden>Mark all read</button>
 </div>
 <p class="admin-search-note">Summary totals cover all alerts. The list below shows only alerts that match the selected filters and have been loaded.</p>
 <p id="alert-state" class="admin-note" role="status" aria-live="polite"></p>
@@ -9179,12 +9243,17 @@ WORKSPACE_HTML = """<!doctype html>
 <label class="admin-search" for="access-search">Search access events<input id="access-search" type="search" autocomplete="off" spellcheck="false"></label>
 </div>
 <p class="admin-search-note">Search applies only to access rows loaded so far; it is not a global audit search.</p>
+<div class="admin-toolbar">
+<label class="admin-search" for="audit-export-days">Audit export range<select id="audit-export-days"><option value="7">Last 7 days</option><option value="30" selected>Last 30 days</option><option value="90">Last 90 days</option><option value="365">Last 365 days</option></select></label>
+<button id="audit-export" class="ghost" type="button">Export audit CSV</button>
+</div>
+<p class="admin-search-note">The export joins access history, policy and settings changes, API key requests and block alerts. It holds no message text, and each export is recorded here.</p>
 <div id="access-list" class="admin-table admin-table-list" aria-label="Access log metadata"></div>
 <button id="access-more" class="admin-more" type="button" hidden>Load more access events</button>
 <p id="access-state" class="admin-note" role="status" aria-live="polite"></p>
 <details id="grants-details" class="admin-details">
 <summary>Review grants and grant management</summary>
-<form id="grant-form" class="admin-form policy-form" novalidate>
+<form id="grant-form" data-admin-write class="admin-form policy-form" novalidate>
 <label for="grant-user">Reviewer</label>
 <select id="grant-user" name="grant-user" required></select>
 <label for="grant-scope">Scope</label>
@@ -9216,7 +9285,7 @@ WORKSPACE_HTML = """<!doctype html>
 </div>
 <p class="admin-note">Changes are recorded with a reason and can be rolled back. Model, guard and policy identity values stay read-only below.</p>
 <p id="admin-settings-state" class="admin-note" role="status" aria-live="polite"></p>
-<form id="settings-form" class="settings-form">
+<form id="settings-form" data-admin-write class="settings-form">
 <fieldset class="settings-group">
 <legend>Availability</legend>
 <div class="settings-checks">

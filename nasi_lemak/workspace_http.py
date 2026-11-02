@@ -747,6 +747,15 @@ def _store_error(request: Request, exc: BaseException):
     return _ws_error(request, "UNAVAILABLE", 503)
 
 
+def _may_use_admin_route(user: Any, request: Request) -> bool:
+    """Administrators may do everything here; an auditor may only read.
+
+    The store repeats this per method, and keeps stored text from auditors.
+    """
+    role = user.get("role")
+    return role == "admin" or (role == "auditor" and request.method == "GET")
+
+
 async def _resolve_principal(request: Request, app: FastAPI, runtime: WorkspaceRuntime):
     authorization = request.headers.getlist("authorization")
     try:
@@ -989,7 +998,7 @@ def register_workspace_routes(app: FastAPI, runtime: WorkspaceRuntime) -> None:
         )
         if error is not None:
             return None, None, error
-        if user.get("role") != "admin":
+        if not _may_use_admin_route(user, request):
             return None, None, _ws_error(request, "FORBIDDEN", 403)
         return user, source, None
 

@@ -627,7 +627,7 @@ class PolicyAdminMixin:
     ) -> dict[str, Any]:
         limit = _limit(limit)
         with self._backend.transaction() as db:
-            self._require_admin(db, actor_id)
+            self._require_reader(db, actor_id)
             params: list[Any] = []
             sql = (
                 "SELECT p.id, p.name, p.version, p.created_by, p.created_at, "
@@ -661,7 +661,7 @@ class PolicyAdminMixin:
     @_policy_guard
     def get_policy_profile(self, actor_id: str, profile_id: str) -> dict[str, Any]:
         with self._backend.transaction() as db:
-            self._require_admin(db, actor_id)
+            self._require_reader(db, actor_id)
             profile = self._profile_row(db, profile_id)
             revision = self._latest_revision_row(db, profile["id"])
             return _profile_metadata(profile, revision)
@@ -677,7 +677,7 @@ class PolicyAdminMixin:
     ) -> dict[str, Any]:
         limit = _limit(limit)
         with self._backend.transaction() as db:
-            self._require_admin(db, actor_id)
+            self._require_reader(db, actor_id)
             profile = self._profile_row(db, profile_id)
             params: list[Any] = [profile["id"]]
             sql = (
@@ -845,7 +845,7 @@ class PolicyAdminMixin:
     ) -> dict[str, Any]:
         limit = _limit(limit)
         with self._backend.transaction() as db:
-            self._require_admin(db, actor_id)
+            self._require_reader(db, actor_id)
             params: list[Any] = []
             sql = (
                 "SELECT id, actor_id, action, profile_id, revision, scope_type, "
@@ -1062,7 +1062,7 @@ class PolicyAdminMixin:
             scope_type, scope_id
         )
         with self._backend.transaction() as db:
-            self._require_admin(db, actor_id)
+            self._require_reader(db, actor_id)
             row = db.query_one(
                 "SELECT a.id, a.scope_type, a.scope_key, a.profile_id, "
                 "a.profile_revision, a.version, a.created_by, a.updated_by, "
@@ -1092,7 +1092,7 @@ class PolicyAdminMixin:
         if scope_type is not None and scope_type not in _SCOPE_ORDER:
             raise ValueError("policy scope is invalid")
         with self._backend.transaction() as db:
-            self._require_admin(db, actor_id)
+            self._require_reader(db, actor_id)
             params: list[Any] = []
             sql = (
                 "SELECT a.id, a.scope_type, a.scope_key, a.profile_id, "
@@ -1133,7 +1133,7 @@ class PolicyAdminMixin:
         """Resolve the workspace -> department -> user inheritance chain.
 
         A regular user may resolve only their own effective policy; an active
-        administrator may resolve any user for the preview.  Every call builds a
+        administrator or auditor may resolve any user for the preview.  Every call builds a
         fresh immutable snapshot from committed rows, so concurrent policy
         changes cannot mutate a request already in flight.
         """
@@ -1143,7 +1143,11 @@ class PolicyAdminMixin:
             raise ValueError("user is invalid")
         with self._backend.transaction() as db:
             actor = self._require_active_user(db, actor_id)
-            if target_id != actor_id and actor["role"] != "admin":
+            if (
+                target_id != actor_id
+                and actor["role"] != "admin"
+                and not actor["auditor"]
+            ):
                 raise _errors().AccessDenied("permission denied")
             target = db.query_one(
                 "SELECT id, department_id, disabled FROM ws_users WHERE id = ?",
@@ -1471,7 +1475,7 @@ class AlertAdminMixin:
         if unread is True and acknowledged is True:
             raise ValueError("alert filters are invalid")
         with self._backend.transaction() as db:
-            self._require_admin(db, actor_id)
+            self._require_reader(db, actor_id)
             sql, params = self._alert_select(actor_id)
             if stage is not None:
                 sql += " AND a.stage = ?"
@@ -1512,7 +1516,7 @@ class AlertAdminMixin:
     def get_block_alert(self, actor_id: str, alert_id: str) -> dict[str, Any]:
         alert_id = _require_safe_id(alert_id, "alert")
         with self._backend.transaction() as db:
-            self._require_admin(db, actor_id)
+            self._require_reader(db, actor_id)
             sql, params = self._alert_select(actor_id)
             sql += " AND a.id = ?"
             params.append(alert_id)
@@ -1646,7 +1650,7 @@ class AlertAdminMixin:
             "oldest_unread_at": None,
         }
         with self._backend.transaction() as db:
-            self._require_admin(db, actor_id)
+            self._require_reader(db, actor_id)
             row = db.query_one(
                 """
                 SELECT COUNT(*) AS total,

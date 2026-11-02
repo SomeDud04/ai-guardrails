@@ -32,6 +32,7 @@ CREATE TABLE IF NOT EXISTS ws_users (
     full_name TEXT NOT NULL,
     department_id TEXT NOT NULL REFERENCES ws_departments(id) ON DELETE RESTRICT,
     role TEXT NOT NULL CHECK (role IN ('employee', 'admin')),
+    auditor INTEGER NOT NULL DEFAULT 0,
     password_hash TEXT NOT NULL,
     disabled INTEGER NOT NULL DEFAULT 0,
     created_at DOUBLE PRECISION NOT NULL

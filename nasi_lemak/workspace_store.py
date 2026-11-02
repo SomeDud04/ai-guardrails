@@ -52,7 +52,7 @@ from .controls import API_KEY_PREFIX, block_detail
 from .workspace_governance import AlertAdminMixin, PolicyAdminMixin
 
 SCHEMA_PATH = Path(__file__).with_name("workspace_schema.sql")
-SCHEMA_VERSION = 6
+SCHEMA_VERSION = 7
 MAX_RETENTION_DAYS = 36500
 # Version 2 adds outcome/request_id/error_code to ws_messages. Runtime stores
 # open with ``migrate=False`` and therefore require an explicit provisioning
@@ -83,6 +83,13 @@ _SCHEMA_V6_ALTERS = (
     ("ws_api_key_uses", "ALTER TABLE ws_api_key_uses ADD COLUMN client_ip TEXT"),
     ("ws_block_alerts", "ALTER TABLE ws_block_alerts ADD COLUMN api_key_id TEXT"),
 )
+# Version 7 adds the read-only auditor.  The stored role stays ``employee``, so
+# every administrator check refuses an auditor unless it was opened on purpose.
+_SCHEMA_V7_ALTERS = (
+    ("ws_users", "ALTER TABLE ws_users ADD COLUMN auditor INTEGER NOT NULL DEFAULT 0"),
+)
+USER_ROLES = ("employee", "admin", "auditor")
+MAX_AUDIT_EXPORT_ROWS = 100_000
 
 SESSION_TTL_SECONDS = 8 * 60 * 60
 LEASE_TTL_SECONDS = 120.0
@@ -657,7 +664,7 @@ class WorkspaceStore(PolicyAdminMixin, AlertAdminMixin):
             version = int(current)
             if version == SCHEMA_VERSION:
                 return
-            if version not in (1, 2, 3, 4, 5):
+            if version not in (1, 2, 3, 4, 5, 6):
                 raise WorkspaceConfigError("unsupported workspace schema version")
             if version == 1:
                 # Preserve the original v1 -> v2 data migration, then add the
@@ -680,7 +687,7 @@ class WorkspaceStore(PolicyAdminMixin, AlertAdminMixin):
                 db.execute(statement)
             for statement in _schema_v5_statements():
                 db.execute(statement)
-            for table, statement in _SCHEMA_V6_ALTERS:
+            for table, statement in (*_SCHEMA_V6_ALTERS, *_SCHEMA_V7_ALTERS):
                 column = _alter_added_column(statement)
                 if column and self._column_exists(db, table, column):
                     continue
@@ -766,7 +773,7 @@ class WorkspaceStore(PolicyAdminMixin, AlertAdminMixin):
             "username": row["username"],
             "full_name": row["full_name"],
             "department_id": row["department_id"],
-            "role": row["role"],
+            "role": "auditor" if row["auditor"] else row["role"],
             "disabled": bool(row["disabled"]),
             "created_at": float(row["created_at"]),
         }
@@ -802,6 +809,20 @@ class WorkspaceStore(PolicyAdminMixin, AlertAdminMixin):
             "SELECT id, role, disabled FROM ws_users WHERE id = ?", (actor_id,)
         )
         if not row or row["role"] != "admin" or int(row["disabled"]) != 0:
+            raise AccessDenied("permission denied")
+        return row
+
+    def _require_reader(self, db: _Db, actor_id: str) -> dict[str, Any]:
+        """An administrator, or an auditor on a metadata-only read."""
+        row = db.query_one(
+            "SELECT id, role, auditor, disabled FROM ws_users WHERE id = ?",
+            (actor_id,),
+        )
+        if (
+            not row
+            or (row["role"] != "admin" and not row["auditor"])
+            or int(row["disabled"]) != 0
+        ):
             raise AccessDenied("permission denied")
         return row
 
@@ -969,7 +990,7 @@ class WorkspaceStore(PolicyAdminMixin, AlertAdminMixin):
     ) -> dict[str, Any]:
         limit = _validate_limit(limit)
         with self._backend.transaction() as db:
-            self._require_admin(db, actor_id)
+            self._require_reader(db, actor_id)
             params: list[Any] = []
             sql = "SELECT id, name, created_at FROM ws_departments WHERE 1 = 1"
             if after is not None:
@@ -1009,7 +1030,7 @@ class WorkspaceStore(PolicyAdminMixin, AlertAdminMixin):
         display_name = _require_text(
             full_name, maximum=FULL_NAME_MAX_LENGTH, field="full name"
         )
-        if role not in ("employee", "admin"):
+        if role not in USER_ROLES:
             raise ValueError("role is invalid")
         if not isinstance(department_id, str) or not department_id:
             raise ValueError("department is invalid")
@@ -1028,16 +1049,17 @@ class WorkspaceStore(PolicyAdminMixin, AlertAdminMixin):
             db.execute(
                 """
                 INSERT INTO ws_users(
-                    id, username, full_name, department_id, role,
+                    id, username, full_name, department_id, role, auditor,
                     password_hash, disabled, created_at
-                ) VALUES (?, ?, ?, ?, ?, ?, 0, ?)
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, 0, ?)
                 """,
                 (
                     user_id,
                     normalised,
                     display_name,
                     department_id,
-                    role,
+                    "employee" if role == "auditor" else role,
+                    1 if role == "auditor" else 0,
                     _hash_password(secret),
                     now,
                 ),
@@ -1051,11 +1073,11 @@ class WorkspaceStore(PolicyAdminMixin, AlertAdminMixin):
     ) -> dict[str, Any]:
         limit = _validate_limit(limit)
         with self._backend.transaction() as db:
-            self._require_admin(db, actor_id)
+            self._require_reader(db, actor_id)
             params: list[Any] = []
             sql = (
-                "SELECT id, username, full_name, department_id, role, disabled, "
-                "created_at FROM ws_users WHERE 1 = 1"
+                "SELECT id, username, full_name, department_id, role, auditor, "
+                "disabled, created_at FROM ws_users WHERE 1 = 1"
             )
             if after is not None:
                 created_at, last_id = _decode_cursor(after)
@@ -1122,8 +1144,8 @@ class WorkspaceStore(PolicyAdminMixin, AlertAdminMixin):
             self._lock_admin_roles(db)
             self._require_admin(db, actor_id)
             row = db.query_one(
-                "SELECT id, username, full_name, department_id, role, disabled, "
-                "created_at FROM ws_users WHERE id = ?",
+                "SELECT id, username, full_name, department_id, role, auditor, "
+                "disabled, created_at FROM ws_users WHERE id = ?",
                 (user_id,),
             )
             if not row:
@@ -1132,8 +1154,8 @@ class WorkspaceStore(PolicyAdminMixin, AlertAdminMixin):
                 raise Conflict("user is already active")
             db.execute("UPDATE ws_users SET disabled = 0 WHERE id = ?", (user_id,))
             updated = db.query_one(
-                "SELECT id, username, full_name, department_id, role, disabled, "
-                "created_at FROM ws_users WHERE id = ?",
+                "SELECT id, username, full_name, department_id, role, auditor, "
+                "disabled, created_at FROM ws_users WHERE id = ?",
                 (user_id,),
             )
             self._log_access(
@@ -1296,7 +1318,7 @@ class WorkspaceStore(PolicyAdminMixin, AlertAdminMixin):
         changes deliberately do not revoke sessions: ``resolve_session`` joins
         ``ws_users`` on every call and therefore returns the current role.
         """
-        if not isinstance(role, str) or role not in ("employee", "admin"):
+        if not isinstance(role, str) or role not in USER_ROLES:
             raise ValueError("role is invalid")
         if not isinstance(user_id, str) or not 1 <= len(user_id) <= 64:
             # A malformed identifier cannot refer to a stored user.
@@ -1306,15 +1328,15 @@ class WorkspaceStore(PolicyAdminMixin, AlertAdminMixin):
             self._lock_admin_roles(db)
             self._require_admin(db, actor_id)
             row = db.query_one(
-                "SELECT id, username, full_name, department_id, role, disabled, "
-                "created_at FROM ws_users WHERE id = ?",
+                "SELECT id, username, full_name, department_id, role, auditor, "
+                "disabled, created_at FROM ws_users WHERE id = ?",
                 (user_id,),
             )
             if not row:
                 raise NotFound("user not found")
             if int(row["disabled"]) != 0:
                 raise Conflict("user is disabled")
-            if row["role"] == "admin" and role == "employee":
+            if row["role"] == "admin" and role != "admin":
                 active = db.query_one(
                     "SELECT COUNT(*) AS total FROM ws_users "
                     "WHERE role = 'admin' AND disabled = 0"
@@ -1322,11 +1344,16 @@ class WorkspaceStore(PolicyAdminMixin, AlertAdminMixin):
                 if int(active["total"]) <= 1:
                     raise Conflict("last active admin cannot be demoted")
             db.execute(
-                "UPDATE ws_users SET role = ? WHERE id = ?", (role, user_id)
+                "UPDATE ws_users SET role = ?, auditor = ? WHERE id = ?",
+                (
+                    "employee" if role == "auditor" else role,
+                    1 if role == "auditor" else 0,
+                    user_id,
+                ),
             )
             updated = db.query_one(
-                "SELECT id, username, full_name, department_id, role, disabled, "
-                "created_at FROM ws_users WHERE id = ?",
+                "SELECT id, username, full_name, department_id, role, auditor, "
+                "disabled, created_at FROM ws_users WHERE id = ?",
                 (user_id,),
             )
             self._log_access(
@@ -1418,7 +1445,7 @@ class WorkspaceStore(PolicyAdminMixin, AlertAdminMixin):
         """Admin list of persisted review grants (metadata only)."""
         limit = _validate_limit(limit)
         with self._backend.transaction() as db:
-            self._require_admin(db, actor_id)
+            self._require_reader(db, actor_id)
             params: list[Any] = []
             sql = (
                 "SELECT g.id, g.user_id, g.scope, g.department_id, g.created_by, "
@@ -1620,7 +1647,7 @@ class WorkspaceStore(PolicyAdminMixin, AlertAdminMixin):
             row = db.query_one(
                 """
                 SELECT s.expires_at, s.revoked, u.id, u.username, u.full_name,
-                       u.department_id, u.role, u.disabled, u.created_at
+                       u.department_id, u.role, u.auditor, u.disabled, u.created_at
                 FROM ws_sessions AS s
                 JOIN ws_users AS u ON u.id = s.user_id
                 WHERE s.token_hash = ?
@@ -2545,7 +2572,7 @@ class WorkspaceStore(PolicyAdminMixin, AlertAdminMixin):
     ) -> dict[str, Any]:
         limit = _validate_limit(limit)
         with self._backend.transaction() as db:
-            self._require_admin(db, actor_id)
+            self._require_reader(db, actor_id)
             params: list[Any] = []
             sql = self._API_KEY_COLUMNS + "WHERE 1 = 1"
             if after is not None:
@@ -2697,7 +2724,7 @@ class WorkspaceStore(PolicyAdminMixin, AlertAdminMixin):
         """One key's requests, newest first.  Metadata only, never text."""
         limit = _validate_limit(limit)
         with self._backend.transaction() as db:
-            self._require_admin(db, actor_id)
+            self._require_reader(db, actor_id)
             if not db.query_one("SELECT id FROM ws_api_keys WHERE id = ?", (key_id,)):
                 raise NotFound("api key not found")
             params: list[Any] = [key_id]
@@ -2833,7 +2860,7 @@ class WorkspaceStore(PolicyAdminMixin, AlertAdminMixin):
         """Saved revisions, newest first, with who changed them and why."""
         limit = _validate_limit(limit)
         with self._backend.transaction() as db:
-            self._require_admin(db, actor_id)
+            self._require_reader(db, actor_id)
             rows = db.query(
                 "SELECT s.revision, s.settings, s.reason, s.created_at, s.actor_id, "
                 "u.username AS actor_username FROM ws_system_settings AS s "
@@ -2856,12 +2883,92 @@ class WorkspaceStore(PolicyAdminMixin, AlertAdminMixin):
             }
 
     @_guard
+    def export_audit(self, actor_id: str, since: float) -> list[dict[str, Any]]:
+        """Every workspace audit record since a time, oldest first.
+
+        Metadata only: message text is never read.  Taking an export is itself
+        recorded.  A range too large to export whole is refused, never cut short.
+        """
+        now = self._now()
+        limit = (since, MAX_AUDIT_EXPORT_ROWS + 1)
+        with self._backend.transaction() as db:
+            self._require_reader(db, actor_id)
+            self._log_access(
+                db,
+                actor_id,
+                "admin.export_audit",
+                conversation_id=None,
+                department_id=None,
+                now=now,
+            )
+            rows = [
+                {**row, "source": "access"}
+                for row in db.query(
+                    "SELECT a.created_at, COALESCE(u.username, a.actor_id) AS actor, "
+                    "a.action, COALESCE(a.conversation_id, a.department_id) AS target "
+                    "FROM ws_access_log AS a "
+                    "LEFT JOIN ws_users AS u ON u.id = a.actor_id "
+                    "WHERE a.created_at >= ? ORDER BY a.created_at LIMIT ?",
+                    limit,
+                )
+            ]
+            rows += [
+                {**row, "source": "policy"}
+                for row in db.query(
+                    "SELECT a.created_at, COALESCE(u.username, a.actor_id) AS actor, "
+                    "a.action, COALESCE(a.profile_id, a.scope_id) AS target, "
+                    "a.detail FROM ws_policy_audit AS a "
+                    "LEFT JOIN ws_users AS u ON u.id = a.actor_id "
+                    "WHERE a.created_at >= ? ORDER BY a.created_at LIMIT ?",
+                    limit,
+                )
+            ]
+            rows += [
+                {**row, "source": "settings", "action": "save_settings"}
+                for row in db.query(
+                    "SELECT s.created_at, COALESCE(u.username, s.actor_id) AS actor, "
+                    "s.revision AS target, s.reason AS detail "
+                    "FROM ws_system_settings AS s "
+                    "LEFT JOIN ws_users AS u ON u.id = s.actor_id "
+                    "WHERE s.created_at >= ? ORDER BY s.created_at LIMIT ?",
+                    limit,
+                )
+            ]
+            rows += [
+                {**row, "source": "api_key", "action": "request"}
+                for row in db.query(
+                    "SELECT r.created_at, k.name AS actor, r.request_id AS target, "
+                    "r.client_ip, o.outcome, o.error_code AS detail "
+                    "FROM ws_api_key_uses AS r "
+                    "JOIN ws_api_keys AS k ON k.id = r.key_id "
+                    "LEFT JOIN ws_api_key_outcomes AS o ON o.request_id = r.request_id "
+                    "WHERE r.created_at >= ? ORDER BY r.created_at LIMIT ?",
+                    limit,
+                )
+            ]
+            rows += [
+                {**row, "source": "alert"}
+                for row in db.query(
+                    "SELECT a.created_at, u.username AS actor, a.stage AS action, "
+                    "a.request_id AS target, a.reason_code AS outcome, "
+                    "k.name AS detail FROM ws_block_alerts AS a "
+                    "JOIN ws_users AS u ON u.id = a.user_id "
+                    "LEFT JOIN ws_api_keys AS k ON k.id = a.api_key_id "
+                    "WHERE a.created_at >= ? ORDER BY a.created_at LIMIT ?",
+                    limit,
+                )
+            ]
+            if len(rows) > MAX_AUDIT_EXPORT_ROWS:
+                raise Conflict("audit export is too large")
+            return sorted(rows, key=lambda row: float(row["created_at"]))
+
+    @_guard
     def list_access_log(
         self, actor_id: str, *, limit: int = 50, after: str | None = None
     ) -> dict[str, Any]:
         limit = _validate_limit(limit)
         with self._backend.transaction() as db:
-            self._require_admin(db, actor_id)
+            self._require_reader(db, actor_id)
             params: list[Any] = []
             # The audit row itself is immutable and contains machine IDs only.
             # Display metadata is joined read-only: the actor and department
@@ -2873,7 +2980,8 @@ class WorkspaceStore(PolicyAdminMixin, AlertAdminMixin):
                 "SELECT a.id, a.actor_id, a.action, a.conversation_id, "
                 "a.department_id, a.created_at, "
                 "u.full_name AS actor_full_name, u.username AS actor_username, "
-                "u.role AS actor_role, d.name AS department_name, "
+                "CASE WHEN u.auditor = 1 THEN 'auditor' ELSE u.role END AS actor_role, "
+                "d.name AS department_name, "
                 "c.created_at AS conversation_created_at, "
                 "c.updated_at AS conversation_updated_at "
                 "FROM ws_access_log AS a "

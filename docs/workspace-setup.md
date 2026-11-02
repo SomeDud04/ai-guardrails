@@ -452,14 +452,30 @@ model, while Monitor and Administration keep working. **Shared chat key** can be
 turned off once everyone has a named key. Retention is off until a period is set,
 then conversations and stored key text past it are purged hourly.
 
-## Upgrading to schema 6
+## Auditors and the audit export
 
-Key owners and saved settings change the schema, so the new gateway refuses an older
-database. Stop the gateway, take a backup, run `workspace_cli init` with the migration
-DSN as the default UID 10001, reapply `workspace_roles.sql` so the runtime can use the
-new tables, then start the gateway. Each existing key's owner becomes whoever
-generated it. `scripts/rehearse_schema_v6.sh` runs all of this on a throwaway copy of
-the live database first. To go back, restore the pre-migration backup.
+An **Auditor** can open every Administration page but cannot change anything, and
+cannot read stored API key text. Choose the role when creating a user, or use **Make
+auditor** on the Users tab. Like anyone else, they can read a conversation only with
+a review grant from an administrator. The server enforces this on every request;
+hiding the buttons is only a convenience.
+
+**Export audit CSV** on Access history is available to administrators and auditors.
+It joins access history, policy changes, settings changes, API key requests and block
+alerts for the chosen range, oldest first. It holds no message text, and each export
+is recorded in Access history. A range with more than 100,000 records is refused
+rather than cut short, so choose a shorter one. The gateway's own request audit is a
+separate table with its own export.
+
+## Upgrading the schema
+
+Each schema change makes the new gateway refuse an older database. Stop the gateway,
+take a backup, run `workspace_cli init` with the migration DSN as the default UID
+10001, reapply `workspace_roles.sql`, then start the gateway. Schema 6 added key owners
+and saved settings, and each existing key's owner became whoever generated it. Schema
+7 adds the auditor role, and no existing account becomes an auditor.
+`scripts/rehearse_schema_v7.sh` runs all of this on a throwaway copy of the live
+database first. To go back, restore the pre-migration backup.
 
 ## Transcript retention
 

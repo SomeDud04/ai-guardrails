@@ -17,6 +17,7 @@ from __future__ import annotations
 
 import csv
 import io
+import time
 from datetime import datetime, timezone
 from typing import Any
 
@@ -30,6 +31,7 @@ from .workspace_http import (
     _body_fields,
     _cookie_mutation_guard,
     _db_call,
+    _may_use_admin_route,
     _ok,
     _page_query,
     _read_json,
@@ -41,6 +43,7 @@ from .workspace_http import (
 from .workspace_store import NotFound
 
 MAX_SCOPE_QUERY_LENGTH = 64
+AUDIT_EXPORT_MAX_DAYS = 365
 _ALERT_FILTERS = {
     "limit",
     "after",
@@ -119,6 +122,14 @@ def _csv_time(timestamp: float) -> str:
     return datetime.fromtimestamp(timestamp, timezone.utc).isoformat()
 
 
+def _csv_response(content: str, filename: str) -> Response:
+    response = Response(content, media_type="text/csv")
+    response.headers["Content-Disposition"] = f'attachment; filename="{filename}"'
+    for name, value in _COMMON_HEADERS.items():
+        response.headers[name] = value
+    return response
+
+
 def _validated_settings(values: Any, ceilings: Any) -> dict[str, Any]:
     return validate_settings(
         values,
@@ -178,7 +189,7 @@ def register_admin_policy_routes(app: FastAPI, runtime: Any) -> None:
             return None, None, error
         # The persisted session row is authoritative.  This check runs before
         # any request body is read; the store repeats it transactionally.
-        if user.get("role") != "admin":
+        if not _may_use_admin_route(user, request):
             return None, None, _ws_error(request, "FORBIDDEN", 403)
         return user, source, None
 
@@ -642,13 +653,42 @@ def register_admin_policy_routes(app: FastAPI, runtime: Any) -> None:
                     _csv_cell(item["error_code"]),
                 ]
             )
-        response = Response(output.getvalue(), media_type="text/csv")
-        response.headers["Content-Disposition"] = (
-            'attachment; filename="api-key-requests.csv"'
+        return _csv_response(output.getvalue(), "api-key-requests.csv")
+
+    @app.get("/workspace/api/admin/audit-export.csv")
+    async def admin_audit_export(request: Request):
+        actor, _source, error = await admin_context(request)
+        if error is not None:
+            return error
+        try:
+            days = int(_query_values(request, {"days"}).get("days", "30"))
+            if not 1 <= days <= AUDIT_EXPORT_MAX_DAYS:
+                raise ValueError("export range is invalid")
+            rows = await _db_call(
+                app,
+                runtime.store.export_audit,
+                actor["id"],
+                time.time() - days * 86400.0,
+            )
+        except Exception as exc:
+            return _store_error(request, exc)
+        output = io.StringIO()
+        writer = csv.writer(output)
+        writer.writerow(
+            ["time", "source", "actor", "action", "target", "client_ip", "outcome", "detail"]
         )
-        for name, value in _COMMON_HEADERS.items():
-            response.headers[name] = value
-        return response
+        for row in rows:
+            writer.writerow(
+                [
+                    _csv_time(float(row["created_at"])),
+                    row["source"],
+                    *(
+                        _csv_cell(row.get(field))
+                        for field in ("actor", "action", "target", "client_ip", "outcome", "detail")
+                    ),
+                ]
+            )
+        return _csv_response(output.getvalue(), "workspace-audit.csv")
 
     @app.get(
         "/workspace/api/admin/api-keys/{key_id}/requests/{request_id}/text"
