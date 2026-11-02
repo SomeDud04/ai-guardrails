@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# Rehearse the schema 5 upgrade on a throwaway copy of the live database.
+# Rehearse the schema 6 upgrade on a throwaway copy of the live database.
 #
 # Run as root on the VM after building the new image.  The live gateway and
 # database keep running: this only reads a pg_dump of the live database, then
@@ -78,30 +78,68 @@ import hashlib
 import os
 
 from nasi_lemak import workspace_cli as cli
+from nasi_lemak.system_settings import DEFAULT_SETTINGS
 
 admin = os.environ["ADMIN_ID"]
 key = cli._read_secret_file("/secrets/workspace_key", label="key")
 dsn = cli._read_secret_file("/secrets/workspace_dsn", label="DSN")
 store = cli._open_store(dsn, key, migrate=False, store_factory=None)
-created = store.create_api_key(admin, "Rehearsal key")
+created = store.create_api_key(
+    admin,
+    "Rehearsal key",
+    admin,
+    store_text=True,
+    allowed_ips=["192.168.0.0/16"],
+    requests_per_minute=5,
+)
 digest = hashlib.sha256(created["key"].encode()).hexdigest()
-key_id = created["item"]["id"]
-assert store.resolve_api_key(digest) == {"id": key_id, "name": "Rehearsal key"}
-store.record_api_key_use(key_id, "req_rehearsal")
-listed = next(i for i in store.list_api_keys(admin)["items"] if i["id"] == key_id)
-assert listed["requests"] == 1 and listed["last_used_at"] is not None
-store.revoke_api_key(admin, key_id)
+resolved = store.resolve_api_key(digest)
+assert resolved["owner_id"] == admin and resolved["store_text"] is True
+control = store.resolve_gateway_control(admin)
+metadata = control.metadata()
+store.record_api_key_use(resolved["id"], "req_rehearsal", "192.168.90.50")
+store.record_api_key_result(
+    resolved,
+    "req_rehearsal",
+    outcome="blocked",
+    error_code="POLICY_BLOCK",
+    alert={
+        "stage": "input",
+        "reason_code": "INPUT_GUARD_BLOCK",
+        "revision": metadata["revision"],
+        "digest": metadata["digest"],
+        "sources": metadata["sources"],
+    },
+    prompt="rehearsal prompt",
+)
+row = store.list_api_key_requests(admin, resolved["id"])["items"][0]
+assert row["outcome"] == "blocked" and row["client_ip"] == "192.168.90.50"
+text = store.read_api_key_text(admin, resolved["id"], "req_rehearsal")
+assert text["prompt"] == "rehearsal prompt"
+alerts = store.list_block_alerts(admin)["items"]
+assert any(item["api_key_name"] == "Rehearsal key" for item in alerts)
+saved = store.save_system_settings(
+    admin, dict(DEFAULT_SETTINGS), "Rehearsal", expected_revision=0
+)
+assert store.current_system_settings()["revision"] == saved["revision"]
+store.purge_expired_conversations(36500)
+store.revoke_api_key(admin, resolved["id"])
 assert store.resolve_api_key(digest) is None
 store.close()
-print("runtime account: generate, resolve, record, list and revoke all worked")
+print("runtime account: keys, history, alerts, stored text and settings all worked")
 PY
 
-if docker exec -e PGPASSWORD="$PASSWORD" nl-rehearsal-db \
-    psql -h 127.0.0.1 -U nl_rehearsal_runtime -d nasi_lemak \
-    -c "DELETE FROM ws_api_key_uses" >/dev/null 2>&1; then
-    echo "the runtime account must not be able to erase usage rows" >&2
-    exit 1
-fi
-echo "runtime account: cannot erase usage rows"
+refused() {
+    if docker exec -e PGPASSWORD="$PASSWORD" nl-rehearsal-db \
+        psql -h 127.0.0.1 -U nl_rehearsal_runtime -d nasi_lemak -c "$1" >/dev/null 2>&1; then
+        echo "the runtime account must not be allowed: $1" >&2
+        exit 1
+    fi
+}
+refused "DELETE FROM ws_api_key_uses"
+refused "DELETE FROM ws_api_key_outcomes"
+refused "UPDATE ws_system_settings SET reason = 'changed'"
+refused "DELETE FROM ws_system_settings"
+echo "runtime account: cannot erase key history or rewrite settings history"
 
 echo REHEARSAL-OK

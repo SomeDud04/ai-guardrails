@@ -387,19 +387,33 @@ behind one VPN or NAT address appear as a single row. For the raw record, includ
 unmatched paths and bytes sent, use `nl-compose logs nginx`; see
 [docs/demo-access.md](demo-access.md).
 
-**API keys** generates a named key for each person or tool, with no shared
-secret to hand around. The key is shown once and only its SHA-256 digest is
+**API keys** generates a key for one person or tool. Every key belongs to a user
+account, which is its owner. The key is shown once and only its SHA-256 digest is
 stored, so a lost key is revoked and replaced. Names stay reserved after a key is
-revoked, so a name always means one key. Revoking takes effect on the next
-request, and keys are never deleted. Generating or revoking a key is recorded in
-**Access history**. The shared chat key keeps working alongside named keys, and
-its requests show no key name.
+revoked, so a name always means one key, and keys are never deleted.
 
-Each guarded request sent with a named key adds a row to `ws_api_key_uses` before
-the model is called. If that write fails, the request gets a 503 and never reaches
-the model. The row's `request_id` matches `events.request_id` in the audit log,
-and both tables are in the same database, so this lists each key's requests and
-their outcomes:
+A key behaves like its owner:
+
+- It follows the owner's policy from **Policies**, including their limits.
+- Disabling the owner stops the key, and re-enabling them restores it. Deleting the
+  owner revokes it, and its history stays.
+- A blocked request raises a normal alert that names the key and owner.
+
+Each key can also have an expiry date, a list of allowed IP addresses or ranges, a
+requests-per-minute limit, and **Keep prompts and replies**. That last option is off
+by default. When it is on, the masked prompt and released reply are stored encrypted,
+every read is recorded in **Access history**, and a reply that cannot be stored is
+withheld. The retention period removes stored text too.
+
+Open **Details** on a key to change these, see each request with its IP address and
+result, or export them as CSV. Generating, changing, revoking and reading a key's
+text are all recorded in **Access history**.
+
+Each guarded request with a key adds a row to `ws_api_key_uses` before the model is
+called. If that write fails, the request gets a 503 and never reaches the model.
+Named keys need the workspace database, so if it is unavailable they get a 503 while
+the shared chat key keeps working. The usage row's `request_id` matches
+`events.request_id` in the audit log, and both tables are in the same database:
 
 ```sql
 SELECT to_timestamp(e."timestamp") AS at, k.name, e.request_id, e.event_type,
@@ -410,22 +424,42 @@ JOIN events AS e ON e.request_id = u.request_id
 ORDER BY e.seq DESC LIMIT 50;
 ```
 
-Named keys need the workspace database. If it is unavailable, requests with a
-named key get a 503 while the shared chat key keeps working. A key shows which
-credential was used, not who was typing, so give one key to one person or tool.
+A key shows which credential was used, not who was typing, so give one key to one
+person or tool.
 
 **Integrate** gives connection examples for curl, Python, JavaScript, test
 harnesses, `nasi-chat` and the smoke test, using this deployment's address and
 model. It never shows a real key.
 
-## Upgrading to schema 5
+## Editable settings
 
-Named API keys add two tables, so the new gateway refuses a schema 4 database.
-Stop the gateway, take a backup, run `workspace_cli init` with the migration DSN
-as the default UID 10001, then reapply `workspace_roles.sql` so the runtime can use
-the new tables, and start the gateway. The migration only adds tables. To go back
-without a restore, stop the gateway, drop `ws_api_key_uses` and `ws_api_keys`, set
-`ws_schema_migrations.version` back to 4 and run the older code.
+**Settings** saves administrator changes as an append-only history. Each save needs
+a reason, records who made it, and can be rolled back, which saves the older values
+as a new revision. Audit rows name the revision they ran under, as
+`<policy version>+settings.<revision>`.
+
+The startup policy file and environment stay the upper limit. Settings can tighten
+them but never loosen past them: a chat limit can only go down, and a guard category
+can only be allowed if the policy file already allows it. Deny phrases added here
+apply on top of the file's list. Concurrency and the chat timeout apply at the next
+gateway restart; everything else applies at once.
+
+Guard mode, whether guards are active, the guard framing version and the model are
+not settings, so an administrator login cannot switch protection off.
+
+**Pause all chat** returns 503 on the API and workspace chat without reaching the
+model, while Monitor and Administration keep working. **Shared chat key** can be
+turned off once everyone has a named key. Retention is off until a period is set,
+then conversations and stored key text past it are purged hourly.
+
+## Upgrading to schema 6
+
+Key owners and saved settings change the schema, so the new gateway refuses an older
+database. Stop the gateway, take a backup, run `workspace_cli init` with the migration
+DSN as the default UID 10001, reapply `workspace_roles.sql` so the runtime can use the
+new tables, then start the gateway. Each existing key's owner becomes whoever
+generated it. `scripts/rehearse_schema_v6.sh` runs all of this on a throwaway copy of
+the live database first. To go back, restore the pre-migration backup.
 
 ## Transcript retention
 

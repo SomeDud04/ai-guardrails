@@ -1022,6 +1022,68 @@ class MigrationTests(GovernanceTestBase):
         created = migrated.create_api_key(admin["id"], "After migration")
         self.assertEqual(created["item"]["name"], "After migration")
 
+    def test_v5_to_v6_gives_existing_keys_their_creator_as_owner(self) -> None:
+        path = Path(self._tmp.name) / "legacy-v5.db"
+        fresh = WorkspaceStore(
+            str(path), encryption_key=self.key, clock=self.clock, migrate=True
+        )
+        admin = fresh.bootstrap_admin(
+            username="v5.admin",
+            password=GOOD_PASSWORD,
+            full_name="V5 Admin",
+            department_name="IT",
+        )
+        fresh.close()
+        conn = sqlite3.connect(path)
+        try:
+            conn.execute("DROP TABLE ws_api_key_uses")
+            conn.execute("DROP TABLE ws_api_keys")
+            conn.execute("DROP TABLE ws_api_key_outcomes")
+            conn.execute("DROP TABLE ws_api_key_text")
+            conn.execute("DROP TABLE ws_system_settings")
+            conn.execute("ALTER TABLE ws_block_alerts DROP COLUMN api_key_id")
+            conn.execute(
+                """
+                CREATE TABLE ws_api_keys (
+                    id TEXT PRIMARY KEY, name TEXT NOT NULL,
+                    name_key TEXT NOT NULL UNIQUE, key_digest TEXT NOT NULL UNIQUE,
+                    key_hint TEXT NOT NULL, created_by TEXT NOT NULL,
+                    created_at DOUBLE PRECISION NOT NULL, revoked_by TEXT,
+                    revoked_at DOUBLE PRECISION
+                )
+                """
+            )
+            conn.execute(
+                """
+                CREATE TABLE ws_api_key_uses (
+                    request_id TEXT PRIMARY KEY,
+                    key_id TEXT NOT NULL REFERENCES ws_api_keys(id),
+                    created_at DOUBLE PRECISION NOT NULL
+                )
+                """
+            )
+            conn.execute(
+                "INSERT INTO ws_api_keys VALUES "
+                "('key-1', 'Old', 'old', 'digest', 'nlk_abcd', ?, 1.0, NULL, NULL)",
+                (admin["id"],),
+            )
+            conn.execute(
+                "UPDATE ws_schema_migrations SET version = 5 WHERE version = ?",
+                (SCHEMA_VERSION,),
+            )
+            conn.commit()
+        finally:
+            conn.close()
+
+        migrated = WorkspaceStore(
+            str(path), encryption_key=self.key, clock=self.clock, migrate=True
+        )
+        self.assertEqual(self._migration_rows(path), [{"version": SCHEMA_VERSION}])
+        item = migrated.list_api_keys(admin["id"])["items"][0]
+        self.assertEqual(item["owner_id"], admin["id"])
+        self.assertEqual(item["status"], "active")
+        self.assertIsNotNone(migrated.resolve_api_key("digest"))
+
     def test_v3_database_is_not_ready_until_migrated(self) -> None:
         conn = sqlite3.connect(self.path)
         try:
