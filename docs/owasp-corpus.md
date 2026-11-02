@@ -388,9 +388,9 @@ workbook is never changed.
 
 ```text
 $env:NASI_LEMAK_OWASP_API_KEY = Read-Host "Paste the key"
-.\.venv\Scripts\python.exe scriptsun_owasp_live.py `
+.\.venv\Scripts\python.exe scripts\run_owasp_live.py `
     --base-url http://192.168.90.41:8080 --report owasp-live.json
-.\.venv\Scripts\python.exe scriptsuild_owasp_checklist.py `
+.\.venv\Scripts\python.exe scripts\build_owasp_checklist.py `
     --results owasp-live.json --output owasp-evidence.xlsx --tester "Name" --build <commit>
 ```
 
