@@ -167,7 +167,7 @@ except AccessDenied:
 else:
     raise AssertionError("an auditor must not change anything")
 store.set_user_role(admin, reader, "employee")
-store.delete_user(admin, reader)
+store.delete_user(admin, reader, "rehearsal.auditor")
 store.close()
 print("runtime account: keys, history, alerts, settings, auditor and export all worked")
 PY
