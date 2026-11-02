@@ -699,9 +699,23 @@ button.danger:hover:not(:disabled) { background: #8f1d17; border-color: #8f1d17;
 .monitor-side { display: grid; gap: var(--space-4); align-content: start; min-width: 0; }
 #live-traffic .cols-6 { grid-template-columns: minmax(130px, 1.5fr) repeat(4, minmax(72px, 1fr)) 96px; min-width: 620px; }
 #live-http .cols-7 { grid-template-columns: 96px 130px minmax(96px, .5fr) 64px minmax(200px, 1fr) 56px 72px; min-width: 800px; }
-#key-list .cols-6 { grid-template-columns: minmax(140px, 1.2fr) 96px 80px 130px minmax(170px, 1fr) minmax(170px, 1fr); min-width: 860px; }
-#key-list .admin-table-head > div:nth-child(3) { text-align: right; }
+#key-list .cols-7 { grid-template-columns: minmax(130px, 1.2fr) minmax(150px, 1.4fr) 90px 110px 80px 130px minmax(120px, .9fr); min-width: 980px; }
+#key-list .admin-table-head > div:nth-child(5) { text-align: right; }
 #key-list .admin-confirm { grid-column: 1 / -1; }
+#key-history .cols-5 { grid-template-columns: 140px minmax(120px, 1fr) 90px 90px 70px; min-width: 520px; }
+.key-details { display: grid; gap: var(--space-3); margin-top: var(--space-4); padding-top: var(--space-3); border-top: 1px solid var(--line); }
+.key-details-head { display: flex; flex-wrap: wrap; align-items: center; justify-content: space-between; gap: var(--space-2); }
+.key-details-head h3, .key-details h4 { margin: 0; }
+.key-create-row { display: grid; grid-template-columns: minmax(0, 1fr) minmax(0, 1fr); gap: var(--space-3); }
+.key-field { display: grid; gap: var(--space-2); min-width: 0; }
+.key-more-options[open] { display: grid; gap: var(--space-2); }
+.key-check { display: flex; align-items: center; gap: var(--space-2); }
+.key-text { display: grid; gap: var(--space-2); padding: var(--space-3); border: 1px solid var(--line); border-radius: var(--radius); background: var(--surface-raised); }
+.key-text p { margin: 0; color: var(--text-soft); font-size: .875rem; white-space: pre-wrap; overflow-wrap: anywhere; }
+.key-text p.admin-note { color: var(--muted-dim); font-size: .8125rem; }
+@media (max-width: 760px) {
+  .key-create-row { grid-template-columns: minmax(0, 1fr); }
+}
 .key-created { display: grid; gap: var(--space-2); margin-bottom: var(--space-3); padding: var(--space-3); border: 1px solid var(--line); border-radius: var(--radius); background: var(--surface-raised); }
 .key-created p { margin: 0; color: var(--text); }
 .key-secret { display: block; padding: var(--space-2); border: 1px solid var(--line); border-radius: var(--radius); background: var(--surface); color: var(--text); font: .875rem/1.5 ui-monospace, Consolas, monospace; overflow-wrap: anywhere; user-select: all; }
@@ -826,6 +840,27 @@ _WORKSPACE_JS = """
   var keyState = byId("key-state");
   var keyList = byId("key-list");
   var keyMore = byId("key-more");
+  var keyOwner = byId("key-owner");
+  var keyExpires = byId("key-expires");
+  var keyStoreText = byId("key-store-text");
+  var keyAllowedIps = byId("key-allowed-ips");
+  var keyRpm = byId("key-rpm");
+  var keyDetails = byId("key-details");
+  var keyDetailsHeading = byId("key-details-heading");
+  var keyDetailsClose = byId("key-details-close");
+  var keyEditForm = byId("key-edit-form");
+  var keyEditOwner = byId("key-edit-owner");
+  var keyEditExpires = byId("key-edit-expires");
+  var keyEditStoreText = byId("key-edit-store-text");
+  var keyEditAllowedIps = byId("key-edit-allowed-ips");
+  var keyEditRpm = byId("key-edit-rpm");
+  var keyEditSubmit = byId("key-edit-submit");
+  var keyDetailsState = byId("key-details-state");
+  var keyHistory = byId("key-history");
+  var keyHistoryState = byId("key-history-state");
+  var keyHistoryMore = byId("key-history-more");
+  var keyHistoryExport = byId("key-history-export");
+  var keyText = byId("key-text");
   var departmentForm = byId("department-form");
   var departmentName = byId("department-name");
   var departmentSubmit = byId("department-submit");
@@ -1065,6 +1100,13 @@ _WORKSPACE_JS = """
   var keyCursor = null;
   var keyLoading = false;
   var creatingKey = false;
+  var keyDetailsFor = null;
+  var keyExportPath = "";
+  var keyHistoryCursor = null;
+  var keyHistoryLoading = false;
+  var keyHistorySeq = 0;
+  var keySaving = false;
+  var keyTextSeq = 0;
   var adminStateEpoch = 0;
   var adminDepartmentsLoaded = false;
   var adminUsersLoaded = false;
@@ -4187,6 +4229,14 @@ _WORKSPACE_JS = """
       return;
     }
     if (section === "keys") {
+      // Owners are chosen from active accounts, so load them with the key list.
+      if (!adminUsersLoaded) {
+        queueAdminList(function () {
+          return adminUsersLoaded ? Promise.resolve(true) : loadUsers(true);
+        }).then(function () { syncKeyOwnerOptions(); });
+      } else {
+        syncKeyOwnerOptions();
+      }
       // Reloaded on every visit: usage counts change while the tab is closed.
       queueAdminList(function () { return loadApiKeys(true); });
       return;
@@ -4810,6 +4860,7 @@ _WORKSPACE_JS = """
     fillSelect(grantUser, adminUsers, "Select a reviewer", function (item) {
       return "@" + item.username + " (" + item.full_name + ")";
     });
+    syncKeyOwnerOptions();
     syncPolicyTargetOptions();
     syncAlertFilterOptions();
   }
@@ -5443,11 +5494,365 @@ _WORKSPACE_JS = """
     }
   }
 
+  function keyStatus(item) {
+    if (isObject(item) && typeof item.status === "string" && item.status) {
+      return item.status;
+    }
+    if (isObject(item) && typeof item.revoked_at === "number") { return "revoked"; }
+    return "active";
+  }
+
+  function keyStatusLabel(item) {
+    var status = keyStatus(item);
+    if (status === "revoked") { return "Revoked"; }
+    if (status === "expired") { return "Expired"; }
+    if (status === "owner_disabled") { return "Owner disabled"; }
+    return "Active";
+  }
+
+  function keyOwnerName(item) {
+    if (isObject(item) && typeof item.owner_full_name === "string" && item.owner_full_name) {
+      return item.owner_full_name;
+    }
+    if (isObject(item) && typeof item.owner_username === "string" && item.owner_username) {
+      return "@" + item.owner_username;
+    }
+    return "Unknown owner";
+  }
+
+  function keyOwnerLabel(item) {
+    var username = typeof item.username === "string" && item.username ? item.username : "unknown";
+    var name = typeof item.full_name === "string" && item.full_name ? item.full_name : username;
+    return name + " (@" + username + ")";
+  }
+
+  function keyDateInputValue(seconds) {
+    if (typeof seconds !== "number" || !isFinite(seconds)) { return ""; }
+    var date = new Date(seconds * 1000);
+    if (isNaN(date.getTime())) { return ""; }
+    var month = date.getMonth() + 1;
+    var day = date.getDate();
+    return date.getFullYear() + "-" + (month < 10 ? "0" : "") + month +
+      "-" + (day < 10 ? "0" : "") + day;
+  }
+
+  function keyExpirySeconds(value) {
+    var text = typeof value === "string" ? value.trim() : "";
+    if (!text) { return null; }
+    var parts = text.split("-");
+    if (parts.length !== 3 || parts[0].length !== 4 ||
+        parts[1].length !== 2 || parts[2].length !== 2) {
+      return undefined;
+    }
+    var year = Number(parts[0]);
+    var month = Number(parts[1]);
+    var day = Number(parts[2]);
+    if (!isFinite(year) || !isFinite(month) || !isFinite(day)) { return undefined; }
+    var date = new Date(year, month - 1, day, 23, 59, 59, 999);
+    if (isNaN(date.getTime()) || date.getFullYear() !== year ||
+        date.getMonth() !== month - 1 || date.getDate() !== day) {
+      return undefined;
+    }
+    return Math.floor(date.getTime() / 1000);
+  }
+
+  function parseKeyRpm(value) {
+    var text = typeof value === "string" ? value.trim() : "";
+    if (!text) { return null; }
+    var number = Number(text);
+    if (!isFinite(number) || Math.floor(number) !== number || number < 1) {
+      return undefined;
+    }
+    return number;
+  }
+
+  function parseAllowedIps(value) {
+    var text = typeof value === "string" ? value : "";
+    var lines = text.split("\\n");
+    var addresses = [];
+    for (var i = 0; i < lines.length; i += 1) {
+      var line = lines[i].trim();
+      if (line) { addresses.push(line); }
+    }
+    return addresses;
+  }
+
+  function activeKeyOwners() {
+    var owners = [];
+    for (var i = 0; i < adminUsers.length; i += 1) {
+      var item = adminUsers[i];
+      if (isObject(item) && typeof item.id === "string" && item.disabled !== true) {
+        owners.push(item);
+      }
+    }
+    return owners;
+  }
+
+  function syncKeyOwnerOptions() {
+    var owners = activeKeyOwners();
+    if (keyOwner) {
+      fillSelect(keyOwner, owners, "Select an owner", keyOwnerLabel);
+    }
+    if (keyEditOwner) {
+      fillSelect(keyEditOwner, owners, "Select an owner", keyOwnerLabel);
+    }
+  }
+
+  function clearKeyText() {
+    keyTextSeq += 1;
+    clearNode(keyText);
+    keyText.hidden = true;
+  }
+
+  function closeKeyDetails() {
+    keyDetailsFor = null;
+    keyExportPath = "";
+    keyDetails.hidden = true;
+    keyHistorySeq += 1;
+    keyHistoryLoading = false;
+    keySaving = false;
+    keyEditSubmit.disabled = false;
+    keyHistoryMore.hidden = true;
+    clearKeyText();
+    clearNode(keyHistory);
+    setStatus(keyDetailsState, "");
+    setStatus(keyHistoryState, "");
+  }
+
+  function openKeyDetails(item) {
+    if (!isObject(item) || typeof item.id !== "string") { return; }
+    keyDetailsFor = item.id;
+    keyDetails.hidden = false;
+    clearKeyText();
+    keyHistorySeq += 1;
+    keyHistoryLoading = false;
+    keyHistoryCursor = null;
+    clearNode(keyHistory);
+    keyHistoryMore.hidden = true;
+    keyDetailsHeading.textContent = item.name + " details";
+    keyExportPath = "/workspace/api/admin/api-keys/" +
+      encodeURIComponent(item.id) + "/requests.csv";
+    var revoked = keyStatus(item) === "revoked";
+    keyEditForm.hidden = revoked;
+    if (revoked) {
+      setStatus(keyDetailsState, "This key is revoked. Its options cannot be changed.", "warning");
+    } else {
+      setStatus(keyDetailsState, "");
+      keyEditSubmit.disabled = false;
+      syncKeyOwnerOptions();
+      keyEditOwner.value = typeof item.owner_id === "string" ? item.owner_id : "";
+      keyEditExpires.value = typeof item.expires_at === "number"
+        ? keyDateInputValue(item.expires_at) : "";
+      keyEditStoreText.checked = item.store_text === true;
+      keyEditAllowedIps.value = Array.isArray(item.allowed_ips)
+        ? item.allowed_ips.join("\\n") : "";
+      keyEditRpm.value = typeof item.requests_per_minute === "number"
+        ? String(item.requests_per_minute) : "";
+    }
+    queueAdminList(function () { return loadKeyHistory(true, item.id); });
+  }
+
+  function keyOutcomeLabel(value) {
+    if (typeof value !== "string" || !value) { return "—"; }
+    if (value === "allowed") { return "Allowed"; }
+    if (value === "blocked") { return "Blocked"; }
+    if (value === "failed") { return "Failed"; }
+    return value;
+  }
+
+  function renderKeyHistory(items, reset) {
+    if (reset) {
+      clearNode(keyHistory);
+      renderTableHead(keyHistory, ["Time", "IP address", "Result", "Code", "Text"], 5);
+    }
+    if (reset && items.length === 0) {
+      appendEmpty(keyHistory, "No requests have been recorded for this key.");
+    }
+    for (var index = 0; index < items.length; index += 1) {
+      var request = items[index];
+      if (!isObject(request) || typeof request.request_id !== "string") { continue; }
+      var row = document.createElement("div");
+      row.className = "admin-table-row cols-5";
+      row.setAttribute("data-request", request.request_id);
+      row.appendChild(tableCell(formatDate(request.created_at), "cell-muted", "Time"));
+      row.appendChild(tableCell(
+        typeof request.client_ip === "string" ? request.client_ip : "—", "", "IP address"
+      ));
+      row.appendChild(tableCell(keyOutcomeLabel(request.outcome), "", "Result"));
+      row.appendChild(tableCell(
+        typeof request.error_code === "string" && request.error_code
+          ? request.error_code : "—", "cell-muted", "Code"
+      ));
+      if (request.has_text === true) {
+        var textCell = document.createElement("div");
+        textCell.setAttribute("data-label", "Text");
+        var view = document.createElement("button");
+        view.type = "button";
+        view.className = "ghost";
+        view.textContent = "View";
+        view.addEventListener("click", function (target) {
+          return function () { loadKeyText(target); };
+        }(request));
+        textCell.appendChild(view);
+        row.appendChild(textCell);
+      } else {
+        row.appendChild(tableCell("—", "cell-muted", "Text"));
+      }
+      keyHistory.appendChild(row);
+    }
+  }
+
+  function loadKeyHistory(reset, keyId) {
+    var target = typeof keyId === "string" && keyId ? keyId : keyDetailsFor;
+    if (!signedIn || !target) { return Promise.resolve(false); }
+    if (!reset && keyHistoryLoading) { return Promise.resolve(false); }
+    var epoch = sessionEpoch;
+    var token = adminStateEpoch;
+    var seq = ++keyHistorySeq;
+    keyHistoryLoading = true;
+    if (reset) {
+      keyHistoryCursor = null;
+      setStatus(keyHistoryState, "Loading request history…");
+    } else {
+      setStatus(keyHistoryState, "Loading more requests…");
+    }
+    var path = "/workspace/api/admin/api-keys/" + encodeURIComponent(target) +
+      "/requests?limit=" + LIST_LIMIT +
+      (keyHistoryCursor ? "&after=" + encodeURIComponent(keyHistoryCursor) : "");
+    return api(path).then(function (result) {
+      if (seq !== keyHistorySeq || epoch !== sessionEpoch || token !== adminStateEpoch ||
+          keyDetailsFor !== target) {
+        keyHistoryLoading = false;
+        return false;
+      }
+      keyHistoryLoading = false;
+      if (adminGuard(result, keyHistoryState)) { return false; }
+      if (!result.ok || !isObject(result.data) || !Array.isArray(result.data.items)) {
+        setStatus(keyHistoryState, serverMessage(result, timeoutOrNetwork(result)), "error");
+        return false;
+      }
+      var got = [];
+      for (var i = 0; i < result.data.items.length; i += 1) {
+        var item = result.data.items[i];
+        if (isObject(item) && typeof item.request_id === "string") { got.push(item); }
+      }
+      renderKeyHistory(got, reset);
+      keyHistoryCursor = typeof result.data.next === "string" && result.data.next
+        ? result.data.next : null;
+      keyHistoryMore.hidden = !keyHistoryCursor;
+      setStatus(keyHistoryState, reset && got.length === 0
+        ? "No requests have been recorded for this key." : "");
+      return true;
+    });
+  }
+
+  function exportKeyHistory() {
+    if (!signedIn || !keyExportPath) { return; }
+    var path = keyExportPath;
+    var epoch = sessionEpoch;
+    var expectedUser = profile && profile.user && typeof profile.user.id === "string"
+      ? profile.user.id : "";
+    var headers = {};
+    if (expectedUser) { headers["X-Workspace-User"] = expectedUser; }
+    setStatus(adminStatus, "Preparing request history export…");
+    fetch(path, {
+      method: "GET",
+      credentials: "same-origin",
+      cache: "no-store",
+      headers: headers
+    }).then(function (response) {
+      if (epoch !== sessionEpoch) { return false; }
+      if (!response.ok) {
+        setStatus(adminStatus, "The request history could not be exported (HTTP " +
+          response.status + ").", "error");
+        return false;
+      }
+      return response.blob().then(function (blob) {
+        if (epoch !== sessionEpoch) { return false; }
+        if (typeof window.URL === "undefined" ||
+            typeof window.URL.createObjectURL !== "function") {
+          setStatus(adminStatus, "This browser cannot download the export.", "error");
+          return false;
+        }
+        var url = window.URL.createObjectURL(blob);
+        var link = document.createElement("a");
+        link.href = url;
+        link.download = "api-key-requests.csv";
+        link.click();
+        window.URL.revokeObjectURL(url);
+        setStatus(adminStatus, "Request history export downloaded.", "ok");
+        return true;
+      });
+    }).catch(function () {
+      if (epoch !== sessionEpoch) { return; }
+      setStatus(adminStatus, "The request history could not be exported.", "error");
+    });
+  }
+
+  function appendStoredPrompt(container, prompt) {
+    var messages = null;
+    if (typeof prompt === "string") {
+      try { messages = JSON.parse(prompt); } catch (error) { messages = null; }
+    }
+    if (Array.isArray(messages)) {
+      for (var i = 0; i < messages.length; i += 1) {
+        var message = messages[i];
+        if (!isObject(message)) { continue; }
+        var content = typeof message.content === "string" ? message.content : "";
+        var line = document.createElement("p");
+        line.textContent = (typeof message.role === "string" && message.role
+          ? message.role + ": " : "") + content;
+        container.appendChild(line);
+      }
+      return;
+    }
+    if (typeof prompt === "string" && prompt) {
+      var raw = document.createElement("p");
+      raw.textContent = prompt;
+      container.appendChild(raw);
+    }
+  }
+
+  function loadKeyText(request) {
+    if (!isObject(request) || typeof request.request_id !== "string") { return; }
+    var keyId = keyDetailsFor;
+    if (!signedIn || !keyId) { return; }
+    var epoch = sessionEpoch;
+    var token = adminStateEpoch;
+    var seq = ++keyTextSeq;
+    setStatus(keyDetailsState, "Loading stored text…");
+    api("/workspace/api/admin/api-keys/" + encodeURIComponent(keyId) +
+      "/requests/" + encodeURIComponent(request.request_id) + "/text").then(function (result) {
+      if (seq !== keyTextSeq || epoch !== sessionEpoch || token !== adminStateEpoch ||
+          keyDetailsFor !== keyId) {
+        return;
+      }
+      if (adminGuard(result, keyDetailsState)) { return; }
+      if (!result.ok || !isObject(result.data)) {
+        setStatus(keyDetailsState, serverMessage(result, timeoutOrNetwork(result)), "error");
+        return;
+      }
+      setStatus(keyDetailsState, "");
+      clearNode(keyText);
+      var note = document.createElement("p");
+      note.className = "admin-note";
+      note.textContent = "The read was recorded in the access log.";
+      keyText.appendChild(note);
+      appendStoredPrompt(keyText, result.data.prompt);
+      var reply = document.createElement("p");
+      reply.textContent = "Reply: " + (typeof result.data.reply === "string" && result.data.reply
+        ? result.data.reply : "No reply was stored.");
+      keyText.appendChild(reply);
+      keyText.hidden = false;
+    });
+  }
+
   function hideCreatedKey() {
     // The key exists only here, and only until the administrator leaves.
     keySecret.textContent = "";
     keyCreatedName.textContent = "";
     keyCreated.hidden = true;
+    clearKeyText();
   }
 
   function revokeApiKey(row, item) {
@@ -5478,31 +5883,54 @@ _WORKSPACE_JS = """
       appendEmpty(keyList, "No API keys have been generated.");
       return;
     }
-    renderTableHead(keyList, ["Name", "Key", "Requests", "Last used", "Created", "Status"], 6);
+    renderTableHead(keyList, [
+      "Name", "Owner", "Key hint", "Status", "Requests", "Last used", "Actions"
+    ], 7);
     for (var index = 0; index < adminKeys.length; index += 1) {
       var item = adminKeys[index];
+      if (!isObject(item) || typeof item.id !== "string") { continue; }
       var row = document.createElement("div");
-      row.className = "admin-table-row cols-6";
+      row.className = "admin-table-row cols-7";
+      row.setAttribute("data-key", item.id);
       row.appendChild(tableCell(item.name, "", "Name"));
-      row.appendChild(tableCell(item.key_hint + "…", "cell-muted", "Key"));
+
+      var ownerCell = document.createElement("div");
+      ownerCell.setAttribute("data-label", "Owner");
+      var ownerName = document.createElement("span");
+      ownerName.className = "cell-truncate";
+      ownerName.textContent = keyOwnerName(item);
+      ownerName.title = ownerName.textContent;
+      ownerCell.appendChild(ownerName);
+      if (typeof item.owner_department === "string" && item.owner_department) {
+        var ownerDepartment = document.createElement("span");
+        ownerDepartment.className = "cell-muted cell-truncate";
+        ownerDepartment.textContent = item.owner_department;
+        ownerDepartment.title = item.owner_department;
+        ownerCell.appendChild(ownerDepartment);
+      }
+      row.appendChild(ownerCell);
+
+      row.appendChild(tableCell(item.key_hint + "…", "cell-muted", "Key hint"));
+      row.appendChild(tableCell(keyStatusLabel(item), "", "Status"));
       row.appendChild(tableCell(monitorCount(item.requests), "cell-num", "Requests"));
       row.appendChild(tableCell(
         typeof item.last_used_at === "number" ? formatDate(item.last_used_at) : "Never",
         "cell-muted", "Last used"
       ));
-      row.appendChild(tableCell(
-        formatDate(item.created_at) + " by " + (item.created_by || "deleted account"),
-        "cell-muted", "Created"
-      ));
-      if (typeof item.revoked_at === "number") {
-        row.appendChild(tableCell(
-          "Revoked " + formatDate(item.revoked_at) + " by " + (item.revoked_by || "deleted account"),
-          "cell-muted", "Status"
-        ));
-      } else {
-        var actions = document.createElement("div");
-        actions.className = "cell-actions";
-        actions.setAttribute("data-label", "Status");
+
+      var actions = document.createElement("div");
+      actions.className = "cell-actions";
+      actions.setAttribute("data-label", "Actions");
+      var details = document.createElement("button");
+      details.type = "button";
+      details.className = "ghost";
+      details.textContent = "Details";
+      details.addEventListener("click", function (keyItem) {
+        return function () { openKeyDetails(keyItem); };
+      }(item));
+      actions.appendChild(details);
+      var status = keyStatus(item);
+      if (status === "active" || status === "expired" || status === "owner_disabled") {
         var revoke = document.createElement("button");
         revoke.type = "button";
         revoke.className = "danger";
@@ -5511,8 +5939,8 @@ _WORKSPACE_JS = """
           return function () { revokeApiKey(target, keyItem); };
         }(row, item));
         actions.appendChild(revoke);
-        row.appendChild(actions);
       }
+      row.appendChild(actions);
       keyList.appendChild(row);
     }
   }
@@ -5535,6 +5963,7 @@ _WORKSPACE_JS = """
         return false;
       }
       adminKeys = reset ? result.data.items : adminKeys.concat(result.data.items);
+      syncKeyOwnerOptions();
       renderApiKeys();
       keyCursor = typeof result.data.next === "string" && result.data.next ? result.data.next : null;
       keyMore.hidden = !keyCursor;
@@ -6471,6 +6900,11 @@ _WORKSPACE_JS = """
     var digestLine = document.createElement("p");
     digestLine.textContent = "Control digest: " + digest;
     details.appendChild(digestLine);
+    if (typeof item.api_key_name === "string" && item.api_key_name) {
+      var keyLine = document.createElement("p");
+      keyLine.textContent = "API key: " + item.api_key_name;
+      details.appendChild(keyLine);
+    }
     cell.appendChild(details);
     return cell;
   }
@@ -6639,7 +7073,18 @@ _WORKSPACE_JS = """
   }
 
   function viewAlertConversation(item) {
-    if (!currentAdmin() || typeof item.conversation_id !== "string" || !item.conversation_id) {
+    if (!currentAdmin()) { return; }
+    if (typeof item.api_key_name === "string" && item.api_key_name) {
+      alertDetail.hidden = false;
+      clearNode(alertDetail);
+      var keyNote = document.createElement("p");
+      keyNote.textContent = "API key: " + item.api_key_name +
+        ". This alert has no conversation to open.";
+      alertDetail.appendChild(keyNote);
+      setStatus(alertState, "API key: " + item.api_key_name, "");
+      return;
+    }
+    if (typeof item.conversation_id !== "string" || !item.conversation_id) {
       return;
     }
     var conversationId = item.conversation_id;
@@ -6707,6 +7152,15 @@ _WORKSPACE_JS = """
       timeText.textContent = "@" + username + " · " + formatDate(item.created_at);
       timeText.title = timeText.textContent;
       userCell.appendChild(timeText);
+      var apiKeyName = typeof item.api_key_name === "string" && item.api_key_name
+        ? item.api_key_name : "";
+      if (apiKeyName) {
+        var keyLine = document.createElement("span");
+        keyLine.className = "cell-muted cell-truncate";
+        keyLine.textContent = "API key: " + apiKeyName;
+        keyLine.title = keyLine.textContent;
+        userCell.appendChild(keyLine);
+      }
       row.appendChild(userCell);
 
       var reason = alertReason(item);
@@ -6777,7 +7231,7 @@ _WORKSPACE_JS = """
         actions.appendChild(ackButton);
         buttons.push(ackButton);
       }
-      if (typeof item.conversation_id === "string" && item.conversation_id) {
+      if (!apiKeyName && typeof item.conversation_id === "string" && item.conversation_id) {
         var viewButton = document.createElement("button");
         viewButton.type = "button";
         viewButton.className = "ghost";
@@ -6969,7 +7423,30 @@ _WORKSPACE_JS = """
     keySubmit.disabled = false;
     keyName.value = "";
     keyMore.hidden = true;
+    keyDetailsFor = null;
+    keyHistoryCursor = null;
+    keyHistoryLoading = false;
+    keyHistorySeq += 1;
+    keySaving = false;
+    keyOwner.value = "";
+    keyExpires.value = "";
+    keyStoreText.checked = false;
+    keyAllowedIps.value = "";
+    keyRpm.value = "";
+    keyDetails.hidden = true;
+    keyEditForm.hidden = false;
+    keyEditOwner.value = "";
+    keyEditExpires.value = "";
+    keyEditStoreText.checked = false;
+    keyEditAllowedIps.value = "";
+    keyEditRpm.value = "";
+    keyEditSubmit.disabled = false;
+    keyHistoryMore.hidden = true;
+    keyExportPath = "";
     clearNode(keyList);
+    clearNode(keyHistory);
+    setStatus(keyDetailsState, "");
+    setStatus(keyHistoryState, "");
     setStatus(keyState, "");
     hideCreatedKey();
     if (departmentName) { departmentName.value = ""; }
@@ -7077,6 +7554,32 @@ _WORKSPACE_JS = """
       keyName.focus();
       return;
     }
+    var owner = keyOwner.value;
+    if (!owner) {
+      setStatus(adminStatus, "Choose an owner for this key.", "error");
+      keyOwner.focus();
+      return;
+    }
+    var expires = keyExpirySeconds(keyExpires.value);
+    if (expires === undefined) {
+      setStatus(adminStatus, "Enter a valid expiry date.", "error");
+      keyExpires.focus();
+      return;
+    }
+    var requestsPerMinute = parseKeyRpm(keyRpm.value);
+    if (requestsPerMinute === undefined) {
+      setStatus(adminStatus, "Requests per minute must be 1 or more.", "error");
+      keyRpm.focus();
+      return;
+    }
+    var payload = {
+      name: name,
+      owner_id: owner,
+      store_text: keyStoreText.checked === true,
+      allowed_ips: parseAllowedIps(keyAllowedIps.value),
+      requests_per_minute: requestsPerMinute
+    };
+    if (expires !== null) { payload.expires_at = expires; }
     creatingKey = true;
     keySubmit.disabled = true;
     hideCreatedKey();
@@ -7084,7 +7587,7 @@ _WORKSPACE_JS = """
     var epoch = sessionEpoch;
     api("/workspace/api/admin/api-keys", {
       method: "POST",
-      body: JSON.stringify({ name: name })
+      body: JSON.stringify(payload)
     }).then(function (result) {
       if (epoch !== sessionEpoch) { return; }
       creatingKey = false;
@@ -7099,6 +7602,11 @@ _WORKSPACE_JS = """
         return;
       }
       keyName.value = "";
+      keyOwner.value = "";
+      keyExpires.value = "";
+      keyStoreText.checked = false;
+      keyAllowedIps.value = "";
+      keyRpm.value = "";
       keyCreatedName.textContent = name;
       keySecret.textContent = result.data.key;
       keyCreated.hidden = false;
@@ -7130,6 +7638,76 @@ _WORKSPACE_JS = """
 
   keyMore.addEventListener("click", function () {
     queueAdminList(function () { return loadApiKeys(false); });
+  });
+
+  keyDetailsClose.addEventListener("click", function () {
+    closeKeyDetails();
+  });
+
+  keyHistoryMore.addEventListener("click", function () {
+    if (!keyDetailsFor) { return; }
+    queueAdminList(function () { return loadKeyHistory(false, keyDetailsFor); });
+  });
+
+  keyHistoryExport.addEventListener("click", function () {
+    exportKeyHistory();
+  });
+
+  keyEditForm.addEventListener("submit", function (event) {
+    event.preventDefault();
+    if (!signedIn || keySaving || !keyDetailsFor || keyEditForm.hidden) { return; }
+    var owner = keyEditOwner.value;
+    if (!owner) {
+      setStatus(adminStatus, "Choose an owner for this key.", "error");
+      keyEditOwner.focus();
+      return;
+    }
+    var expires = keyExpirySeconds(keyEditExpires.value);
+    if (expires === undefined) {
+      setStatus(adminStatus, "Enter a valid expiry date.", "error");
+      keyEditExpires.focus();
+      return;
+    }
+    var requestsPerMinute = parseKeyRpm(keyEditRpm.value);
+    if (requestsPerMinute === undefined) {
+      setStatus(adminStatus, "Requests per minute must be 1 or more.", "error");
+      keyEditRpm.focus();
+      return;
+    }
+    var keyId = keyDetailsFor;
+    var epoch = sessionEpoch;
+    var token = adminStateEpoch;
+    keySaving = true;
+    keyEditSubmit.disabled = true;
+    setStatus(adminStatus, "Saving key options…");
+    api("/workspace/api/admin/api-keys/" + encodeURIComponent(keyId), {
+      method: "POST",
+      body: JSON.stringify({
+        owner_id: owner,
+        expires_at: expires,
+        store_text: keyEditStoreText.checked === true,
+        allowed_ips: parseAllowedIps(keyEditAllowedIps.value),
+        requests_per_minute: requestsPerMinute
+      })
+    }).then(function (result) {
+      if (epoch !== sessionEpoch || token !== adminStateEpoch) { return; }
+      keySaving = false;
+      keyEditSubmit.disabled = false;
+      if (adminGuard(result, adminStatus)) { return; }
+      if (!result.ok) {
+        setStatus(adminStatus, serverMessage(result, timeoutOrNetwork(result)), "error");
+        return;
+      }
+      setStatus(adminStatus, "Key options saved.", "ok");
+      if (isObject(result.data) && result.data.id === keyId) {
+        for (var i = 0; i < adminKeys.length; i += 1) {
+          if (adminKeys[i].id === keyId) { adminKeys[i] = result.data; }
+        }
+        renderApiKeys();
+      } else {
+        queueAdminList(function () { return loadApiKeys(true); });
+      }
+    });
   });
 
   departmentForm.addEventListener("submit", function (event) {
@@ -7767,8 +8345,27 @@ WORKSPACE_HTML = """<!doctype html>
 <div class="admin-section-head"><h3 id="keys-heading">API keys</h3></div>
 <p class="admin-note">Give each person or tool its own key, so every request can be traced to a name. The log shows which key was used, so a shared key cannot tell you who sent a request.</p>
 <form id="key-form" class="admin-form policy-form" novalidate>
+<div class="key-create-row">
+<div class="key-field">
 <label for="key-name">Key name</label>
 <input id="key-name" name="key-name" type="text" maxlength="80" autocomplete="off" spellcheck="false" placeholder="Ali, laptop" required>
+</div>
+<div class="key-field">
+<label for="key-owner">Owner</label>
+<select id="key-owner" name="key-owner" required></select>
+</div>
+</div>
+<details class="admin-help key-more-options">
+<summary>More options</summary>
+<label for="key-expires">Expires</label>
+<input id="key-expires" name="key-expires" type="date">
+<label class="key-check" for="key-store-text"><input id="key-store-text" name="key-store-text" type="checkbox"> Keep prompts and replies</label>
+<p class="admin-note">Saved encrypted. Every read is recorded.</p>
+<label for="key-allowed-ips">Allowed IP addresses</label>
+<textarea id="key-allowed-ips" name="key-allowed-ips" rows="2" spellcheck="false" placeholder="One IP address or CIDR per line"></textarea>
+<label for="key-rpm">Requests per minute</label>
+<input id="key-rpm" name="key-rpm" type="number" min="1" step="1">
+</details>
 <div class="policy-actions"><button id="key-submit" class="primary" type="submit">Generate key</button></div>
 </form>
 <div id="key-created" class="key-created" role="group" aria-label="New API key" hidden>
@@ -7782,6 +8379,29 @@ WORKSPACE_HTML = """<!doctype html>
 <p id="key-state" class="admin-note" role="status" aria-live="polite"></p>
 <div id="key-list" class="admin-table" aria-label="API keys"></div>
 <button id="key-more" class="admin-more" type="button" hidden>Load more keys</button>
+<div id="key-details" class="key-details" aria-label="API key details" hidden>
+<div class="key-details-head"><h3 id="key-details-heading">Key details</h3><button id="key-details-close" class="ghost" type="button">Close</button></div>
+<form id="key-edit-form" class="admin-form policy-form" novalidate>
+<label for="key-edit-owner">Owner</label>
+<select id="key-edit-owner" name="key-edit-owner" required></select>
+<label for="key-edit-expires">Expires</label>
+<input id="key-edit-expires" name="key-edit-expires" type="date">
+<label class="key-check" for="key-edit-store-text"><input id="key-edit-store-text" name="key-edit-store-text" type="checkbox"> Keep prompts and replies</label>
+<p class="admin-note">Saved encrypted. Every read is recorded.</p>
+<label for="key-edit-allowed-ips">Allowed IP addresses</label>
+<textarea id="key-edit-allowed-ips" name="key-edit-allowed-ips" rows="2" spellcheck="false" placeholder="One IP address or CIDR per line"></textarea>
+<label for="key-edit-rpm">Requests per minute</label>
+<input id="key-edit-rpm" name="key-edit-rpm" type="number" min="1" step="1">
+<div class="policy-actions"><button id="key-edit-submit" class="primary" type="submit">Save changes</button></div>
+</form>
+<p id="key-details-state" class="admin-note" role="status" aria-live="polite"></p>
+<h4>Request history</h4>
+<p id="key-history-state" class="admin-note" role="status" aria-live="polite"></p>
+<div id="key-history" class="admin-table" aria-label="API key request history"></div>
+<button id="key-history-more" class="admin-more" type="button" hidden>Load more</button>
+<div><button id="key-history-export" class="ghost admin-more" type="button">Export CSV</button></div>
+<div id="key-text" class="key-text" aria-label="Stored request text" hidden></div>
+</div>
 </section>
 
 <section id="admin-integrate-panel" class="admin-panel-section" role="tabpanel" aria-labelledby="admin-tab-integrate" hidden>

@@ -118,6 +118,10 @@ function makeElement(id) {
       }
       return event;
     },
+    click() {
+      element.clicked = (element.clicked || 0) + 1;
+      element.dispatch("click");
+    },
     focus() {
       element.focused += 1;
     },
@@ -234,6 +238,19 @@ function createApp(options) {
       }
     },
   };
+  const objectUrls = [];
+  window.URL = {
+    createObjectURL(blob) {
+      const id = "blob:workspace-" + (objectUrls.length + 1);
+      objectUrls.push({ id, blob, revoked: false });
+      return id;
+    },
+    revokeObjectURL(id) {
+      for (const item of objectUrls) {
+        if (item.id === id) { item.revoked = true; }
+      }
+    },
+  };
 
   const calls = [];
   function fetch(url, options) {
@@ -275,6 +292,9 @@ function createApp(options) {
             return Promise.reject(new SyntaxError("invalid json"));
           }
           return Promise.resolve(payload);
+        },
+        blob() {
+          return Promise.resolve({ parts: [payload], type: "text/csv" });
         },
       });
     };
@@ -373,6 +393,7 @@ function createApp(options) {
     location,
     history: historyApi,
     historyEntries,
+    objectUrls,
     get historyIndex() { return historyIndex; },
     goBack() {
       if (historyIndex === 0) { return false; }
@@ -1619,6 +1640,15 @@ async function scenarioAdmin() {
     id: "key-1",
     name: "Ali, laptop",
     key_hint: "nlk_Ab12",
+    status: "active",
+    owner_id: "user-alice",
+    owner_username: "alice",
+    owner_full_name: "Alice Tan",
+    owner_department: "Accounting",
+    expires_at: 1800000000,
+    store_text: true,
+    allowed_ips: ["192.168.0.0/24"],
+    requests_per_minute: 30,
     created_at: 1700000000,
     created_by: "admin",
     revoked_at: null,
@@ -1626,34 +1656,230 @@ async function scenarioAdmin() {
     requests: 7,
     last_used_at: 1700000100,
   };
+  const revokedKey = {
+    ...keyRow,
+    id: "key-3",
+    name: "Retired key",
+    key_hint: "nlk_Old1",
+    status: "revoked",
+    revoked_at: 1700000500,
+    revoked_by: "admin",
+  };
   app.elementFor("admin-tab-keys").dispatch("click");
   await settle();
   assert(app.elementFor("admin-keys-panel").hidden === false,
     "opening API keys must show its panel");
+  const ownerOption = collect(app.elementFor("key-owner")).find(
+    (element) => element.tagName === "OPTION" && element.value === "user-alice"
+  );
+  assert(ownerOption && ownerOption.textContent === "Alice Tan (@alice)",
+    "the owner selector must offer active users by name and username");
   app.lastMatching("/workspace/api/admin/api-keys?limit=25").respond({ items: [keyRow], next: null }, 200);
   await settle();
   assert(app.elementFor("key-list").textContent.indexOf("nlk_Ab12") >= 0,
     "the key list must show the hint");
+  assert(app.elementFor("key-list").textContent.indexOf("Alice Tan") >= 0 &&
+      app.elementFor("key-list").textContent.indexOf("Accounting") >= 0,
+    "the key list must show the owner and department");
   assert(app.elementFor("key-created").hidden === true,
     "no key may be on screen before one is generated");
   app.elementFor("key-name").value = "Harness";
   app.elementFor("key-form").dispatch("submit");
+  assert(app.calls.filter(
+    (call) => call.url === "/workspace/api/admin/api-keys" && call.options.method === "POST"
+  ).length === 0, "a key without an owner must not be sent");
+  assert(app.elementFor("admin-status").textContent.indexOf("Choose an owner") >= 0,
+    "a missing owner must be reported");
+  app.elementFor("key-owner").value = "user-alice";
+  app.elementFor("key-expires").value = "2026-12-31";
+  app.elementFor("key-store-text").checked = true;
+  app.elementFor("key-allowed-ips").value = "192.168.0.0/24\n10.0.0.5";
+  app.elementFor("key-rpm").value = "30";
+  app.elementFor("key-form").dispatch("submit");
   await settle();
   const createdKey = app.lastMatching("/workspace/api/admin/api-keys");
-  assert(createdKey.options.method === "POST" &&
-      JSON.parse(createdKey.options.body).name === "Harness",
-    "generating a key must post only its name");
-  createdKey.respond({ key: "nlk_synthetic_value", item: { ...keyRow, id: "key-2", name: "Harness" } }, 201);
+  const createdPayload = JSON.parse(createdKey.options.body);
+  const expectedExpiry = Math.floor(new Date(2026, 11, 31, 23, 59, 59, 999).getTime() / 1000);
+  assert(createdKey.options.method === "POST" && createdPayload.name === "Harness",
+    "generating a key must post its name");
+  assert(createdPayload.owner_id === "user-alice", "generating a key must send its owner");
+  assert(createdPayload.expires_at === expectedExpiry,
+    "the expiry must be the end of the chosen local day");
+  assert(createdPayload.store_text === true, "the keep-text option must be sent");
+  assert(Array.isArray(createdPayload.allowed_ips) &&
+      createdPayload.allowed_ips.join(",") === "192.168.0.0/24,10.0.0.5",
+    "the allowed addresses must be sent one per line");
+  assert(createdPayload.requests_per_minute === 30, "the rate limit must be sent");
+  const createdItem = { ...keyRow, id: "key-2", name: "Harness", requests: 0, last_used_at: null };
+  createdKey.respond({ key: "nlk_synthetic_value", item: createdItem }, 201);
   await settle();
   assert(app.elementFor("key-secret").textContent === "nlk_synthetic_value",
     "the new key must be shown once");
   assert(app.elementFor("key-created").hidden === false, "the new key panel must open");
   app.lastMatching("/workspace/api/admin/api-keys?limit=25").respond(
-    { items: [{ ...keyRow, id: "key-2", name: "Harness" }, keyRow], next: null }, 200
+    { items: [createdItem, keyRow, revokedKey], next: null }, 200
   );
   await settle();
   assert(app.elementFor("key-list").textContent.indexOf("nlk_synthetic_value") < 0,
     "the list must never hold the full key");
+
+  const activeKeyRow = findDataRow(app.elementFor("key-list"), "data-key", "key-2");
+  assert(activeKeyRow && findButton(activeKeyRow, "Details"),
+    "an active key must offer Details");
+  findButton(activeKeyRow, "Details").dispatch("click");
+  await settle();
+  assert(app.elementFor("key-details").hidden === false,
+    "Details must open the key panel");
+  const keyHistory = app.lastMatching("/workspace/api/admin/api-keys/key-2/requests?limit=25");
+  assert(keyHistory, "Details must load the key request history");
+  keyHistory.respond(
+    {
+      items: [
+        {
+          request_id: "req-text-1",
+          created_at: 1700000200,
+          client_ip: "192.168.0.5",
+          outcome: "allowed",
+          error_code: null,
+          has_text: true,
+        },
+        {
+          request_id: "req-text-2",
+          created_at: 1700000100,
+          client_ip: "10.0.0.5",
+          outcome: "blocked",
+          error_code: "PROMPT_SECRET",
+          has_text: false,
+        },
+      ],
+      next: "history-cursor",
+    },
+    200
+  );
+  await settle();
+  const historyText = app.elementFor("key-history").textContent;
+  assert(historyText.indexOf("192.168.0.5") >= 0 && historyText.indexOf("Allowed") >= 0,
+    "the history must show the request IP and result");
+  assert(app.elementFor("key-history-more").hidden === false,
+    "a history page with a next cursor must offer Load more");
+
+  function downloadedExports() {
+    return app.created.filter(
+      (element) => element.tagName === "A" &&
+        element.download === "api-key-requests.csv" && element.clicked
+    );
+  }
+  assert(downloadedExports().length === 0, "no export may download before it is requested");
+  app.elementFor("key-history-export").dispatch("click");
+  await settle();
+  const failedExport = app.lastMatching("/workspace/api/admin/api-keys/key-2/requests.csv");
+  assert(failedExport, "Export must fetch the CSV path");
+  assert(failedExport.options.credentials === "same-origin",
+    "Export must use same-origin cookie credentials");
+  assert(failedExport.options.headers["X-Workspace-User"] === "user-admin",
+    "Export must send the current profile header");
+  failedExport.respond(
+    { error: { code: "FORBIDDEN", message: "Permission denied." } },
+    403
+  );
+  await settle();
+  assert(app.elementFor("admin-status").textContent.indexOf("could not be exported") >= 0,
+    "a failed export must be reported");
+  assert(app.elementFor("admin-status").getAttribute("data-kind") === "error",
+    "a failed export must be reported as an error");
+  assert(downloadedExports().length === 0,
+    "a failed export must not download anything");
+
+  app.elementFor("key-history-export").dispatch("click");
+  await settle();
+  const successfulExport = app.lastMatching("/workspace/api/admin/api-keys/key-2/requests.csv");
+  assert(successfulExport && successfulExport !== failedExport,
+    "Export must fetch the CSV path again");
+  successfulExport.respond("time,request_id\n1700000200,req-text-1\n", 200);
+  await settle();
+  const exportDownload = downloadedExports()[0];
+  assert(exportDownload && exportDownload.clicked === 1,
+    "a successful export must click one download link");
+  assert(String(exportDownload.href).indexOf("blob:workspace-") === 0,
+    "the download must use an object URL");
+  assert(app.objectUrls.length === 1 && app.objectUrls[0].revoked === true,
+    "the export object URL must be revoked after download");
+  assert(app.elementFor("admin-status").textContent.indexOf("downloaded") >= 0,
+    "a successful export must be reported");
+
+  app.elementFor("key-edit-rpm").value = "45";
+  app.elementFor("key-edit-store-text").checked = false;
+  app.elementFor("key-edit-allowed-ips").value = "10.0.0.0/8";
+  app.elementFor("key-edit-expires").value = "2027-01-01";
+  app.elementFor("key-edit-form").dispatch("submit");
+  await settle();
+  const failedSave = app.lastMatching("/workspace/api/admin/api-keys/key-2");
+  const failedPayload = JSON.parse(failedSave.options.body);
+  assert(failedSave.options.method === "POST", "saving key options must POST");
+  assert(failedPayload.owner_id === "user-alice" &&
+      failedPayload.store_text === false &&
+      failedPayload.allowed_ips.join(",") === "10.0.0.0/8" &&
+      failedPayload.requests_per_minute === 45 &&
+      typeof failedPayload.expires_at === "number",
+    "saving key options must send every option field");
+  failedSave.respond(
+    { error: { code: "INVALID_REQUEST", message: "Rate limit is invalid." } },
+    400
+  );
+  await settle();
+  assert(app.elementFor("admin-status").textContent.indexOf("Rate limit is invalid.") >= 0,
+    "a failed save must show the server message");
+  app.elementFor("key-edit-form").dispatch("submit");
+  await settle();
+  const savedKey = app.lastMatching("/workspace/api/admin/api-keys/key-2");
+  savedKey.respond({ ...createdItem, requests_per_minute: 45, store_text: false }, 200);
+  await settle();
+  assert(app.elementFor("admin-status").textContent.indexOf("saved") >= 0,
+    "a successful save must be reported");
+
+  const viewText = findButton(app.elementFor("key-history"), "View");
+  assert(viewText, "only a request with stored text must offer View");
+  viewText.dispatch("click");
+  await settle();
+  const textCall = app.lastMatching(
+    "/workspace/api/admin/api-keys/key-2/requests/req-text-1/text"
+  );
+  assert(textCall, "View must read the stored request text");
+  textCall.respond(
+    {
+      request_id: "req-text-1",
+      prompt: JSON.stringify([
+        { role: "user", content: "Harness prompt text" },
+      ]),
+      reply: "Harness reply text",
+    },
+    200
+  );
+  await settle();
+  const shownText = app.elementFor("key-text").textContent;
+  assert(shownText.indexOf("Harness prompt text") >= 0 &&
+      shownText.indexOf("Harness reply text") >= 0,
+    "View must show the prompt and reply as plain text");
+  assert(shownText.indexOf("recorded") >= 0,
+    "the stored text must say the read was recorded");
+  app.elementFor("key-details-close").dispatch("click");
+  assert(app.elementFor("key-text").textContent === "",
+    "closing Details must clear the stored text");
+  assert(app.elementFor("key-text").hidden === true,
+    "closing Details must hide the stored text");
+
+  const revokedRow = findDataRow(app.elementFor("key-list"), "data-key", "key-3");
+  assert(revokedRow && !findButton(revokedRow, "Revoke"),
+    "a revoked key must not offer Revoke");
+  findButton(revokedRow, "Details").dispatch("click");
+  await settle();
+  assert(app.elementFor("key-edit-form").hidden === true,
+    "a revoked key must not offer the edit form");
+  app.lastMatching("/workspace/api/admin/api-keys/key-3/requests?limit=25").respond(
+    { items: [], next: null }, 200
+  );
+  await settle();
+  app.elementFor("key-details-close").dispatch("click");
   app.elementFor("admin-tab-access").dispatch("click");
   await settle();
   assert(app.elementFor("key-secret").textContent === "",
@@ -3126,6 +3352,7 @@ async function scenarioAlertProfileFallbackAndAcknowledgement() {
       id: "alert:extra-" + i,
       request_id: "req-extra-" + i,
       stage: i % 2 === 0 ? "output" : "input",
+      ...(i === 0 ? { conversation_id: null, api_key_name: "Ali, laptop" } : {}),
     });
   }
   const allAlerts = [
@@ -3237,6 +3464,12 @@ async function scenarioAlertProfileFallbackAndAcknowledgement() {
     "the reference copy action must name the full request reference");
   assert(copyReference.title === "Copy reference",
     "the reference copy action must explain itself on hover");
+
+  const apiKeyAlert = alertRow(extraAlerts[0].id);
+  assert(apiKeyAlert && apiKeyAlert.textContent.indexOf("API key: Ali, laptop") >= 0,
+    "an API key alert must name the key");
+  assert(!findButton(apiKeyAlert, "View conversation"),
+    "an API key alert must not offer a conversation link");
 
   const defaultRow = alertRow(defaultPolicyAlert.id);
   assert(defaultRow, "an alert with no assignment lineage must still render");
