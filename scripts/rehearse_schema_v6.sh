@@ -20,6 +20,7 @@ cleanup() {
     rm -rf "$WORK"
 }
 trap cleanup EXIT
+trap 'echo "REHEARSAL FAILED at line $LINENO; nothing live was changed" >&2' ERR
 
 sql() {
     docker exec -i nl-rehearsal-db psql -q -tA -U nasi_lemak_admin -d nasi_lemak -v ON_ERROR_STOP=1 "$@"
@@ -43,7 +44,7 @@ rm -f "$WORK/live.dump"
 before_version=$(sql -c 'SELECT MAX(version) FROM ws_schema_migrations')
 before_users=$(sql -c 'SELECT COUNT(*) FROM ws_users')
 echo "copied the live database: schema $before_version, $before_users accounts"
-test "$before_version" = 4
+test "$before_version" = 5
 
 mkdir "$WORK/workspace"
 cp .secrets/workspace/workspace_key "$WORK/workspace/workspace_key"
@@ -66,8 +67,10 @@ sql -c "CREATE ROLE nl_rehearsal_runtime LOGIN PASSWORD '$PASSWORD' IN ROLE nasi
 after_version=$(sql -c 'SELECT MAX(version) FROM ws_schema_migrations')
 after_users=$(sql -c 'SELECT COUNT(*) FROM ws_users')
 echo "after the migration: schema $after_version, $after_users accounts"
-test "$after_version" = 5
+test "$after_version" = 6
 test "$after_users" = "$before_users"
+test "$(sql -c 'SELECT COUNT(*) FROM ws_api_keys WHERE owner_id IS NULL')" = 0
+echo "every existing key now has an owner: $(sql -c 'SELECT COUNT(*) FROM ws_api_keys') keys"
 
 ADMIN_ID=$(sql -c "SELECT id FROM ws_users WHERE role = 'admin' AND disabled = 0 ORDER BY created_at LIMIT 1")
 test -n "$ADMIN_ID"
