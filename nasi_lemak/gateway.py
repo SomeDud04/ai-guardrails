@@ -21,7 +21,7 @@ from typing import Any
 from .audit import AuditStore, SqliteAuditStore
 from .controls import API_KEY_PREFIX, GatewayControl, block_detail
 from .live_metrics import LiveMetrics
-from .diagnostics import SIGNAL_CODES, record_signal
+from .diagnostics import GENERATION_TRUNCATED, SIGNAL_CODES, record_signal
 from .generation import GenerationError, conservative_byte_budget
 from .guards import GuardInputLimit
 from .limits import LIMIT_FIELDS, ChatLimits, tighten
@@ -32,6 +32,8 @@ from .system_settings import RuntimeSettings
 
 
 LOGGER = logging.getLogger(__name__)
+# Added after the guards read the reply, so it is the one fixed text they never see.
+CUT_OFF_NOTICE = "\n\n[This reply was cut off at the length limit. Ask for a shorter answer.]"
 # Fixed stage vocabulary for the one content-free failure log line.
 FAILURE_STAGES = frozenset(
     {"input_guard", "generation", "output_guard", "audit", "other"}
@@ -846,6 +848,8 @@ class Gateway:
             if usage:
                 timing["prompt_tokens"] = usage["prompt_tokens"]
                 timing["reply_tokens"] = usage["completion_tokens"]
+            read_finish = getattr(self.adapters, "last_finish_reason", None)
+            cut_off = callable(read_finish) and read_finish() == "length"
             if not isinstance(output, str):
                 raise ValueError("invalid generation result")
         except GenerationError as exc:
@@ -918,7 +922,10 @@ class Gateway:
                 request_id, "failed", "UNAVAILABLE", stage="audit"
             )
             return self._error(503, "UNAVAILABLE", request_id)
-        return 200, {"id": request_id, "object": "chat.completion", "model": self.policy.model, "choices": [{"index": 0, "message": {"role": "assistant", "content": masked_output}, "finish_reason": "stop"}]}
+        if cut_off:
+            self._note_diagnostic(scan_context, GENERATION_TRUNCATED)
+            masked_output += CUT_OFF_NOTICE
+        return 200, {"id": request_id, "object": "chat.completion", "model": self.policy.model, "choices": [{"index": 0, "message": {"role": "assistant", "content": masked_output}, "finish_reason": "length" if cut_off else "stop"}]}
 
     def _note_diagnostic(self, scan_context: ScanContext | None, code: str) -> None:
         """Record one fixed code on the per-request and/or gateway sink once."""

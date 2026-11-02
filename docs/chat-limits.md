@@ -81,6 +81,11 @@ The latest oversized prompt/context returns `413`. If a required guard path is
 unavailable, chat returns the existing generic `503`; limits never bypass a
 guard.
 
+A reply that reaches the limit is scanned like any other, then released with a
+fixed notice and `finish_reason: length`. The guards see exactly the model text
+that is delivered, and the `generation_truncated` counter records each one. A
+reply with no visible text is still a `503`.
+
 ## Guard windows
 
 Guards keep their own coverage, message and response caps, so configure lower

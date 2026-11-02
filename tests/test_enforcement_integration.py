@@ -26,6 +26,7 @@ from fastapi.testclient import TestClient
 
 from nasi_lemak import server as server_module
 from nasi_lemak.audit import AuditError, SqliteAuditStore
+from nasi_lemak.gateway import CUT_OFF_NOTICE
 from nasi_lemak.generation import (
     AUTH_NONE,
     ENV_AUTH,
@@ -761,8 +762,32 @@ class EnforcementIntegrationTests(unittest.TestCase):
                 2.0,
             ),
             (
-                "generation_truncated",
+                "cut_off_output_guard_block",
                 _reply(_chat_reply(SENTINEL, finish="length")),
+                _OutputGuard(safe=False),
+                403,
+                "POLICY_BLOCK",
+                2.0,
+            ),
+            (
+                "cut_off_output_guard_error",
+                _reply(_chat_reply(SENTINEL, finish="length")),
+                _OutputGuard(error=GuardError("guard inference failed")),
+                503,
+                "UNAVAILABLE",
+                2.0,
+            ),
+            (
+                "cut_off_literal_denial",
+                _reply(_chat_reply(f"answer {DENY_PHRASE}", finish="length")),
+                _OutputGuard(),
+                403,
+                "POLICY_BLOCK",
+                2.0,
+            ),
+            (
+                "cut_off_with_nothing_visible",
+                _reply(_chat_reply("", finish="length")),
                 _OutputGuard(),
                 503,
                 "UNAVAILABLE",
@@ -803,6 +828,40 @@ class EnforcementIntegrationTests(unittest.TestCase):
                 )
                 self.assertEqual(events[-1]["event_type"], expected)
                 self._assert_metadata_only(events, gateway=gateway)
+
+    def test_a_cut_off_reply_is_scanned_then_released_with_a_notice(self):
+        httpd = self._start_upstream(_reply(_chat_reply("Partial answer", finish="length")))
+        output = _OutputGuard()
+        client, _adapters, gateway = self._make(httpd, output=output)
+
+        response = self._post(
+            client, self._body([{"role": "user", "content": "hello"}])
+        )
+
+        self.assertEqual(response.status_code, 200, response.text)
+        choice = response.json()["choices"][0]
+        self.assertEqual(choice["finish_reason"], "length")
+        self.assertEqual(
+            choice["message"]["content"], "Partial answer" + CUT_OFF_NOTICE
+        )
+        # The guard read the model's own text, and the notice is added after it.
+        self.assertEqual(len(output.calls), 1)
+        self.assertIn("Partial answer", str(output.calls))
+        self.assertNotIn(CUT_OFF_NOTICE.strip(), str(output.calls))
+        self.assertEqual(gateway.audit_events()[-1]["event_type"], "request_completed")
+
+    def test_a_cut_off_stream_says_so_in_its_closing_chunk(self):
+        httpd = self._start_upstream(_reply(_chat_reply("Partial answer", finish="length")))
+        client, _adapters, _gateway = self._make(httpd)
+
+        response = self._post(
+            client,
+            self._body([{"role": "user", "content": "hello"}], stream=True),
+        )
+
+        self.assertEqual(response.status_code, 200, response.text)
+        self.assertIn('"finish_reason": "length"', response.text)
+        self.assertNotIn('"finish_reason": "stop"', response.text)
 
     def test_initial_audit_write_failure_never_reaches_upstream(self):
         httpd = self._start_upstream()

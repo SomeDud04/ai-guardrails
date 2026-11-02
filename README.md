@@ -132,7 +132,7 @@ Request rules:
   agent clients. One complete admission, guarded completion and terminal audit
   still run; only the already-masked released text is then sent as one-shot SSE
   (`text/event-stream`, `Cache-Control: no-cache`): an assistant-content chunk,
-  a `finish_reason: stop` chunk and `[DONE]`. Nothing is emitted before the
+  a closing `finish_reason` chunk and `[DONE]`. Nothing is emitted before the
   output guard passes. `stream_options` (object) and in-range numeric
   `temperature`/`top_p` are accepted and ignored, never forwarded upstream. Any
   non-200 outcome stays the unchanged JSON error envelope. The gateway itself

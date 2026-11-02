@@ -551,6 +551,19 @@ class TransportTests(FixtureMixin):
                 # must stay generic instead of incrementing that counter.
                 self.assertIsNone(caught.exception.diagnostic_code)
 
+    def test_a_cut_off_reply_is_returned_and_reported_for_this_turn(self):
+        httpd = self.start_server()
+        client = GenerationClient(self.config(httpd))
+        self.set_json(httpd, chat_payload("Partial", finish="length"))
+        self.assertEqual(
+            client.generate([{"role": "user", "content": "hello"}], 8), "Partial"
+        )
+        self.assertEqual(client.last_finish_reason(), "length")
+
+        self.set_json(httpd, chat_payload("Whole"))
+        client.generate([{"role": "user", "content": "hello"}], 8)
+        self.assertEqual(client.last_finish_reason(), "stop")
+
     def test_malformed_or_unsupported_completions_are_rejected(self):
         httpd = self.start_server()
         client = GenerationClient(self.config(httpd))
@@ -558,7 +571,12 @@ class TransportTests(FixtureMixin):
             "non-object": [],
             "empty choices": {"choices": []},
             "two choices": chat_payload(choices=[chat_payload()["choices"][0], chat_payload()["choices"][0]]),
-            "truncated": chat_payload(finish="length"),
+            "cut off with tools": chat_payload(
+                finish="length", message_extra={"tool_calls": [{"id": "x"}]}
+            ),
+            "cut off with a refusal": chat_payload(
+                finish="length", message_extra={"refusal": "not allowed"}
+            ),
             "missing finish": chat_payload(finish=None),
             "missing content": chat_payload(content=None),
             "blank content": chat_payload(content="  "),
@@ -829,6 +847,20 @@ class GatewayIntegrationTests(FixtureMixin):
         counters = diagnostics.snapshot()
         self.assertEqual(counters[GENERATION_TRUNCATED], 1)
         self.assertEqual(counters[GENERATION_NO_FINAL_CONTENT], 0)
+
+    def test_a_released_cut_off_reply_is_counted_for_the_operator(self):
+        httpd = self.start_server()
+        gateway, _, _, output = self.build(httpd)
+        diagnostics = SafeDiagnostics()
+        self.set_json(httpd, chat_payload("Partial", finish="length"))
+
+        status, body = self.call(
+            gateway, scan_context=ScanContext(diagnostic=diagnostics)
+        )
+
+        self.assertEqual(status, 200)
+        self.assertEqual(body["choices"][0]["finish_reason"], "length")
+        self.assertEqual(diagnostics.snapshot()[GENERATION_TRUNCATED], 1)
 
     def test_reported_token_usage_is_kept_for_the_monitor(self):
         httpd = self.start_server()

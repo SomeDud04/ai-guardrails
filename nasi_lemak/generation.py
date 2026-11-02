@@ -447,18 +447,9 @@ def _extract_content(payload: Any) -> str:
     if choice.get("index", 0) != 0:
         raise GenerationError("generation endpoint returned an unsupported response")
     finish_reason = choice.get("finish_reason")
-    if finish_reason != "stop":
-        # A reasoning-style model can spend its whole budget on hidden
-        # reasoning_content and report ``length`` with empty visible content.
-        # That is a failed turn, never a partial answer.  The fixed internal
-        # signal helps an operator distinguish it without exposing reasoning.
-        # Only ``length`` receives that code; any other unsupported reason is
-        # still a safe generic failure and must not be mislabelled as truncation.
-        if finish_reason == "length":
-            raise GenerationError(
-                "generation endpoint returned a truncated or unsupported completion",
-                diagnostic_code="generation_truncated",
-            )
+    if finish_reason not in ("stop", "length"):
+        # Any other unsupported reason is a safe generic failure and must not be
+        # mislabelled as truncation.
         raise GenerationError(
             "generation endpoint returned a truncated or unsupported completion"
         )
@@ -473,7 +464,15 @@ def _extract_content(payload: Any) -> str:
         raise GenerationError("generation endpoint returned a refusal response")
     content = message.get("content")
     if not isinstance(content, str) or not content.strip():
-        # ``reasoning_content`` is deliberately ignored and never returned.
+        # ``reasoning_content`` is deliberately ignored and never returned.  A
+        # reasoning-style model can spend its whole budget there and report
+        # ``length`` with nothing visible: a failed turn, with a fixed signal
+        # that lets an operator tell it apart without exposing the reasoning.
+        if finish_reason == "length":
+            raise GenerationError(
+                "generation endpoint returned a truncated or unsupported completion",
+                diagnostic_code="generation_truncated",
+            )
         raise GenerationError(
             "generation endpoint returned no text content",
             diagnostic_code="generation_no_final_content",
@@ -619,11 +618,16 @@ class GenerationClient:
         reply = self._request_json(self.config.chat_completions_url, method="POST", payload=payload)
         content = _extract_content(reply)
         self._usage.value = _extract_usage(reply)
+        self._usage.finish_reason = reply["choices"][0]["finish_reason"]
         return content
 
     def last_usage(self) -> dict[str, int] | None:
         """Token counts from this thread's latest completion."""
         return getattr(self._usage, "value", None)
+
+    def last_finish_reason(self) -> str | None:
+        """Why this thread's latest completion ended: ``stop`` or ``length``."""
+        return getattr(self._usage, "finish_reason", None)
 
     def list_models(self) -> list[str]:
         """Return sorted unique upstream model IDs without persisting anything."""
@@ -721,6 +725,10 @@ class RealGatewayAdapters:
         read_usage = getattr(self.client, "last_usage", None)
         return read_usage() if callable(read_usage) else None
 
+    def last_finish_reason(self) -> str | None:
+        read_finish = getattr(self.client, "last_finish_reason", None)
+        return read_finish() if callable(read_finish) else None
+
     def scan_attack(self, text: str, *, scan_context: Any = None) -> Any:
         guard = self.attack_guard
         if scan_context is not None and getattr(
@@ -781,6 +789,9 @@ class TestGatewayAdapters:
     def count_tokens(self, serialized: str) -> int:
         """Conservative byte budget; not a tokenizer."""
         return self._byte_budget(serialized)
+
+    def last_finish_reason(self) -> str | None:
+        return self.client.last_finish_reason()
 
     def scan_attack(self, text: str) -> dict[str, str]:
         """Inactive in test mode: always allows."""

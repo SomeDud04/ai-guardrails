@@ -2133,10 +2133,12 @@ def make_app(
             # the output guard and terminal audit finished before these events
             # exist.  Nothing is read or masked again here.
             content: Any = ""
+            finish_reason = "stop"
             choices = payload.get("choices")
             if isinstance(choices, list) and choices:
                 first = choices[0]
                 if isinstance(first, dict):
+                    finish_reason = first.get("finish_reason", "stop")
                     message = first.get("message")
                     if isinstance(message, dict):
                         content = message.get("content", "")
@@ -2162,7 +2164,7 @@ def make_app(
             closing = {
                 **envelope,
                 "choices": [
-                    {"index": 0, "delta": {}, "finish_reason": "stop"}
+                    {"index": 0, "delta": {}, "finish_reason": finish_reason}
                 ],
             }
 

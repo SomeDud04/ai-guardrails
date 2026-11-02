@@ -750,7 +750,7 @@ _DEMO_JS = """
       var choice = !result.invalidJson && data && Array.isArray(data.choices) ? data.choices[0] : null;
       if (
         !choice ||
-        choice.finish_reason !== "stop" ||
+        (choice.finish_reason !== "stop" && choice.finish_reason !== "length") ||
         !choice.message ||
         typeof choice.message.content !== "string"
       ) {

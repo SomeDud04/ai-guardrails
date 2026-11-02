@@ -80,7 +80,7 @@ to be concise. When the model reaches the limit, the deliberate fail-closed rule
 | 1 | Add a gateway/policy-level brevity system instruction and lower the default reply limit to ≈384 tokens so typical answers finish with `stop` and the output scan stays ≈10–15 s | Fix (code + config) | Done (82015bc), verified on the VM |
 | 2 | Record `generation_*` diagnostic codes for `/v1` and `/chat` requests too, not only workspace requests | Observability | Done (82015bc), verified on the VM |
 | 3 | Log the internal failure stage and reason (server-side only, never in the response) for every `request_failed` | Observability | Done (82015bc), verified on the VM |
-| 4 | Decide whether a truncated answer may be released after a full output scan (`finish_reason: "length"`), or stays a hard failure | Product decision | Open |
+| 4 | Decide whether a truncated answer may be released after a full output scan (`finish_reason: "length"`), or stays a hard failure | Product decision | Done: released with a notice, decided 2 Nov 2026 |
 | 5 | Make the VM acceptance check use both a short-answer and a long-answer prompt, with expected outcomes | Process | Proposed |
 | 6 | Benchmark output-scan latency against reply length (the pending `bench_guard_models.py` run) to set the reply budget from data | Evidence | Pending |
 
