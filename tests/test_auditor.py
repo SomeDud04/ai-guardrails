@@ -278,6 +278,10 @@ class AuditorPageTests(unittest.TestCase):
                     continue
                 self.assertIn("data-admin-write", form[1])
 
+    def test_users_redraw_when_department_names_arrive(self) -> None:
+        loaded = self.page.index("adminDepartmentsLoaded = true;")
+        self.assertIn("renderUsers(adminUsers, true)", self.page[loaded:loaded + 300])
+
     def test_the_access_history_buttons_are_connected(self) -> None:
         self.assertIn('accessRefresh.addEventListener("click"', self.page)
         self.assertIn('auditExport.addEventListener("click"', self.page)

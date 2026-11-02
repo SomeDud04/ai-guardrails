@@ -6139,6 +6139,8 @@ _WORKSPACE_JS = """
       adminDepartments = reset ? got : adminDepartments.concat(got);
       adminDepartmentsLoaded = true;
       renderDepartments(adminDepartments, true);
+      // API keys loads users first, and the table shows department names.
+      if (adminUsersLoaded) { renderUsers(adminUsers, true); }
       departmentCursor = typeof result.data.next === "string" && result.data.next ? result.data.next : null;
       departmentMore.hidden = !departmentCursor;
       setStatus(departmentState, adminDepartments.length === 0
