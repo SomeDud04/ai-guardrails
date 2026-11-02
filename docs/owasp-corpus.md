@@ -378,6 +378,35 @@ meaningful evidence that the committed deterministic rows reproduce against the
 committed product build; only operator mode can establish what a **deployed**
 instance with a different policy, counter, body limit or audit store returns.
 
+### Live evidence run (all 128 rows)
+
+`scripts/run_owasp_live.py` sends every row, not only the deterministic lane, to
+a deployed gateway one at a time and writes a JSON report.
+`scripts/build_owasp_checklist.py --results` then writes those results into a
+copy of the checklist workbook, with a Run Log entry. The committed blank
+workbook is never changed.
+
+```text
+$env:NASI_LEMAK_OWASP_API_KEY = Read-Host "Paste the key"
+.\.venv\Scripts\python.exe scriptsun_owasp_live.py `
+    --base-url http://192.168.90.41:8080 --report owasp-live.json
+.\.venv\Scripts\python.exe scriptsuild_owasp_checklist.py `
+    --results owasp-live.json --output owasp-evidence.xlsx --tester "Name" --build <commit>
+```
+
+Use a named key made for the run, so its requests are traceable on the API keys
+page and in the audit export. The pilot serves one chat at a time, so other
+users are refused while it runs; expect 35 to 45 minutes. Rows that could not be
+judged (no answer, 401, 429, 5xx) are `Blocked`: rerun them with
+`--only ID,ID` into a second report and pass both reports, later first wins.
+
+Results use the workbook's own vocabulary. `Unverified` means a person must read
+the reply excerpt in Notes, or that this deployment's input limit stopped the
+row first. A row whose authored limit the product removed on purpose (listed in
+the re-baselining map) is `N/A`. The report keeps reply excerpts of synthetic
+corpus text and never the key. It is evidence for one deployment and one day,
+not an independent accuracy measure.
+
 ### Local capacity harness
 
 ```text

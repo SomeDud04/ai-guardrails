@@ -11,6 +11,12 @@ optional extra.
 Usage:
     python scripts/build_owasp_checklist.py
     python scripts/build_owasp_checklist.py --check
+    python scripts/build_owasp_checklist.py --results owasp-live.json         --output owasp-evidence.xlsx --tester "Name" --build 402d573
+
+``--results`` fills the Result columns and the Run Log from one or more
+``run_owasp_live.py`` reports, later reports winning for a rerun case, and
+writes the evidence workbook to ``--output``.  The committed blank workbook is
+never changed by it.
 """
 
 from __future__ import annotations
@@ -762,11 +768,113 @@ def check(payload_root: Path = PAYLOAD_ROOT, workbook: Path = WORKBOOK,
     return problems
 
 
+REPLY_NOTE_CHARS = 300
+
+
+def fill_results(
+    data: bytes,
+    reports: list[dict[str, Any]],
+    *,
+    tester: str,
+    build_label: str,
+    guard_label: str,
+) -> bytes:
+    """Return the workbook with live results written into it."""
+    openpyxl = _openpyxl()
+    from openpyxl.styles import Alignment
+
+    wb = openpyxl.load_workbook(io.BytesIO(data))
+    ws = wb["Checklist"]
+    column = {header: index + 1 for index, header in enumerate(CHECKLIST_HEADERS)}
+    rows_by_id = {
+        ws.cell(row=row, column=1).value: row for row in range(2, ws.max_row + 1)
+    }
+    results: dict[str, dict[str, Any]] = {}
+    for report in reports:
+        for item in report.get("rows", []):
+            results[item["id"]] = item
+    unknown = sorted(set(results) - set(rows_by_id))
+    if unknown:
+        raise CorpusError(f"report has cases not in the checklist: {', '.join(unknown)}")
+    for case_id, item in results.items():
+        if item.get("result") not in RESULTS:
+            raise CorpusError(f"{case_id} has an unknown result")
+        row = rows_by_id[case_id]
+        notes = [item.get("note") or ""]
+        if item.get("block_reason"):
+            notes.append(f"Block reason: {item['block_reason']}.")
+        if item.get("request_id"):
+            notes.append(f"Request {item['request_id']}.")
+        if item.get("reply_excerpt"):
+            excerpt = item["reply_excerpt"][:REPLY_NOTE_CHARS]
+            more = "…" if item.get("reply_chars", 0) > REPLY_NOTE_CHARS else ""
+            notes.append(f"Reply: {excerpt}{more}")
+        values = {
+            "Result": item["result"],
+            "Actual HTTP Status": item.get("status"),
+            "Actual Guard Verdict": item.get("verdict"),
+            "Latency (ms)": item.get("latency_ms"),
+            "Tester": tester,
+            "Date Tested": (item.get("sent_at") or "")[:10] or None,
+            "Notes": " ".join(part for part in notes if part),
+        }
+        for header, value in values.items():
+            cell = ws.cell(row=row, column=column[header], value=value)
+            cell.alignment = Alignment(vertical="top", wrap_text=True)
+    log = wb["Run Log"]
+    for offset, report in enumerate(reports):
+        totals = {}
+        for item in report.get("rows", []):
+            totals[item["result"]] = totals.get(item["result"], 0) + 1
+        values = [
+            (report.get("started_at") or "")[:10],
+            tester,
+            build_label,
+            report.get("base_url"),
+            guard_label,
+            len(report.get("rows", [])),
+            ", ".join(f"{name} {count}" for name, count in sorted(totals.items())),
+            "Live run of the synthetic corpus with run_owasp_live.py "
+            f"(runner {report.get('runner_commit') or 'unknown'}). Unverified rows "
+            "need a person to read the reply in Notes.",
+        ]
+        for index, value in enumerate(values, 1):
+            log.cell(row=2 + offset, column=index, value=value)
+    buffer = io.BytesIO()
+    wb.save(buffer)
+    return buffer.getvalue()
+
+
 def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--check", action="store_true",
                         help="verify the committed workbook and manifest without writing")
+    parser.add_argument("--results", nargs="+", default=None,
+                        help="run_owasp_live.py reports to write into an evidence copy")
+    parser.add_argument("--output", default=None, help="evidence workbook to write")
+    parser.add_argument("--tester", default="")
+    parser.add_argument("--build", default="", help="gateway commit that was tested")
+    parser.add_argument("--guard", default="Qwen3Guard-Gen-0.6B, threshold 0.5",
+                        help="guard model and threshold that was tested")
     args = parser.parse_args(argv)
+    if args.results:
+        if not args.output:
+            parser.error("--results needs --output")
+        try:
+            reports = [json.loads(Path(path).read_text(encoding="utf-8")) for path in args.results]
+            data = fill_results(
+                build_workbook_bytes(load_corpus()),
+                reports,
+                tester=args.tester,
+                build_label=args.build,
+                guard_label=args.guard,
+            )
+        except (CorpusError, OSError, ValueError) as exc:
+            print(f"error: {exc}", file=sys.stderr)
+            return 2
+        Path(args.output).write_bytes(data)
+        print(f"evidence workbook: {args.output}")
+        return 0
     try:
         if args.check:
             problems = check()
