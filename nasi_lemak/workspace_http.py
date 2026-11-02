@@ -51,13 +51,13 @@ from .controls import BLOCK_REASONS, GatewayControl, block_detail, guardrail_det
 from .diagnostics import BLOCK_PAYLOAD_REJECTED, SafeDiagnostics
 from .gateway import Gateway, serialize_messages
 from .generation import conservative_byte_budget
+from .system_settings import MAX_SESSION_HOURS
 from .limits import ChatLimits
 from .operator import MONITOR_WINDOW_HOURS, summarize_events
 from .qwen3guard import FRAMING_VERSION
 from .scan_context import ScanContext
 from .workspace_store import (
     LEASE_TTL_SECONDS,
-    SESSION_TTL_SECONDS,
     AccessDenied,
     AuthError,
     Conflict,
@@ -140,6 +140,7 @@ class _LoginLimiter:
         self._clock = clock
         self._lock = threading.Lock()
         self._hits: dict[str, list[float]] = {}
+        self.max_attempts = LOGIN_MAX_ATTEMPTS
 
     @staticmethod
     def key(ip: str, username: str) -> str:
@@ -166,7 +167,7 @@ class _LoginLimiter:
             if len(self._hits.get(ip_key, ())) >= LOGIN_IP_MAX_FAILURES:
                 return True
             if key in self._hits:
-                return len(self._hits[key]) >= LOGIN_MAX_ATTEMPTS
+                return len(self._hits[key]) >= self.max_attempts
             return len(self._hits) >= LOGIN_CACHE_MAX
 
     def _add(self, key: str, limit: int) -> None:
@@ -181,7 +182,7 @@ class _LoginLimiter:
                 del bucket[: len(bucket) - limit]
 
     def record(self, key: str) -> None:
-        self._add(key, LOGIN_MAX_ATTEMPTS)
+        self._add(key, self.max_attempts)
 
     def record_failure(self, ip_key: str) -> None:
         self._add(ip_key, LOGIN_IP_MAX_FAILURES)
@@ -591,7 +592,7 @@ def _cookie_token(request: Request) -> str | None:
 def _set_session_cookie(
     response: JSONResponse, request: Request, token: str, expires_at: float
 ) -> None:
-    remaining = int(max(0.0, min(expires_at - time.time(), SESSION_TTL_SECONDS)))
+    remaining = int(max(0.0, min(expires_at - time.time(), MAX_SESSION_HOURS * 3600)))
     response.set_cookie(
         key=SESSION_COOKIE,
         value=token,
@@ -872,6 +873,10 @@ def register_workspace_routes(app: FastAPI, runtime: WorkspaceRuntime) -> None:
         client_ip = _client_ip(request)
         limiter_key = _LoginLimiter.key(client_ip, username)
         limiter_ip_key = _LoginLimiter.ip_key(client_ip)
+        if runtime.settings is not None:
+            runtime._login_limiter.max_attempts = runtime.settings.snapshot()[1][
+                "login_max_attempts"
+            ]
         if runtime._login_limiter.blocked(limiter_key, limiter_ip_key):
             return _ws_error(request, "RATE_LIMIT", 429)
         runtime._login_limiter.record(limiter_key)

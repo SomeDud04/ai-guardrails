@@ -2,8 +2,10 @@
 
 from __future__ import annotations
 
+import time
 import unittest
 
+from nasi_lemak.server import _purge_retained
 from nasi_lemak.system_settings import (
     DEFAULT_SETTINGS,
     RuntimeSettings,
@@ -13,7 +15,7 @@ from nasi_lemak.system_settings import (
 )
 from nasi_lemak.workspace_store import Conflict
 from tests.test_api_keys import ApiKeyBase
-from tests.test_workspace_http import LEGACY_KEY
+from tests.test_workspace_http import LEGACY_KEY, PASSWORD, _ProxyStore
 
 CEILINGS = {
     "context_messages": 32,
@@ -187,6 +189,45 @@ class EnforcementTests(ApiKeyBase):
             "admin.save_settings:1",
             [row["action"] for row in self.store.list_access_log(self.admin["id"])["items"]],
         )
+
+    def test_session_length_applies_to_new_sign_ins(self) -> None:
+        self.save(session_hours=2)
+        session = self.store.authenticate("alice", PASSWORD)
+        self.assertLessEqual(session["expires_at"] - time.time(), 2 * 3600 + 5)
+
+    def test_the_lockout_limit_applies_to_sign_ins(self) -> None:
+        self.save(login_max_attempts=3)
+        statuses = [
+            self.client.post(
+                "/workspace/api/login",
+                json={"username": "alice", "password": "wrong-password-value"},
+            ).status_code
+            for _ in range(4)
+        ]
+        self.assertEqual(statuses[:3], [401, 401, 401])
+        self.assertEqual(statuses[3], 429)
+
+    def test_retention_is_off_until_a_period_is_set(self) -> None:
+        store = _ProxyStore(self.store)
+        calls: list[int] = []
+        store.purge_expired_conversations = calls.append
+        runtime = self.app.state.workspace
+        real_store, runtime.store = runtime.store, store
+        self.addCleanup(setattr, runtime, "store", real_store)
+        _purge_retained(runtime)
+        self.assertEqual(calls, [])
+        self.save(retention_days=30)
+        _purge_retained(runtime)
+        self.assertEqual(calls, [30])
+
+    def test_retention_removes_old_stored_key_text(self) -> None:
+        created = self.store.create_api_key(
+            self.admin["id"], "Reviewed", self.alice["id"], store_text=True
+        )
+        self.chat(created["key"])
+        self.store._clock = lambda: time.time() + 40 * 86400
+        self.store.purge_expired_conversations(30)
+        self.assertEqual(self.rows("SELECT * FROM ws_api_key_text"), [])
 
     def test_saved_settings_load_after_a_restart(self) -> None:
         self.save(paused=True)

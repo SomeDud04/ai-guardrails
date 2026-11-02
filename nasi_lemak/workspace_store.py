@@ -1588,7 +1588,14 @@ class WorkspaceStore(PolicyAdminMixin, AlertAdminMixin):
             if not _verify_password(row["password_hash"], password):
                 raise AuthError(_AUTH_FAILURE)
             token = secrets.token_urlsafe(32)
-            expires_at = now + SESSION_TTL_SECONDS
+            saved = db.query_one(
+                "SELECT settings FROM ws_system_settings ORDER BY revision DESC LIMIT 1"
+            )
+            expires_at = now + (
+                json.loads(saved["settings"])["session_hours"] * 3600
+                if saved
+                else SESSION_TTL_SECONDS
+            )
             applied = db.execute(
                 """
                 INSERT INTO ws_sessions(token_hash, user_id, created_at, expires_at, revoked)
@@ -2286,8 +2293,9 @@ class WorkspaceStore(PolicyAdminMixin, AlertAdminMixin):
     def purge_expired_conversations(self, older_than_days: int) -> int:
         """Delete conversations untouched for the given period; return the count.
 
-        Runs only when an operator schedules it, so nothing expires by default.
-        A conversation with a live turn is kept. Non-content audit and alert
+        Runs only when an operator schedules it or sets a retention period, so
+        nothing expires by default. A conversation with a live turn is kept.
+        Stored API key text of the same age goes too. Non-content audit and alert
         rows stay, as they do when a user deletes a conversation.
         """
         if (
@@ -2303,6 +2311,7 @@ class WorkspaceStore(PolicyAdminMixin, AlertAdminMixin):
             "AND lease_expires_at IS NOT NULL AND lease_expires_at > ?))"
         )
         with self._backend.transaction() as db:
+            db.execute("DELETE FROM ws_api_key_text WHERE created_at < ?", (cutoff,))
             db.execute(
                 "DELETE FROM ws_messages WHERE conversation_id IN "
                 f"(SELECT id FROM ws_conversations WHERE {expired})",

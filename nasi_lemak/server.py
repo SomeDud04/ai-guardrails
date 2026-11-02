@@ -161,6 +161,7 @@ ENV_BODY_READ_TIMEOUT = "NASI_LEMAK_BODY_READ_TIMEOUT"
 ENV_POLICY_FILE = "NASI_LEMAK_POLICY_FILE"
 ENV_TLS_TERMINATED_AT_PROXY = "NASI_LEMAK_TLS_TERMINATED_AT_PROXY"
 ENV_TRUST_PROXY_CLIENT_IP = "NASI_LEMAK_TRUST_PROXY_CLIENT_IP"
+RETENTION_INTERVAL_SECONDS = 3600
 ENV_OPERATOR_KEY_DIGEST = "NASI_LEMAK_OPERATOR_KEY_DIGEST"
 ENV_OPERATOR_AUDIT_DSN = "NASI_LEMAK_OPERATOR_AUDIT_DSN"
 
@@ -634,6 +635,23 @@ class _TlsTerminatedAtProxy:
         if scope["type"] == "http":
             scope["scheme"] = "https"
         await self.app(scope, receive, send)
+
+
+def _purge_retained(runtime: Any) -> None:
+    """Apply the saved retention period.  Nothing expires unless one is set."""
+    days = runtime.settings.snapshot()[1]["retention_days"]
+    if days is not None:
+        runtime.store.purge_expired_conversations(days)
+
+
+async def _retention_loop(runtime: Any) -> None:
+    while True:
+        await asyncio.sleep(RETENTION_INTERVAL_SECONDS)
+        try:
+            await asyncio.to_thread(_purge_retained, runtime)
+        except Exception:
+            # A failed purge keeps data for longer and retries on the next pass.
+            pass
 
 
 def _client_address(request: Request) -> str:
@@ -1526,7 +1544,14 @@ def make_app(
 
     @asynccontextmanager
     async def lifespan(_app: FastAPI):
+        retention = (
+            asyncio.create_task(_retention_loop(workspace_runtime))
+            if workspace_runtime.ready
+            else None
+        )
         yield
+        if retention is not None:
+            retention.cancel()
         store = getattr(getattr(_app.state, "gateway", None), "audit_store", None)
         close = getattr(store, "close", None)
         if callable(close):
