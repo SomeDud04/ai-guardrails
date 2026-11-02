@@ -15,12 +15,17 @@ call still fails closed.
 
 from __future__ import annotations
 
+import csv
+import io
+from datetime import datetime, timezone
 from typing import Any
 
-from fastapi import FastAPI, Request
+from fastapi import FastAPI, Request, Response
 
 from .limits import ChatLimits, tighten
+from .system_settings import DEFAULT_SETTINGS, validate_reason, validate_settings
 from .workspace_http import (
+    _COMMON_HEADERS,
     _BodyProblem,
     _body_fields,
     _cookie_mutation_guard,
@@ -33,6 +38,7 @@ from .workspace_http import (
     _store_error,
     _ws_error,
 )
+from .workspace_store import NotFound
 
 MAX_SCOPE_QUERY_LENGTH = 64
 _ALERT_FILTERS = {
@@ -98,6 +104,30 @@ def _required_int(body: dict[str, Any], key: str) -> int:
     if value is None:
         raise ValueError(f"{key} is invalid")
     return value
+
+
+def _csv_cell(value: Any) -> str:
+    """Return a CSV-safe cell, neutralising spreadsheet formulas."""
+
+    text = "" if value is None else str(value)
+    if text.startswith(("=", "+", "-", "@")):
+        return "'" + text
+    return text
+
+
+def _csv_time(timestamp: float) -> str:
+    return datetime.fromtimestamp(timestamp, timezone.utc).isoformat()
+
+
+def _validated_settings(values: Any, ceilings: Any) -> dict[str, Any]:
+    return validate_settings(
+        values,
+        limit_ceilings=ceilings["chat_limits"],
+        input_allow=tuple(ceilings["input_allow_categories"]),
+        output_allow=tuple(ceilings["output_allow_categories"]),
+        concurrency_ceiling=ceilings["max_concurrency"],
+        chat_timeout_ceiling=ceilings["chat_timeout_seconds"],
+    )
 
 
 def _scope_query(scope_type: str, scope_id: str | None) -> tuple[str, str | None]:
@@ -490,15 +520,155 @@ def register_admin_policy_routes(app: FastAPI, runtime: Any) -> None:
             return csrf
         try:
             body = await _read_json(request, app)
-            _body_fields(body, {"name"}, {"name"})
+            _body_fields(
+                body,
+                {
+                    "name",
+                    "owner_id",
+                    "expires_at",
+                    "store_text",
+                    "allowed_ips",
+                    "requests_per_minute",
+                },
+                {"name"},
+            )
             result = await _db_call(
-                app, runtime.store.create_api_key, actor["id"], body["name"]
+                app,
+                runtime.store.create_api_key,
+                actor["id"],
+                body["name"],
+                owner_id=body.get("owner_id"),
+                expires_at=body.get("expires_at"),
+                store_text=body.get("store_text", False),
+                allowed_ips=body.get("allowed_ips", ()),
+                requests_per_minute=body.get("requests_per_minute"),
             )
         except _BodyProblem as exc:
             return _ws_error(request, "INVALID_REQUEST", exc.status)
         except Exception as exc:
             return _store_error(request, exc)
         return _ok(result, 201)
+
+    @app.post("/workspace/api/admin/api-keys/{key_id}")
+    async def admin_update_api_key(request: Request, key_id: str):
+        actor, source, error = await admin_context(request)
+        if error is not None:
+            return error
+        csrf = secure_mutation(request, source)
+        if csrf is not None:
+            return csrf
+        try:
+            body = await _read_json(request, app)
+            fields = {
+                "owner_id",
+                "expires_at",
+                "store_text",
+                "allowed_ips",
+                "requests_per_minute",
+            }
+            _body_fields(body, fields, fields)
+            result = await _db_call(
+                app,
+                runtime.store.update_api_key,
+                actor["id"],
+                key_id,
+                owner_id=body["owner_id"],
+                expires_at=body["expires_at"],
+                store_text=body["store_text"],
+                allowed_ips=body["allowed_ips"],
+                requests_per_minute=body["requests_per_minute"],
+            )
+        except _BodyProblem as exc:
+            return _ws_error(request, "INVALID_REQUEST", exc.status)
+        except Exception as exc:
+            return _store_error(request, exc)
+        return _ok(result)
+
+    @app.get("/workspace/api/admin/api-keys/{key_id}/requests")
+    async def admin_api_key_requests(request: Request, key_id: str):
+        actor, _source, error = await admin_context(request)
+        if error is not None:
+            return error
+        try:
+            limit, after = _page_query(request)
+            result = await _db_call(
+                app,
+                runtime.store.list_api_key_requests,
+                actor["id"],
+                key_id,
+                limit=limit,
+                after=after,
+            )
+        except Exception as exc:
+            return _store_error(request, exc)
+        return _ok(result)
+
+    @app.get("/workspace/api/admin/api-keys/{key_id}/requests.csv")
+    async def admin_api_key_requests_csv(request: Request, key_id: str):
+        actor, _source, error = await admin_context(request)
+        if error is not None:
+            return error
+        rows: list[dict[str, Any]] = []
+        try:
+            _query_values(request, set())
+            after: str | None = None
+            while True:
+                page = await _db_call(
+                    app,
+                    runtime.store.list_api_key_requests,
+                    actor["id"],
+                    key_id,
+                    limit=100,
+                    after=after,
+                )
+                rows.extend(page["items"])
+                after = page.get("next")
+                if after is None or len(rows) >= 5000:
+                    break
+        except Exception as exc:
+            return _store_error(request, exc)
+        output = io.StringIO()
+        writer = csv.writer(output)
+        writer.writerow(
+            ["time", "request_id", "client_ip", "outcome", "error_code"]
+        )
+        for item in rows[:5000]:
+            writer.writerow(
+                [
+                    _csv_time(item["created_at"]),
+                    _csv_cell(item["request_id"]),
+                    _csv_cell(item["client_ip"]),
+                    _csv_cell(item["outcome"]),
+                    _csv_cell(item["error_code"]),
+                ]
+            )
+        response = Response(output.getvalue(), media_type="text/csv")
+        response.headers["Content-Disposition"] = (
+            'attachment; filename="api-key-requests.csv"'
+        )
+        for name, value in _COMMON_HEADERS.items():
+            response.headers[name] = value
+        return response
+
+    @app.get(
+        "/workspace/api/admin/api-keys/{key_id}/requests/{request_id}/text"
+    )
+    async def admin_api_key_text(request: Request, key_id: str, request_id: str):
+        actor, _source, error = await admin_context(request)
+        if error is not None:
+            return error
+        try:
+            _query_values(request, set())
+            result = await _db_call(
+                app,
+                runtime.store.read_api_key_text,
+                actor["id"],
+                key_id,
+                request_id,
+            )
+        except Exception as exc:
+            return _store_error(request, exc)
+        return _ok(result)
 
     @app.post("/workspace/api/admin/api-keys/{key_id}/revoke")
     async def admin_revoke_api_key(request: Request, key_id: str):
@@ -515,6 +685,111 @@ def register_admin_policy_routes(app: FastAPI, runtime: Any) -> None:
         except Exception as exc:
             return _store_error(request, exc)
         return _ok(result)
+
+    # -- system settings --------------------------------------------------
+    @app.get("/workspace/api/admin/system-settings")
+    async def admin_system_settings(request: Request):
+        actor, _source, error = await admin_context(request)
+        if error is not None:
+            return error
+        try:
+            _query_values(request, set())
+            current = await _db_call(app, runtime.store.current_system_settings)
+            history = await _db_call(
+                app, runtime.store.list_system_settings, actor["id"], limit=20
+            )
+        except Exception as exc:
+            return _store_error(request, exc)
+        values = current["values"]
+        if values is None:
+            values = dict(DEFAULT_SETTINGS)
+        return _ok(
+            {
+                "revision": current["revision"],
+                "values": values,
+                "ceilings": app.state.settings_ceilings,
+                "history": history["items"],
+            }
+        )
+
+    @app.post("/workspace/api/admin/system-settings")
+    async def admin_save_system_settings(request: Request):
+        actor, source, error = await admin_context(request)
+        if error is not None:
+            return error
+        csrf = secure_mutation(request, source)
+        if csrf is not None:
+            return csrf
+        try:
+            body = await _read_json(request, app)
+            _body_fields(
+                body,
+                {"values", "reason", "expected_revision"},
+                {"values", "reason", "expected_revision"},
+            )
+            reason = validate_reason(body["reason"])
+            values = _validated_settings(body["values"], app.state.settings_ceilings)
+            saved = await _db_call(
+                app,
+                runtime.store.save_system_settings,
+                actor["id"],
+                values,
+                reason,
+                expected_revision=_required_int(body, "expected_revision"),
+            )
+            runtime.settings.load(saved["revision"], saved["values"])
+        except _BodyProblem as exc:
+            return _ws_error(request, "INVALID_REQUEST", exc.status)
+        except Exception as exc:
+            return _store_error(request, exc)
+        return _ok(saved)
+
+    @app.post("/workspace/api/admin/system-settings/rollback")
+    async def admin_rollback_system_settings(request: Request):
+        actor, source, error = await admin_context(request)
+        if error is not None:
+            return error
+        csrf = secure_mutation(request, source)
+        if csrf is not None:
+            return csrf
+        try:
+            body = await _read_json(request, app)
+            _body_fields(
+                body,
+                {"revision", "reason", "expected_revision"},
+                {"revision", "reason", "expected_revision"},
+            )
+            target = _required_int(body, "revision")
+            reason = validate_reason(body["reason"])
+            expected_revision = _required_int(body, "expected_revision")
+            history = await _db_call(
+                app, runtime.store.list_system_settings, actor["id"], limit=100
+            )
+            match = next(
+                (
+                    item
+                    for item in history["items"]
+                    if item["revision"] == target
+                ),
+                None,
+            )
+            if match is None:
+                raise NotFound("settings revision not found")
+            values = _validated_settings(match["values"], app.state.settings_ceilings)
+            saved = await _db_call(
+                app,
+                runtime.store.save_system_settings,
+                actor["id"],
+                values,
+                reason,
+                expected_revision=expected_revision,
+            )
+            runtime.settings.load(saved["revision"], saved["values"])
+        except _BodyProblem as exc:
+            return _ws_error(request, "INVALID_REQUEST", exc.status)
+        except Exception as exc:
+            return _store_error(request, exc)
+        return _ok(saved)
 
     # -- block alerts -----------------------------------------------------
     @app.get("/workspace/api/admin/alerts/summary")
