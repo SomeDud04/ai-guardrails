@@ -1311,11 +1311,16 @@ def register_workspace_routes(app: FastAPI, runtime: WorkspaceRuntime) -> None:
             # Every value here is non-secret effective configuration.
             chat_limits = limits.public()
             chat_limits["max_prompt_chars"] = limits.max_prompt_chars()
+        version = getattr(state, "policy_version", None)
+        digest = getattr(state, "policy_digest", None)
+        if runtime.settings is not None and version and digest:
+            # The same identity each audit row records.
+            version, digest = runtime.settings.effective_policy(version, digest)
         payload = {
             "model": getattr(policy, "model", None),
             "policy": {
-                "version": getattr(state, "policy_version", None),
-                "digest": getattr(state, "policy_digest", None),
+                "version": version,
+                "digest": digest,
                 "token_budget": getattr(policy, "token_budget", None),
             },
             "guards": {

@@ -446,6 +446,21 @@ textarea:focus-visible { outline-offset: -2px; }
 .policy-history-row { display: grid; grid-template-columns: 70px minmax(0, 1fr) auto; gap: var(--space-3); align-items: start; padding: var(--space-2) var(--space-3); border-top: 1px solid var(--line); font-size: .875rem; }
 .policy-history-row:first-child { border-top: 0; }
 .policy-history-row > span, .policy-history-row > div { min-width: 0; overflow-wrap: anywhere; }
+.settings-form { display: grid; gap: var(--space-3); border: 1px solid var(--line); border-radius: var(--radius); background: var(--surface); padding: var(--space-3); margin: 0; min-width: 0; }
+.settings-group { min-width: 0; margin: 0; padding: var(--space-2); border: 1px solid var(--line); border-radius: var(--radius); }
+.settings-group legend { padding: 0 var(--space-1); color: var(--muted); font-size: .8125rem; }
+.settings-grid { display: grid; grid-template-columns: repeat(auto-fit, minmax(min(100%, 220px), 1fr)); gap: var(--space-3); min-width: 0; }
+.settings-field { display: grid; gap: 2px; min-width: 0; }
+.settings-field label { color: var(--text-soft); font-size: .8125rem; }
+.settings-field input, .settings-field textarea { width: 100%; min-width: 0; }
+.settings-hint { color: var(--muted-dim); font-size: .8125rem; }
+.settings-checks { display: grid; gap: var(--space-1); min-width: 0; }
+.settings-checks label { min-width: 0; overflow-wrap: anywhere; }
+.settings-pause-warning { margin: 0; color: var(--danger); font-size: .8125rem; font-weight: 650; }
+.settings-form > button { justify-self: start; min-height: 28px; }
+#settings-history .cols-5 { grid-template-columns: 70px 150px 150px minmax(0, 1fr) auto; min-width: 0; }
+.monitor-pause-banner { display: flex; flex-wrap: wrap; align-items: center; gap: var(--space-2); padding: var(--space-2) var(--space-3); border: 1px solid #eab9b4; border-radius: var(--radius); background: var(--danger-soft); color: var(--danger); font-size: .875rem; font-weight: 650; }
+.link-button { min-height: 28px; padding: 0 4px; border-color: transparent; background: transparent; color: inherit; font-size: .8125rem; font-weight: 650; text-decoration: underline; }
 .effective-summary { border: 1px solid var(--line); border-radius: var(--radius); background: var(--panel); padding: var(--space-3); font-size: .875rem; color: var(--text-soft); }
 .effective-summary p { margin: 0 0 var(--space-1); }
 .effective-summary ul { margin: var(--space-1) 0 0; padding-left: 1.2rem; }
@@ -520,18 +535,19 @@ textarea:focus-visible { outline-offset: -2px; }
      and each value keeps its column heading as an inline label. */
   .admin-table-list { overflow: visible; gap: 12px; }
   .admin-table-list .admin-table-head { display: none; }
-  #user-list .admin-table-row, #alert-list .admin-table-row, #access-list .admin-table-row {
+  #user-list .admin-table-row, #alert-list .admin-table-row, #access-list .admin-table-row,
+  #settings-history .admin-table-row {
     grid-template-columns: minmax(0, 1fr); min-width: 0; gap: 8px;
     padding: 12px 16px; border: 1px solid var(--line);
     border-radius: var(--radius); background: var(--panel);
   }
   #user-list .admin-table-row > div, #alert-list .admin-table-row > div,
-  #access-list .admin-table-row > div {
+  #access-list .admin-table-row > div, #settings-history .admin-table-row > div {
     display: block; min-width: 0; white-space: normal;
     overflow: visible; text-overflow: clip;
   }
   #user-list .admin-table-row > div::before, #alert-list .admin-table-row > div::before,
-  #access-list .admin-table-row > div::before {
+  #access-list .admin-table-row > div::before, #settings-history .admin-table-row > div::before {
     content: attr(data-label); display: block; margin-bottom: 2px;
     color: var(--muted-dim); font-size: .8125rem; font-weight: 650;
   }
@@ -914,6 +930,61 @@ _WORKSPACE_JS = """
   var settingsSummary = byId("settings-summary");
   var settingsState = byId("admin-settings-state");
   var settingsRefresh = byId("settings-refresh");
+  var settingsForm = byId("settings-form");
+  var settingsPause = byId("settings-pause");
+  var settingsPauseWarning = byId("settings-pause-warning");
+  var settingsSharedKey = byId("settings-shared-key");
+  var settingsInputCategories = byId("settings-input-categories");
+  var settingsOutputCategories = byId("settings-output-categories");
+  var settingsDenyPhrases = byId("settings-deny-phrases");
+  var settingsRetentionDays = byId("settings-retention-days");
+  var settingsRetentionHint = byId("settings-retention-hint");
+  var settingsSessionHours = byId("settings-session-hours");
+  var settingsLoginAttempts = byId("settings-login-attempts");
+  var settingsKeyRpm = byId("settings-key-rpm");
+  var settingsMaxConcurrency = byId("settings-max-concurrency");
+  var settingsMaxConcurrencyHint = byId("settings-max-concurrency-hint");
+  var settingsChatTimeout = byId("settings-chat-timeout");
+  var settingsChatTimeoutHint = byId("settings-chat-timeout-hint");
+  var settingsReason = byId("settings-reason");
+  var settingsSave = byId("settings-save");
+  var settingsHistory = byId("settings-history");
+  var settingsChatFields = [
+    {
+      key: "context_messages",
+      label: "Context messages",
+      input: byId("settings-chat-context-messages"),
+      hint: byId("settings-chat-context-messages-hint")
+    },
+    {
+      key: "context_budget",
+      label: "Context budget",
+      input: byId("settings-chat-context-budget"),
+      hint: byId("settings-chat-context-budget-hint")
+    },
+    {
+      key: "default_reply_tokens",
+      label: "Default reply tokens",
+      input: byId("settings-chat-default-reply-tokens"),
+      hint: byId("settings-chat-default-reply-tokens-hint")
+    },
+    {
+      key: "max_reply_tokens",
+      label: "Max reply tokens",
+      input: byId("settings-chat-max-reply-tokens"),
+      hint: byId("settings-chat-max-reply-tokens-hint")
+    }
+  ];
+  var settingsInputBoxes = [];
+  var settingsOutputBoxes = [];
+  var systemSettings = null;
+  var systemSettingsLoaded = false;
+  var systemSettingsLoading = false;
+  var systemSettingsSeq = 0;
+  var settingsSaving = false;
+  var settingsRollbackBusy = false;
+  var monitorPauseBanner = byId("monitor-pause-banner");
+  var monitorPauseSettings = byId("monitor-pause-settings");
   var adminTabMonitor = byId("admin-tab-monitor");
   var adminMonitorPanel = byId("admin-monitor-panel");
   var monitorWindow = byId("monitor-window");
@@ -4219,6 +4290,13 @@ _WORKSPACE_JS = """
     if (section !== "monitor") { clearMonitorTimer(); }
     if (section === "monitor") {
       queueAdminList(function () { return loadMonitor(); });
+      // The pause banner needs settings even though the Settings tab has not
+      // been opened; load them once per session.
+      if (!systemSettingsLoaded) {
+        queueAdminList(function () {
+          return systemSettingsLoaded ? Promise.resolve(true) : loadSystemSettings(true);
+        });
+      }
       return;
     }
     if (section === "integrate") {
@@ -4325,10 +4403,8 @@ _WORKSPACE_JS = """
       }
     }
     if (section === "settings") {
-      // Read-only values only; the tab has no form and sends no mutation.
-      queueAdminList(function () {
-        return adminSettingsLoaded ? Promise.resolve(true) : loadAdminSettings(true);
-      });
+      // Reload on every visit so a change made elsewhere is visible.
+      queueAdminList(function () { return loadAdminSettings(true); });
     }
   }
 
@@ -4439,6 +4515,12 @@ _WORKSPACE_JS = """
   adminTabAccess.addEventListener("click", function () { showAdminSection("access"); });
   adminTabSettings.addEventListener("click", function () { showAdminSection("settings"); });
   settingsRefresh.addEventListener("click", function () { loadAdminSettings(true); });
+  settingsForm.addEventListener("submit", saveSystemSettings);
+  settingsPause.addEventListener("change", syncPauseWarning);
+  settingsRetentionDays.addEventListener("input", syncRetentionHint);
+  monitorPauseSettings.addEventListener("click", function () {
+    showAdminSection("settings");
+  });
   adminTabMonitor.addEventListener("click", function () { showAdminSection("monitor"); });
   adminTabIntegrate.addEventListener("click", function () { showAdminSection("integrate"); });
   monitorRefresh.addEventListener("click", function () { loadMonitor(); });
@@ -6168,6 +6250,180 @@ _WORKSPACE_JS = """
     return lines;
   }
 
+  function settingsInteger(value) {
+    var text = typeof value === "string" ? value.trim() : "";
+    if (!text) { return null; }
+    var number = Number(text);
+    if (!isFinite(number) || Math.floor(number) !== number) { return undefined; }
+    return number;
+  }
+
+  function settingsNumber(value) {
+    var text = typeof value === "string" ? value.trim() : "";
+    if (!text) { return null; }
+    var number = Number(text);
+    if (!isFinite(number)) { return undefined; }
+    return number;
+  }
+
+  function syncPauseWarning() {
+    settingsPauseWarning.hidden = !settingsPause.checked;
+  }
+
+  function syncRetentionHint() {
+    settingsRetentionHint.textContent = settingsRetentionDays.value.trim()
+      ? "Days" : "Off";
+  }
+
+  function ceilingText(value) {
+    return typeof value === "number" && isFinite(value) ? String(value) : "unknown";
+  }
+
+  function renderCategoryChecks(container, boxes, ceiling, selected, prefix) {
+    clearNode(container);
+    boxes.length = 0;
+    if (!Array.isArray(ceiling) || ceiling.length === 0) {
+      var empty = document.createElement("p");
+      empty.className = "admin-note";
+      empty.textContent = "The policy file allows none.";
+      container.appendChild(empty);
+      return;
+    }
+    var everything = !Array.isArray(selected);
+    for (var i = 0; i < ceiling.length; i += 1) {
+      var category = ceiling[i];
+      var label = document.createElement("label");
+      label.className = "admin-inline";
+      var box = document.createElement("input");
+      box.type = "checkbox";
+      box.id = prefix + "-category-" + String(i);
+      box.checked = everything || selected.indexOf(category) >= 0;
+      var text = document.createElement("span");
+      text.textContent = category;
+      label.appendChild(box);
+      label.appendChild(text);
+      container.appendChild(label);
+      boxes.push({ category: category, input: box });
+    }
+  }
+
+  function selectedCategories(boxes, ceiling, current) {
+    if (!Array.isArray(ceiling) || ceiling.length === 0) { return current; }
+    var selected = [];
+    var all = true;
+    for (var i = 0; i < boxes.length; i += 1) {
+      if (boxes[i].input.checked) { selected.push(boxes[i].category); }
+      else { all = false; }
+    }
+    return all ? null : selected;
+  }
+
+  function denyPhraseList() {
+    var NL = String.fromCharCode(10);
+    var lines = settingsDenyPhrases.value.split(NL);
+    var phrases = [];
+    for (var i = 0; i < lines.length; i += 1) {
+      var phrase = lines[i].trim();
+      if (phrase && phrases.indexOf(phrase) < 0) { phrases.push(phrase); }
+    }
+    return phrases;
+  }
+
+  function updatePauseBanner() {
+    var paused = systemSettings && isObject(systemSettings.values) &&
+      systemSettings.values.paused === true;
+    monitorPauseBanner.hidden = !paused;
+  }
+
+  function renderSystemSettings(data) {
+    var values = isObject(data.values) ? data.values : {};
+    var ceilings = isObject(data.ceilings) ? data.ceilings : {};
+    var chatCeilings = isObject(ceilings.chat_limits) ? ceilings.chat_limits : {};
+    settingsPause.checked = values.paused === true;
+    syncPauseWarning();
+    settingsSharedKey.checked = values.shared_key_enabled !== false;
+    var limits = isObject(values.chat_limits) ? values.chat_limits : {};
+    for (var i = 0; i < settingsChatFields.length; i += 1) {
+      var field = settingsChatFields[i];
+      var limit = limits[field.key];
+      field.input.value = positiveInteger(limit) ? String(limit) : "";
+      field.hint.textContent = "Ceiling: " + ceilingText(chatCeilings[field.key]);
+    }
+    renderCategoryChecks(
+      settingsInputCategories, settingsInputBoxes,
+      ceilings.input_allow_categories, values.input_allow_categories, "settings-input");
+    renderCategoryChecks(
+      settingsOutputCategories, settingsOutputBoxes,
+      ceilings.output_allow_categories, values.output_allow_categories, "settings-output");
+    var phrases = Array.isArray(values.deny_phrases) ? values.deny_phrases : [];
+    settingsDenyPhrases.value = phrases.join(String.fromCharCode(10));
+    settingsRetentionDays.value = positiveInteger(values.retention_days)
+      ? String(values.retention_days) : "";
+    syncRetentionHint();
+    settingsSessionHours.value = positiveInteger(values.session_hours)
+      ? String(values.session_hours) : "8";
+    settingsLoginAttempts.value = positiveInteger(values.login_max_attempts)
+      ? String(values.login_max_attempts) : "5";
+    settingsKeyRpm.value = positiveInteger(values.key_requests_per_minute)
+      ? String(values.key_requests_per_minute) : "";
+    settingsMaxConcurrency.value = positiveInteger(values.max_concurrency)
+      ? String(values.max_concurrency) : "";
+    settingsMaxConcurrencyHint.textContent = "Ceiling: " +
+      ceilingText(ceilings.max_concurrency);
+    settingsChatTimeout.value = typeof values.chat_timeout_seconds === "number" &&
+      isFinite(values.chat_timeout_seconds) ? String(values.chat_timeout_seconds) : "";
+    settingsChatTimeoutHint.textContent = "Ceiling: " +
+      ceilingText(ceilings.chat_timeout_seconds);
+    settingsReason.value = "";
+    settingsSave.disabled = false;
+    renderSettingsHistory(Array.isArray(data.history) ? data.history : [],
+      typeof data.revision === "number" ? data.revision : 0);
+    updatePauseBanner();
+  }
+
+  function renderSettingsHistory(items, currentRevision) {
+    clearNode(settingsHistory);
+    if (!items || items.length === 0) {
+      appendEmpty(settingsHistory, "No settings changes have been recorded.");
+      return;
+    }
+    renderTableHead(settingsHistory,
+      ["Revision", "When", "Who", "Reason", "Action"], 5);
+    for (var i = 0; i < items.length; i += 1) {
+      var item = items[i];
+      if (!isObject(item) || typeof item.revision !== "number") { continue; }
+      var row = document.createElement("div");
+      row.className = "admin-table-row cols-5";
+      row.appendChild(tableCell("r" + item.revision, "cell-muted", "Revision"));
+      row.appendChild(tableCell(formatDate(item.created_at), "cell-muted", "When"));
+      row.appendChild(tableCell(
+        typeof item.actor_username === "string" && item.actor_username
+          ? item.actor_username : "Unknown", "cell-muted", "Who"));
+      row.appendChild(tableCell(
+        typeof item.reason === "string" && item.reason ? item.reason : "No reason recorded.",
+        "", "Reason"));
+      var actions = document.createElement("div");
+      actions.className = "cell-actions";
+      if (item.revision === currentRevision) {
+        var current = document.createElement("span");
+        current.className = "cell-muted";
+        current.textContent = "Current";
+        actions.appendChild(current);
+      } else {
+        var button = document.createElement("button");
+        button.type = "button";
+        button.className = "ghost";
+        button.textContent = "Roll back";
+        button.addEventListener("click", function (target) {
+          return function () { rollbackSystemSettings(target); };
+        }(item.revision));
+        actions.appendChild(button);
+      }
+      row.appendChild(actions);
+      settingsHistory.appendChild(row);
+    }
+  }
+
   function renderAdminSettings(data) {
     clearNode(settingsSummary);
     renderTableHead(settingsSummary, ["Setting", "Value"], 2);
@@ -6760,6 +7016,39 @@ _WORKSPACE_JS = """
     failed();
   }
 
+  function loadSystemSettings(reset) {
+    if (!signedIn) { return Promise.resolve(false); }
+    var epoch = sessionEpoch;
+    var token = adminStateEpoch;
+    systemSettingsSeq += 1;
+    var seq = systemSettingsSeq;
+    systemSettingsLoading = true;
+    if (reset) { clearNode(settingsHistory); }
+    return api("/workspace/api/admin/system-settings").then(function (result) {
+      if (epoch !== sessionEpoch || token !== adminStateEpoch ||
+          seq !== systemSettingsSeq) {
+        return false;
+      }
+      systemSettingsLoading = false;
+      if (adminGuard(result, settingsState)) { return false; }
+      if (!result.ok || !isObject(result.data) ||
+          !isObject(result.data.values) || !isObject(result.data.ceilings)) {
+        setStatus(settingsState, serverMessage(result, timeoutOrNetwork(result)), "error");
+        return false;
+      }
+      systemSettings = {
+        revision: typeof result.data.revision === "number" ? result.data.revision : 0,
+        values: result.data.values,
+        ceilings: result.data.ceilings,
+        history: Array.isArray(result.data.history) ? result.data.history : []
+      };
+      systemSettingsLoaded = true;
+      renderSystemSettings(systemSettings);
+      setStatus(settingsState, "");
+      return true;
+    });
+  }
+
   function loadAdminSettings(reset) {
     if (!signedIn || adminSettingsLoading) { return Promise.resolve(false); }
     var epoch = sessionEpoch;
@@ -6773,22 +7062,248 @@ _WORKSPACE_JS = """
     } else {
       setStatus(settingsState, "Refreshing settings…");
     }
-    return api("/workspace/api/admin/settings").then(function (result) {
+    return loadSystemSettings(reset).then(function (settingsOk) {
       if (epoch !== sessionEpoch || token !== adminStateEpoch || seq !== adminSettingsSeq) {
         return false;
       }
-      adminSettingsLoading = false;
-      if (adminGuard(result, settingsState)) { return false; }
-      if (!result.ok || !isObject(result.data)) {
-        setStatus(settingsState, serverMessage(result, timeoutOrNetwork(result)), "error");
-        return false;
-      }
-      adminSettings = result.data;
-      adminSettingsLoaded = true;
-      renderAdminSettings(adminSettings);
-      setStatus(settingsState, "");
-      return true;
+      return api("/workspace/api/admin/settings").then(function (result) {
+        if (epoch !== sessionEpoch || token !== adminStateEpoch || seq !== adminSettingsSeq) {
+          return false;
+        }
+        adminSettingsLoading = false;
+        if (adminGuard(result, settingsState)) { return false; }
+        if (!result.ok || !isObject(result.data)) {
+          setStatus(settingsState, serverMessage(result, timeoutOrNetwork(result)), "error");
+          return false;
+        }
+        adminSettings = result.data;
+        adminSettingsLoaded = true;
+        renderAdminSettings(adminSettings);
+        if (settingsOk) { setStatus(settingsState, ""); }
+        return settingsOk;
+      });
     });
+  }
+
+  function systemSettingsValues() {
+    var values = {
+      paused: settingsPause.checked,
+      shared_key_enabled: settingsSharedKey.checked,
+      chat_limits: {},
+      input_allow_categories: selectedCategories(
+        settingsInputBoxes,
+        systemSettings.ceilings.input_allow_categories,
+        systemSettings.values.input_allow_categories),
+      output_allow_categories: selectedCategories(
+        settingsOutputBoxes,
+        systemSettings.ceilings.output_allow_categories,
+        systemSettings.values.output_allow_categories),
+      deny_phrases: denyPhraseList(),
+      retention_days: null,
+      session_hours: null,
+      login_max_attempts: null,
+      key_requests_per_minute: null,
+      max_concurrency: null,
+      chat_timeout_seconds: null
+    };
+    for (var i = 0; i < settingsChatFields.length; i += 1) {
+      var field = settingsChatFields[i];
+      var limit = settingsInteger(field.input.value);
+      if (limit === undefined) {
+        setStatus(settingsState,
+          field.label + " must be a whole number of 1 or more, or blank to remove it.",
+          "error");
+        field.input.focus();
+        return null;
+      }
+      if (limit !== null) {
+        if (limit < 1) {
+          setStatus(settingsState,
+            field.label + " must be a whole number of 1 or more, or blank to remove it.",
+            "error");
+          field.input.focus();
+          return null;
+        }
+        values.chat_limits[field.key] = limit;
+      }
+    }
+    var retention = settingsInteger(settingsRetentionDays.value);
+    if (retention === undefined || (retention !== null && retention < 1)) {
+      setStatus(settingsState, "Retention days must be a whole number of 1 or more, or blank for Off.", "error");
+      settingsRetentionDays.focus();
+      return null;
+    }
+    values.retention_days = retention;
+    var session = settingsInteger(settingsSessionHours.value);
+    if (session === undefined || session === null || session < 1 || session > 24) {
+      setStatus(settingsState, "Session length must be a whole number from 1 to 24 hours.", "error");
+      settingsSessionHours.focus();
+      return null;
+    }
+    values.session_hours = session;
+    var login = settingsInteger(settingsLoginAttempts.value);
+    if (login === undefined || login === null || login < 3 || login > 20) {
+      setStatus(settingsState, "Login attempts must be a whole number from 3 to 20 per minute.", "error");
+      settingsLoginAttempts.focus();
+      return null;
+    }
+    values.login_max_attempts = login;
+    var keyRpm = settingsInteger(settingsKeyRpm.value);
+    if (keyRpm === undefined || (keyRpm !== null && keyRpm < 1)) {
+      setStatus(settingsState, "Default requests per minute must be a whole number of 1 or more, or blank.", "error");
+      settingsKeyRpm.focus();
+      return null;
+    }
+    values.key_requests_per_minute = keyRpm;
+    var concurrencyCeiling = systemSettings.ceilings.max_concurrency;
+    var concurrency = settingsInteger(settingsMaxConcurrency.value);
+    if (concurrency === undefined || (concurrency !== null &&
+        (concurrency < 1 || concurrency > concurrencyCeiling))) {
+      setStatus(settingsState, "Concurrency must be from 1 to " +
+        ceilingText(concurrencyCeiling) + ", or blank.", "error");
+      settingsMaxConcurrency.focus();
+      return null;
+    }
+    values.max_concurrency = concurrency;
+    var timeoutCeiling = systemSettings.ceilings.chat_timeout_seconds;
+    var timeout = settingsNumber(settingsChatTimeout.value);
+    if (timeout === undefined || (timeout !== null &&
+        (timeout < 1 || timeout > timeoutCeiling))) {
+      setStatus(settingsState, "Chat timeout must be from 1 to " +
+        ceilingText(timeoutCeiling) + " seconds, or blank.", "error");
+      settingsChatTimeout.focus();
+      return null;
+    }
+    values.chat_timeout_seconds = timeout;
+    return values;
+  }
+
+  function sendSystemSettings(values, reason) {
+    removeActiveConfirm();
+    var epoch = sessionEpoch;
+    var token = adminStateEpoch;
+    var uid = profile.user.id;
+    var expectedRevision = systemSettings.revision;
+    settingsSaving = true;
+    settingsSave.disabled = true;
+    setStatus(settingsState, "Saving settings…");
+    api("/workspace/api/admin/system-settings", {
+      method: "POST",
+      body: JSON.stringify({
+        values: values,
+        reason: reason,
+        expected_revision: expectedRevision
+      })
+    }).then(function (result) {
+      if (epoch !== sessionEpoch || token !== adminStateEpoch || !currentAdmin(uid)) { return; }
+      settingsSaving = false;
+      settingsSave.disabled = false;
+      if (adminGuard(result, settingsState)) { return; }
+      if (result.status === 409) {
+        setStatus(settingsState, "Settings changed since you opened this page", "error");
+        loadAdminSettings(true).then(function () {
+          if (epoch === sessionEpoch && token === adminStateEpoch && currentAdmin(uid)) {
+            setStatus(settingsState, "Settings changed since you opened this page", "error");
+          }
+        });
+        return;
+      }
+      if (!result.ok) {
+        setStatus(settingsState, serverMessage(result, timeoutOrNetwork(result)), "error");
+        return;
+      }
+      loadAdminSettings(true).then(function (ok) {
+        if (epoch === sessionEpoch && token === adminStateEpoch && currentAdmin(uid)) {
+          setStatus(settingsState, ok ? "Settings saved."
+            : "Settings saved, but the form could not be refreshed.",
+            ok ? "ok" : "warning");
+        }
+      });
+    });
+  }
+
+  function saveSystemSettings(event) {
+    event.preventDefault();
+    if (!currentAdmin() || settingsSaving || !systemSettings) { return; }
+    var reason = settingsReason.value.trim();
+    if (reason.length < 3) {
+      setStatus(settingsState, "Enter a reason for this change.", "error");
+      settingsReason.focus();
+      return;
+    }
+    var values = systemSettingsValues();
+    if (!values) { return; }
+    var pausing = values.paused && systemSettings.values.paused !== true;
+    var sharedOff = !values.shared_key_enabled &&
+      systemSettings.values.shared_key_enabled !== false;
+    if (pausing || sharedOff) {
+      var question = pausing
+        ? "Pause all chat for everyone? Requests stop until it is turned back on."
+        : "Turn off the shared chat key? Anyone using it loses access.";
+      askConfirm(settingsForm, question, "Confirm save", function () {
+        sendSystemSettings(values, reason);
+      });
+      return;
+    }
+    sendSystemSettings(values, reason);
+  }
+
+  function sendSystemSettingsRollback(targetRevision, reason, expectedRevision) {
+    var epoch = sessionEpoch;
+    var token = adminStateEpoch;
+    var uid = profile.user.id;
+    settingsRollbackBusy = true;
+    setStatus(settingsState, "Rolling back to revision " + targetRevision + "…");
+    api("/workspace/api/admin/system-settings/rollback", {
+      method: "POST",
+      body: JSON.stringify({
+        revision: targetRevision,
+        reason: reason,
+        expected_revision: expectedRevision
+      })
+    }).then(function (result) {
+      if (epoch !== sessionEpoch || token !== adminStateEpoch || !currentAdmin(uid)) { return; }
+      settingsRollbackBusy = false;
+      if (adminGuard(result, settingsState)) { return; }
+      if (result.status === 409) {
+        setStatus(settingsState, "Settings changed since you opened this page", "error");
+        loadAdminSettings(true).then(function () {
+          if (epoch === sessionEpoch && token === adminStateEpoch && currentAdmin(uid)) {
+            setStatus(settingsState, "Settings changed since you opened this page", "error");
+          }
+        });
+        return;
+      }
+      if (!result.ok) {
+        setStatus(settingsState, serverMessage(result, timeoutOrNetwork(result)), "error");
+        return;
+      }
+      loadAdminSettings(true).then(function (ok) {
+        if (epoch === sessionEpoch && token === adminStateEpoch && currentAdmin(uid)) {
+          setStatus(settingsState, ok
+            ? "Rolled back to revision " + targetRevision + "."
+            : "Rollback saved, but the form could not be refreshed.",
+            ok ? "ok" : "warning");
+        }
+      });
+    });
+  }
+
+  function rollbackSystemSettings(targetRevision) {
+    if (!currentAdmin() || settingsRollbackBusy || !systemSettings ||
+        typeof targetRevision !== "number") { return; }
+    var reason = settingsReason.value.trim();
+    if (reason.length < 3) {
+      setStatus(settingsState, "Enter a reason for the rollback in the Reason box.", "error");
+      settingsReason.focus();
+      return;
+    }
+    var expectedRevision = systemSettings.revision;
+    askConfirm(settingsHistory,
+      "Roll back to revision " + targetRevision + "? This adds a new revision and keeps the history.",
+      "Confirm rollback", function () {
+        sendSystemSettingsRollback(targetRevision, reason, expectedRevision);
+      });
   }
 
   function alertQueryPath() {
@@ -7376,6 +7891,14 @@ _WORKSPACE_JS = """
     adminSettingsLoaded = false;
     adminSettingsLoading = false;
     adminSettingsSeq += 1;
+    systemSettings = null;
+    systemSettingsLoaded = false;
+    systemSettingsLoading = false;
+    systemSettingsSeq += 1;
+    settingsSaving = false;
+    settingsRollbackBusy = false;
+    settingsInputBoxes = [];
+    settingsOutputBoxes = [];
     policyProfiles = [];
     policyProfilesLoading = false;
     policyProfilesSeq += 1;
@@ -7503,6 +8026,13 @@ _WORKSPACE_JS = """
     clearNode(alertList);
     clearNode(alertDetail);
     clearNode(settingsSummary);
+    clearNode(settingsHistory);
+    settingsPause.checked = false;
+    settingsSharedKey.checked = false;
+    settingsPauseWarning.hidden = true;
+    settingsReason.value = "";
+    settingsSave.disabled = false;
+    monitorPauseBanner.hidden = true;
     clearMonitorTimer();
     monitorSeq += 1;
     clearNode(monitorStatus);
@@ -8294,6 +8824,10 @@ WORKSPACE_HTML = """<!doctype html>
 
 <section id="admin-monitor-panel" class="admin-panel-section monitor-panel" role="tabpanel" aria-labelledby="admin-tab-monitor">
 <h3 id="monitor-heading" class="sr-only">Monitor</h3>
+<div id="monitor-pause-banner" class="monitor-pause-banner" role="alert" hidden>
+<span>All chat is paused</span>
+<button id="monitor-pause-settings" class="link-button" type="button">Open Settings</button>
+</div>
 <div class="monitor-head">
 <div id="monitor-status" class="monitor-status"></div>
 <div class="monitor-controls">
@@ -8680,9 +9214,108 @@ WORKSPACE_HTML = """<!doctype html>
 <h3 id="settings-heading">Settings</h3>
 <button id="settings-refresh" class="ghost" type="button">Refresh settings</button>
 </div>
-<p class="admin-note">Read-only. These values are resolved at server startup; this tab cannot change the model, policy, guards or limits.</p>
+<p class="admin-note">Changes are recorded with a reason and can be rolled back. Model, guard and policy identity values stay read-only below.</p>
 <p id="admin-settings-state" class="admin-note" role="status" aria-live="polite"></p>
-<div id="settings-summary" class="admin-table" aria-label="Effective settings"></div>
+<form id="settings-form" class="settings-form">
+<fieldset class="settings-group">
+<legend>Availability</legend>
+<div class="settings-checks">
+<label class="admin-inline"><input id="settings-pause" type="checkbox"> Pause all chat</label>
+<p id="settings-pause-warning" class="settings-pause-warning" role="alert" hidden>All chat is paused for everyone.</p>
+<label class="admin-inline"><input id="settings-shared-key" type="checkbox"> Shared chat key</label>
+</div>
+</fieldset>
+<fieldset class="settings-group">
+<legend>Chat limits</legend>
+<p class="admin-note">Leave a field blank to remove that limit.</p>
+<div class="settings-grid">
+<div class="settings-field">
+<label for="settings-chat-context-messages">Context messages</label>
+<input id="settings-chat-context-messages" type="number" min="1" step="1">
+<span id="settings-chat-context-messages-hint" class="settings-hint"></span>
+</div>
+<div class="settings-field">
+<label for="settings-chat-context-budget">Context budget</label>
+<input id="settings-chat-context-budget" type="number" min="1" step="1">
+<span id="settings-chat-context-budget-hint" class="settings-hint"></span>
+</div>
+<div class="settings-field">
+<label for="settings-chat-default-reply-tokens">Default reply tokens</label>
+<input id="settings-chat-default-reply-tokens" type="number" min="1" step="1">
+<span id="settings-chat-default-reply-tokens-hint" class="settings-hint"></span>
+</div>
+<div class="settings-field">
+<label for="settings-chat-max-reply-tokens">Max reply tokens</label>
+<input id="settings-chat-max-reply-tokens" type="number" min="1" step="1">
+<span id="settings-chat-max-reply-tokens-hint" class="settings-hint"></span>
+</div>
+</div>
+</fieldset>
+<fieldset class="settings-group">
+<legend>Allowed input categories</legend>
+<div id="settings-input-categories" class="settings-checks"></div>
+</fieldset>
+<fieldset class="settings-group">
+<legend>Allowed output categories</legend>
+<div id="settings-output-categories" class="settings-checks"></div>
+</fieldset>
+<fieldset class="settings-group">
+<legend>Deny phrases</legend>
+<label for="settings-deny-phrases">Added deny phrases, one per line</label>
+<textarea id="settings-deny-phrases" rows="3"></textarea>
+<p class="admin-note">The policy file's phrases always apply.</p>
+</fieldset>
+<fieldset class="settings-group">
+<legend>Retention</legend>
+<div class="settings-field">
+<label for="settings-retention-days">Retention days</label>
+<input id="settings-retention-days" type="number" min="1" step="1">
+<span id="settings-retention-hint" class="settings-hint">Off</span>
+</div>
+</fieldset>
+<fieldset class="settings-group">
+<legend>Sign-in</legend>
+<div class="settings-grid">
+<div class="settings-field">
+<label for="settings-session-hours">Session length (hours, 1 to 24)</label>
+<input id="settings-session-hours" type="number" min="1" max="24" step="1">
+</div>
+<div class="settings-field">
+<label for="settings-login-attempts">Login attempts per minute (3 to 20)</label>
+<input id="settings-login-attempts" type="number" min="3" max="20" step="1">
+</div>
+<div class="settings-field">
+<label for="settings-key-rpm">Default requests per minute for keys</label>
+<input id="settings-key-rpm" type="number" min="1" step="1">
+</div>
+</div>
+</fieldset>
+<fieldset class="settings-group">
+<legend>Needs restart</legend>
+<p class="admin-note">These take effect after the gateway restarts.</p>
+<div class="settings-grid">
+<div class="settings-field">
+<label for="settings-max-concurrency">Concurrency (1 to ceiling)</label>
+<input id="settings-max-concurrency" type="number" min="1" step="1">
+<span id="settings-max-concurrency-hint" class="settings-hint"></span>
+</div>
+<div class="settings-field">
+<label for="settings-chat-timeout">Chat timeout seconds (1 to ceiling)</label>
+<input id="settings-chat-timeout" type="number" min="1" step="any">
+<span id="settings-chat-timeout-hint" class="settings-hint"></span>
+</div>
+</div>
+</fieldset>
+<div class="settings-field">
+<label for="settings-reason">Reason</label>
+<textarea id="settings-reason" rows="2" required></textarea>
+</div>
+<button id="settings-save" class="primary" type="submit">Save settings</button>
+</form>
+<h3 id="settings-history-heading">History</h3>
+<div id="settings-history" class="admin-table admin-table-list" aria-label="Settings history"></div>
+<h3 id="settings-current-values">Current values</h3>
+<div id="settings-summary" class="admin-table" aria-label="Current values"></div>
 </section>
 </div>
 </div>

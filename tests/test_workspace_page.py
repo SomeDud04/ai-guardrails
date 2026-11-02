@@ -200,7 +200,7 @@ class WorkspacePageHTTPTests(WorkspaceHTTPBase):
                 f'id="{table_id}" class="admin-table admin-table-list"', html
             )
 
-    def test_admin_settings_tab_is_read_only(self) -> None:
+    def test_admin_settings_tab_has_no_fixed_policy_controls(self) -> None:
         html = self._page().text
         self.assertRegex(
             html,
@@ -214,9 +214,15 @@ class WorkspacePageHTTPTests(WorkspaceHTTPBase):
             r'aria-labelledby="admin-tab-settings"[^>]*hidden',
         )
         panel = html.split('id="admin-settings-panel"', 1)[1].split("</section>", 1)[0]
-        self.assertNotIn("<form", panel)
-        self.assertNotIn("<input", panel)
-        self.assertNotIn('method="POST"', panel)
+        self.assertIn('<form id="settings-form"', panel)
+        self.assertIn('id="settings-save"', panel)
+        # The editable form must never grow a control for a fixed identity or
+        # guard value: those stay read-only in the summary below the form.
+        for term in ("guard", "guards", "framing", "model", "digest"):
+            self.assertNotRegex(
+                panel,
+                rf'<(?:input|select|textarea)[^>]*(?:id|name)="[^"]*{term}',
+            )
 
     def test_monitor_is_the_first_admin_tab(self) -> None:
         html = self._page().text
@@ -231,6 +237,12 @@ class WorkspacePageHTTPTests(WorkspaceHTTPBase):
             r'aria-labelledby="admin-tab-monitor">',
         )
         self.assertRegex(html, r'<section id="admin-users-panel"[^>]*hidden>')
+        self.assertIn("All chat is paused", html)
+        self.assertRegex(
+            html,
+            r'<button id="monitor-pause-settings"[^>]*type="button"[^>]*>'
+            r"Open Settings</button>",
+        )
 
     def test_integrate_tab_uses_only_the_key_placeholder(self) -> None:
         html = self._page().text

@@ -172,6 +172,14 @@ class EnforcementTests(ApiKeyBase):
         self.assertEqual(len(versions), 1)
         self.assertTrue(versions.pop().endswith("+settings.1"))
 
+    def test_the_settings_page_shows_the_policy_identity_in_force(self) -> None:
+        self.save(session_hours=4)
+        token = self.login("root.admin")
+        response = self.client.get(
+            "/workspace/api/admin/settings", headers=self.auth(token)
+        )
+        self.assertTrue(response.json()["policy"]["version"].endswith("+settings.1"))
+
     def test_a_stale_form_is_refused(self) -> None:
         self.save(session_hours=4)
         with self.assertRaises(Conflict):

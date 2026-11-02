@@ -1355,7 +1355,49 @@ const MONITOR_TRAFFIC = {
   buckets: [{ start: 1700000000, allowed: 7, blocked: 2, failed: 1 }],
 };
 
-async function respondMonitor(app) {
+function systemSettingsPayload(overrides) {
+  const options = overrides || {};
+  const values = Object.assign(
+    {
+      paused: false,
+      shared_key_enabled: true,
+      chat_limits: {},
+      input_allow_categories: null,
+      output_allow_categories: null,
+      deny_phrases: [],
+      retention_days: null,
+      session_hours: 8,
+      login_max_attempts: 5,
+      key_requests_per_minute: null,
+      max_concurrency: null,
+      chat_timeout_seconds: null,
+    },
+    options.values || {}
+  );
+  const ceilings = Object.assign(
+    {
+      chat_limits: {
+        context_messages: 20,
+        context_budget: 16000,
+        default_reply_tokens: 512,
+        max_reply_tokens: 1024,
+      },
+      input_allow_categories: ["PII", "Jailbreak"],
+      output_allow_categories: ["PII"],
+      max_concurrency: 8,
+      chat_timeout_seconds: 70,
+    },
+    options.ceilings || {}
+  );
+  const revision = options.revision === undefined ? 3 : options.revision;
+  const history = options.history || [
+    { revision, values, reason: "Current change", created_at: 1700000300, actor_username: "admin" },
+    { revision: revision - 1, values, reason: "Earlier change", created_at: 1700000200, actor_username: "admin" },
+  ];
+  return { revision, values, ceilings, history };
+}
+
+async function respondMonitor(app, settingsOverrides) {
   const call = app.lastMatching("/workspace/api/admin/monitor?hours=24");
   assert(call, "the monitor must load when administration opens");
   assert(call.options.method === "GET", "the monitor must be a read-only GET");
@@ -1416,6 +1458,11 @@ async function respondMonitor(app) {
     200
   );
   await settle();
+  const systemSettings = app.pendingCallsMatching("/workspace/api/admin/system-settings").pop();
+  if (systemSettings) {
+    systemSettings.respond(systemSettingsPayload(settingsOverrides), 200);
+    await settle();
+  }
 }
 
 async function openAdminUsers(app) {
@@ -1456,7 +1503,9 @@ async function scenarioAdmin() {
 
   app.elementFor("tab-admin").dispatch("click");
   await settle();
-  await respondMonitor(app);
+  await respondMonitor(app, { values: { paused: true } });
+  assert(app.elementFor("monitor-pause-banner").hidden === false,
+    "a paused system must show the monitor banner");
   assert(app.elementFor("admin-monitor-panel").hidden === false,
     "administration must open on the monitor");
   assert(app.elementFor("monitor-status").textContent.indexOf("review needed") >= 0,
@@ -1576,31 +1625,50 @@ async function scenarioAdmin() {
     "opening settings must hide the access panel");
   assert(app.elementFor("admin-settings-panel").hidden === false,
     "opening settings must show the settings panel");
+  const summaryPayload = {
+    model: "qwen2.5-0.5b-instruct",
+    policy: { version: "policy-1", digest: "a".repeat(64), token_budget: 4096 },
+    guards: { mode: "guarded", active: true, framing_version: "nasi-lemak-guard-framing-v2" },
+    chat_limits: {
+      context_messages: 20, context_budget: 16000,
+      default_reply_tokens: 512, max_reply_tokens: 1024, max_prompt_chars: 16000,
+    },
+    limits: {
+      context_messages: { effective: 20, ceiling: 20, source: "env" },
+      max_reply_tokens: { effective: 1024, ceiling: 1024, source: "policy" },
+    },
+    operational: {
+      chat_work_timeout: 70, max_concurrency: 8, control_concurrency: 2,
+      max_body_bytes: 1048576, body_read_timeout: 10,
+    },
+  };
+  async function finishSettingsReload(payload) {
+    const system = app.pendingCallsMatching("/workspace/api/admin/system-settings").pop();
+    assert(system, "a settings reload must read the system settings");
+    system.respond(payload, 200);
+    await settle();
+    const summary = app.pendingCallsMatching("/workspace/api/admin/settings").pop();
+    assert(summary, "a settings reload must read the current values");
+    summary.respond(summaryPayload, 200);
+    await settle();
+  }
+  const settingsPayload = systemSettingsPayload({
+    revision: 3,
+    values: {
+      chat_limits: { context_messages: 12, max_reply_tokens: 512 },
+      deny_phrases: ["old phrase"],
+      output_allow_categories: null,
+    },
+    ceilings: {
+      input_allow_categories: [],
+      output_allow_categories: ["PII", "Jailbreak"],
+    },
+  });
+  await finishSettingsReload(settingsPayload);
   const settingsCall = app.lastMatching("/workspace/api/admin/settings");
   assert(settingsCall, "settings request missing");
   assert(settingsCall.options.method === "GET", "settings must be a read-only GET");
   assert(settingsCall.options.body === undefined, "settings must not send a body");
-  settingsCall.respond(
-    {
-      model: "qwen2.5-0.5b-instruct",
-      policy: { version: "policy-1", digest: "a".repeat(64), token_budget: 4096 },
-      guards: { mode: "guarded", active: true, framing_version: "nasi-lemak-guard-framing-v2" },
-      chat_limits: {
-        context_messages: 20, context_budget: 16000,
-        default_reply_tokens: 512, max_reply_tokens: 1024, max_prompt_chars: 16000,
-      },
-      limits: {
-        context_messages: { effective: 20, ceiling: 20, source: "env" },
-        max_reply_tokens: { effective: 1024, ceiling: 1024, source: "policy" },
-      },
-      operational: {
-        chat_work_timeout: 70, max_concurrency: 8, control_concurrency: 2,
-        max_body_bytes: 1048576, body_read_timeout: 10,
-      },
-    },
-    200
-  );
-  await settle();
   const settingsText = app.elementFor("settings-summary").textContent;
   assert(
     settingsText.indexOf("qwen2.5-0.5b-instruct") >= 0 &&
@@ -1608,8 +1676,153 @@ async function scenarioAdmin() {
       settingsText.indexOf("nasi-lemak-guard-framing-v2") >= 0 &&
       settingsText.indexOf("effective 20") >= 0 &&
       settingsText.indexOf("chat_work_timeout") >= 0,
-    "settings values must render as text"
+    "current values must render as text below the form"
   );
+  assert(app.elementFor("settings-chat-context-messages").value === "12",
+    "the form must load the saved chat limit");
+  assert(app.elementFor("settings-chat-context-messages-hint").textContent.indexOf("Ceiling: 20") >= 0,
+    "each chat limit must show its ceiling");
+  assert(app.elementFor("settings-input-categories").textContent.indexOf("The policy file allows none.") >= 0,
+    "an empty ceiling must explain that the policy file allows none");
+  assert(collect(app.elementFor("settings-input-categories")).filter(
+    (element) => element.tagName === "INPUT").length === 0,
+    "an empty ceiling must render no checkboxes");
+  assert(collect(app.elementFor("settings-output-categories")).filter(
+    (element) => element.tagName === "INPUT").length === 2,
+    "one checkbox must appear for each allowed output category");
+  assert(app.elementFor("settings-retention-hint").textContent === "Off",
+    "a missing retention value must show Off");
+  assert(app.elementFor("settings-pause-warning").hidden === true,
+    "the pause warning starts hidden");
+  app.elementFor("settings-pause").checked = true;
+  app.elementFor("settings-pause").dispatch("change");
+  assert(app.elementFor("settings-pause-warning").hidden === false,
+    "the pause warning must show while pause is on");
+  app.elementFor("settings-pause").checked = false;
+  app.elementFor("settings-pause").dispatch("change");
+  assert(collect(app.elementFor("settings-history")).filter(
+    (element) => element.tagName === "BUTTON" && element.textContent === "Roll back").length === 1,
+    "history must offer a rollback for each older revision only");
+
+  const postsBefore = app.callsMatching("/workspace/api/admin/system-settings").filter(
+    (call) => call.options.method === "POST").length;
+  app.elementFor("settings-chat-context-messages").value = "12";
+  app.elementFor("settings-chat-context-budget").value = "";
+  app.elementFor("settings-chat-default-reply-tokens").value = "256";
+  app.elementFor("settings-chat-max-reply-tokens").value = "512";
+  app.elementFor("settings-deny-phrases").value = "  secret phrase  \n\nother phrase\nsecret phrase";
+  app.elementFor("settings-retention-days").value = "";
+  app.elementFor("settings-session-hours").value = "8";
+  app.elementFor("settings-login-attempts").value = "5";
+  app.elementFor("settings-key-rpm").value = "";
+  app.elementFor("settings-max-concurrency").value = "";
+  app.elementFor("settings-chat-timeout").value = "45";
+  app.elementFor("settings-reason").value = "Tighten the limits";
+  app.elementFor("settings-form").dispatch("submit");
+  await settle();
+  const saveCall = app.lastMatching("/workspace/api/admin/system-settings");
+  assert(saveCall && saveCall.options.method === "POST", "saving settings must POST");
+  const savedBody = JSON.parse(saveCall.options.body);
+  assert(savedBody.expected_revision === 3, "a save must pin the revision it read");
+  assert(savedBody.reason === "Tighten the limits", "a save must include its reason");
+  assert(Object.keys(savedBody.values).length === 12,
+    "a save must send every top-level settings key");
+  assert(savedBody.values.chat_limits.context_messages === 12,
+    "a filled chat limit must be sent");
+  assert(savedBody.values.chat_limits.context_budget === undefined,
+    "a blank chat limit must be omitted");
+  assert(savedBody.values.input_allow_categories === null,
+    "an empty ceiling must keep its value unchanged");
+  assert(savedBody.values.output_allow_categories === null,
+    "all ticked categories must be sent as null");
+  assert(savedBody.values.deny_phrases.length === 2 &&
+      savedBody.values.deny_phrases[0] === "secret phrase",
+    "deny phrases must be trimmed and de-duplicated");
+  assert(savedBody.values.retention_days === null &&
+      savedBody.values.key_requests_per_minute === null &&
+      savedBody.values.max_concurrency === null,
+    "blank optional numbers must be sent as null");
+  assert(savedBody.values.chat_timeout_seconds === 45,
+    "a filled restart setting must be sent");
+  saveCall.respond({ revision: 4, values: savedBody.values }, 200);
+  await settle();
+  await finishSettingsReload(systemSettingsPayload({
+    revision: 4,
+    values: savedBody.values,
+    history: [
+      { revision: 4, values: savedBody.values, reason: "Tighten the limits", created_at: 1700000400, actor_username: "admin" },
+      { revision: 3, values: settingsPayload.values, reason: "Earlier change", created_at: 1700000300, actor_username: "admin" },
+    ],
+  }));
+  assert(app.elementFor("admin-settings-state").textContent.indexOf("Settings saved.") >= 0,
+    "a successful save must report that settings were saved");
+
+  const postsAfterSave = app.callsMatching("/workspace/api/admin/system-settings").filter(
+    (call) => call.options.method === "POST").length;
+  app.elementFor("settings-reason").value = "";
+  app.elementFor("settings-chat-context-messages").value = "15";
+  app.elementFor("settings-form").dispatch("submit");
+  await settle();
+  assert(app.callsMatching("/workspace/api/admin/system-settings").filter(
+    (call) => call.options.method === "POST").length === postsAfterSave,
+    "a missing reason must send nothing");
+  assert(app.elementFor("admin-settings-state").textContent.indexOf("reason") >= 0,
+    "a missing reason must be explained");
+
+  app.elementFor("settings-reason").value = "Try a stale save";
+  app.elementFor("settings-chat-context-messages").value = "16";
+  app.elementFor("settings-form").dispatch("submit");
+  await settle();
+  const staleSave = app.lastMatching("/workspace/api/admin/system-settings");
+  assert(staleSave && staleSave.options.method === "POST", "the stale save must POST");
+  staleSave.respond({ error: { code: "CONFLICT", message: "stale revision" } }, 409);
+  await settle();
+  await finishSettingsReload(systemSettingsPayload({
+    revision: 5,
+    values: { chat_limits: { context_messages: 18 } },
+    history: [
+      { revision: 5, values: {}, reason: "Another administrator", created_at: 1700000500, actor_username: "admin" },
+      { revision: 4, values: savedBody.values, reason: "Tighten the limits", created_at: 1700000400, actor_username: "admin" },
+    ],
+  }));
+  assert(app.elementFor("admin-settings-state").textContent.indexOf(
+    "Settings changed since you opened this page") >= 0,
+    "a stale save must explain the conflict");
+  assert(app.elementFor("settings-chat-context-messages").value === "18",
+    "a stale save must reload the form");
+
+  app.elementFor("settings-reason").value = "Restore earlier limits";
+  const targetRow = collect(app.elementFor("settings-history")).find(
+    (element) => String(element.className).indexOf("admin-table-row") >= 0 &&
+      element.textContent.indexOf("r4") === 0);
+  assert(targetRow, "the history must contain the older revision");
+  const rollbackButton = findButton(targetRow, "Roll back");
+  assert(rollbackButton, "the older revision must offer Roll back");
+  rollbackButton.dispatch("click");
+  const confirmBox = findByClass(app.elementFor("settings-history"), "admin-confirm");
+  assert(confirmBox, "a rollback must ask for confirmation");
+  findButton(confirmBox, "Confirm rollback").dispatch("click");
+  await settle();
+  const rollbackCall = app.lastMatching("/workspace/api/admin/system-settings/rollback");
+  assert(rollbackCall && rollbackCall.options.method === "POST", "rollback must POST");
+  const rollbackBody = JSON.parse(rollbackCall.options.body);
+  assert(rollbackBody.revision === 4, "rollback must post the chosen revision");
+  assert(rollbackBody.reason === "Restore earlier limits", "rollback must use the reason box");
+  assert(rollbackBody.expected_revision === 5, "rollback must pin the current revision");
+  rollbackCall.respond({ revision: 6, values: savedBody.values }, 200);
+  await settle();
+  await finishSettingsReload(systemSettingsPayload({
+    revision: 6,
+    values: savedBody.values,
+    history: [
+      { revision: 6, values: savedBody.values, reason: "Restore earlier limits", created_at: 1700000600, actor_username: "admin" },
+      { revision: 5, values: {}, reason: "Another administrator", created_at: 1700000500, actor_username: "admin" },
+    ],
+  }));
+  assert(app.elementFor("admin-settings-state").textContent.indexOf(
+    "Rolled back to revision 4.") >= 0,
+    "a rollback must report the revision it restored");
+
   app.elementFor("admin-tab-integrate").dispatch("click");
   await settle();
   assert(app.elementFor("admin-integrate-panel").hidden === false,
