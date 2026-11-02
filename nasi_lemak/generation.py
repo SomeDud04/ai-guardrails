@@ -600,10 +600,23 @@ class GenerationClient:
             # The server-side concise-reply instruction belongs only to the
             # upstream payload; guard scans, audit and the output scan context
             # keep the caller's sanitized conversation unchanged.
-            upstream_messages = [
-                {"role": "system", "content": self.config.system_prompt},
-                *clean,
-            ]
+            if clean and clean[0]["role"] == "system":
+                # The chat template accepts one system message, first, so the
+                # caller's own is merged after the server instruction.
+                upstream_messages = [
+                    {
+                        "role": "system",
+                        "content": self.config.system_prompt
+                        + "\n\n"
+                        + clean[0]["content"],
+                    },
+                    *clean[1:],
+                ]
+            else:
+                upstream_messages = [
+                    {"role": "system", "content": self.config.system_prompt},
+                    *clean,
+                ]
         payload = {
             "model": self.config.model,
             "messages": upstream_messages,

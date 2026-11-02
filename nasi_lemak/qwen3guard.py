@@ -83,8 +83,10 @@ from .guard_errors import GuardError
 VERDICT_MAX_TOKENS = 128
 
 #: The output slot screens the complete accepted context plus the buffered
-#: output, all in one verdict request.
-MAX_CONTEXT_MESSAGES = 16
+#: output, all in one verdict request.  Kept equal to the gateway's own
+#: ``limits.MAX_CONTEXT_MESSAGES`` (a test pins it), so every conversation the
+#: gateway accepts can be screened; the byte bound below still applies.
+MAX_CONTEXT_MESSAGES = 32
 
 #: Conservative bound on the UTF-8 JSON-encoded conversation plus buffered
 #: output.  This is a byte bound, not a token count and not a model window claim.
