@@ -115,7 +115,10 @@ class FakePlatformOps:
         except FileNotFoundError:
             raise
         mode = self.modes.get(key, stat.S_IMODE(st.st_mode))
-        uid, gid = self.ownership.get(key, (st.st_uid, st.st_gid))
+        # Unlisted files read as root-owned on every platform.  The real owner
+        # of a temporary file is the test runner (uid 1001 on CI), which would
+        # make the simulated-root installer refuse it on Linux but not Windows.
+        uid, gid = self.ownership.get(key, (0, 0))
         return FakeStat(
             mode=(stat.S_IFMT(st.st_mode) | mode),
             uid=uid,
