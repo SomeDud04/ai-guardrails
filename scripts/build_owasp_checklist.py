@@ -720,6 +720,16 @@ def _normalise_zip(data: bytes) -> bytes:
     return output.getvalue()
 
 
+def workbook_contents(data: bytes) -> list[tuple[str, bytes]]:
+    """Each member's name and uncompressed bytes.
+
+    Compressed bytes depend on the platform's zlib build, so a Linux rebuild can
+    differ from a Windows one byte for byte while holding identical content.
+    """
+    with zipfile.ZipFile(io.BytesIO(data)) as archive:
+        return [(info.filename, archive.read(info.filename)) for info in archive.infolist()]
+
+
 def build(payload_root: Path = PAYLOAD_ROOT, workbook: Path = WORKBOOK,
           manifest: Path = MANIFEST) -> dict[str, Any]:
     records = load_corpus(payload_root)
@@ -763,7 +773,9 @@ def check(payload_root: Path = PAYLOAD_ROOT, workbook: Path = WORKBOOK,
     except ImportError:
         openpyxl_available = False
     if openpyxl_available:
-        if build_workbook_bytes(records) != workbook.read_bytes():
+        if workbook_contents(build_workbook_bytes(records)) != workbook_contents(
+            workbook.read_bytes()
+        ):
             problems.append("workbook drifted from the corpus; regenerate it")
     return problems
 

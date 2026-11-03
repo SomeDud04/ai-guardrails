@@ -425,7 +425,11 @@ class WorkbookTests(unittest.TestCase):
         first = self.builder.build_workbook_bytes(self.records)
         second = self.builder.build_workbook_bytes(self.records)
         self.assertEqual(hashlib.sha256(first).hexdigest(), hashlib.sha256(second).hexdigest())
-        self.assertEqual(first, WORKBOOK.read_bytes(), "workbook drifted from the corpus; regenerate it")
+        self.assertEqual(
+            self.builder.workbook_contents(first),
+            self.builder.workbook_contents(WORKBOOK.read_bytes()),
+            "workbook drifted from the corpus; regenerate it",
+        )
 
 
 class DocsTests(unittest.TestCase):
