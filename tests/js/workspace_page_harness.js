@@ -1452,6 +1452,22 @@ async function respondMonitor(app, settingsOverrides) {
           total_ms: 19000,
           reply_tokens: 340,
           tokens_per_second: 42.5,
+          allowed_categories: ["Safe chat"],
+        },
+        {
+          at: 1700000001,
+          decision: "blocked",
+          total_ms: 800,
+          reply_tokens: 0,
+          tokens_per_second: 0,
+          block_categories: ["PII", "Jailbreak"],
+        },
+        {
+          at: 1700000002,
+          decision: "allowed",
+          total_ms: 1200,
+          reply_tokens: 12,
+          tokens_per_second: 10,
         },
       ],
     },
@@ -1528,6 +1544,19 @@ async function scenarioAdmin() {
     "time per stage must render");
   assert(app.elementFor("live-recent").textContent.indexOf("340") >= 0,
     "the latest requests must render");
+  assert(app.elementFor("live-recent").textContent.indexOf("Guard category") >= 0,
+    "the latest requests must label the guard category column");
+  const guardCategoryCells = collect(app.elementFor("live-recent")).filter(
+    (element) => element.getAttribute("data-label") === "Guard category"
+  );
+  assert(guardCategoryCells.length === 3,
+    "every recent request must render one guard category cell");
+  assert(guardCategoryCells[0].textContent === "Allowed: Safe chat",
+    "allowed request categories must render as an allowed list");
+  assert(guardCategoryCells[1].textContent === "PII, Jailbreak",
+    "blocked request categories must be joined with commas");
+  assert(guardCategoryCells[2].textContent === "–",
+    "a request with no category data must render a dash");
   assert(app.elementFor("live-traffic").textContent.indexOf("192.168.90.50") >= 0,
     "traffic by IP must render");
   assert(app.elementFor("live-http").textContent.indexOf("/chat") >= 0,
@@ -1619,6 +1648,7 @@ async function scenarioAdmin() {
     "sequential admin loading must not exhaust control admission");
   app.elementFor("admin-tab-settings").dispatch("click");
   await settle();
+  app.elementFor("settings-thinking-warning").hidden = true;
   assert(app.elementFor("admin-tab-settings").getAttribute("aria-selected") === "true",
     "the settings tab must be selected");
   assert(app.elementFor("admin-access-panel").hidden === true,
@@ -1642,14 +1672,14 @@ async function scenarioAdmin() {
       max_body_bytes: 1048576, body_read_timeout: 10,
     },
   };
-  async function finishSettingsReload(payload) {
+  async function finishSettingsReload(payload, summary) {
     const system = app.pendingCallsMatching("/workspace/api/admin/system-settings").pop();
     assert(system, "a settings reload must read the system settings");
     system.respond(payload, 200);
     await settle();
-    const summary = app.pendingCallsMatching("/workspace/api/admin/settings").pop();
-    assert(summary, "a settings reload must read the current values");
-    summary.respond(summaryPayload, 200);
+    const summaryCall = app.pendingCallsMatching("/workspace/api/admin/settings").pop();
+    assert(summaryCall, "a settings reload must read the current values");
+    summaryCall.respond(summary || summaryPayload, 200);
     await settle();
   }
   const settingsPayload = systemSettingsPayload({
@@ -1678,6 +1708,8 @@ async function scenarioAdmin() {
       settingsText.indexOf("chat_work_timeout") >= 0,
     "current values must render as text below the form"
   );
+  assert(app.elementFor("settings-thinking-warning").hidden === false,
+    "a missing thinking-disabled flag must warn that model thinking is on");
   assert(app.elementFor("settings-chat-context-messages").value === "12",
     "the form must load the saved chat limit");
   assert(app.elementFor("settings-chat-context-messages-hint").textContent.indexOf("Ceiling: 20") >= 0,
@@ -1753,7 +1785,12 @@ async function scenarioAdmin() {
       { revision: 4, values: savedBody.values, reason: "Tighten the limits", created_at: 1700000400, actor_username: "admin" },
       { revision: 3, values: settingsPayload.values, reason: "Earlier change", created_at: 1700000300, actor_username: "admin" },
     ],
-  }));
+  }), {
+    ...summaryPayload,
+    operational: { ...summaryPayload.operational, thinking_disabled: true },
+  });
+  assert(app.elementFor("settings-thinking-warning").hidden === true,
+    "the thinking warning must hide when the server reports thinking disabled");
   assert(app.elementFor("admin-settings-state").textContent.indexOf("Settings saved.") >= 0,
     "a successful save must report that settings were saved");
 
@@ -2785,8 +2822,8 @@ async function scenarioPolicyPostalMask() {
     id: "user-alice", username: "alice", full_name: "Alice Tan",
     department_id: "dept-accounting", role: "employee", disabled: false, created_at: 1700000001,
   };
-  // A profile saved before POSTAL_ADDRESS existed. Editing it must not select
-  // postal masking on the administrator's behalf.
+  // A profile saved before the newer mask types existed. Editing it must not
+  // select the added masks on the administrator's behalf.
   const legacyProfile = {
     id: "profile-legacy",
     name: "Legacy masks",
@@ -2794,8 +2831,8 @@ async function scenarioPolicyPostalMask() {
     settings: {
       input_check_enabled: true,
       output_check_enabled: true,
-      input_masks: ["EMAIL"],
-      output_masks: ["EMAIL", "MY_PHONE"],
+      input_masks: ["EMAIL", "MY_PHONE", "MYKAD", "POSTAL_ADDRESS"],
+      output_masks: ["EMAIL", "MY_PHONE", "MYKAD", "POSTAL_ADDRESS"],
     },
     settings_digest: "c".repeat(64),
   };
@@ -2831,32 +2868,42 @@ async function scenarioPolicyPostalMask() {
   app.elementFor("policy-new").dispatch("click");
   for (const id of [
     "policy-input-email", "policy-input-phone", "policy-input-mykad", "policy-input-postal",
+    "policy-input-card", "policy-input-bank", "policy-input-passport",
     "policy-output-email", "policy-output-phone", "policy-output-mykad", "policy-output-postal",
+    "policy-output-card", "policy-output-bank", "policy-output-passport",
   ]) {
     assert(app.elementFor(id).checked === true,
       "a new profile must select every mask by default, including " + id);
   }
-  app.elementFor("policy-name").value = "Postal output only";
-  app.elementFor("policy-input-postal").checked = false;
+  app.elementFor("policy-name").value = "All masks";
   app.elementFor("policy-form").dispatch("submit");
   const create = app.lastMatching("/workspace/api/admin/policy/profiles");
   assert(create && create.options.method === "POST", "profile creation must POST");
   const payload = JSON.parse(create.options.body);
-  assert(payload.input_masks.indexOf("POSTAL_ADDRESS") < 0,
-    "an unchecked postal mask must stay off on input");
-  assert(payload.input_masks.indexOf("EMAIL") >= 0,
-    "the other selected input masks must still be saved");
-  assert(payload.output_masks.indexOf("POSTAL_ADDRESS") >= 0,
-    "postal masking must be independently selectable on output");
+  for (const mask of [
+    "EMAIL", "MY_PHONE", "MYKAD", "POSTAL_ADDRESS",
+    "CARD_NUMBER", "BANK_ACCOUNT", "PASSPORT",
+  ]) {
+    assert(payload.input_masks.indexOf(mask) >= 0,
+      "a new profile must save the default input mask " + mask);
+    assert(payload.output_masks.indexOf(mask) >= 0,
+      "a new profile must save the default output mask " + mask);
+  }
   const savedProfile = {
-    id: "profile-postal-output",
-    name: "Postal output only",
+    id: "profile-all-masks",
+    name: "All masks",
     revision: 1,
     settings: {
       input_check_enabled: true,
       output_check_enabled: true,
-      input_masks: ["EMAIL", "MY_PHONE", "MYKAD"],
-      output_masks: ["EMAIL", "MY_PHONE", "MYKAD", "POSTAL_ADDRESS"],
+      input_masks: [
+        "EMAIL", "MY_PHONE", "MYKAD", "POSTAL_ADDRESS",
+        "CARD_NUMBER", "BANK_ACCOUNT", "PASSPORT",
+      ],
+      output_masks: [
+        "EMAIL", "MY_PHONE", "MYKAD", "POSTAL_ADDRESS",
+        "CARD_NUMBER", "BANK_ACCOUNT", "PASSPORT",
+      ],
     },
     settings_digest: "d".repeat(64),
   };
@@ -2867,14 +2914,22 @@ async function scenarioPolicyPostalMask() {
   listRefresh.respond({ items: [savedProfile, legacyProfile], next: null }, 200);
   await settle();
   const listText = app.elementFor("policy-list").textContent;
-  assert(listText.indexOf("Postal output only") >= 0, "the saved profile must be listed");
-  const savedRow = findDataRow(app.elementFor("policy-list"), "data-policy", "profile-postal-output");
-  assert(savedRow && savedRow.textContent.indexOf("POSTAL_ADDRESS") >= 0,
-    "the profile list must show the postal mask honestly on output");
+  assert(listText.indexOf("All masks") >= 0, "the saved profile must be listed");
+  const savedRow = findDataRow(app.elementFor("policy-list"), "data-policy", "profile-all-masks");
+  assert(savedRow, "the saved profile row is missing");
   const masksCellText = savedRow.children[2].textContent;
-  assert(masksCellText.indexOf("Input: EMAIL, MY_PHONE, MYKAD") >= 0 &&
-    masksCellText.indexOf("Output: EMAIL, MY_PHONE, MYKAD, POSTAL_ADDRESS") >= 0,
-    "the profile list must show postal masking only on the output channel");
+  for (const mask of [
+    "EMAIL", "MY_PHONE", "MYKAD", "POSTAL_ADDRESS",
+    "CARD_NUMBER", "BANK_ACCOUNT", "PASSPORT",
+  ]) {
+    assert(masksCellText.indexOf(mask) >= 0,
+      "the profile list must summarise the " + mask + " mask");
+  }
+  assert(masksCellText.indexOf("Input: EMAIL, MY_PHONE, MYKAD, POSTAL_ADDRESS, " +
+    "CARD_NUMBER, BANK_ACCOUNT, PASSPORT") >= 0 &&
+    masksCellText.indexOf("Output: EMAIL, MY_PHONE, MYKAD, POSTAL_ADDRESS, " +
+    "CARD_NUMBER, BANK_ACCOUNT, PASSPORT") >= 0,
+    "the profile list must show all seven masks on both channels");
 
   const legacyRow = findDataRow(app.elementFor("policy-list"), "data-policy", "profile-legacy");
   findButton(legacyRow, "Edit").dispatch("click");
@@ -2882,9 +2937,13 @@ async function scenarioPolicyPostalMask() {
   assert(legacyGet, "editing must read the latest stored revision");
   legacyGet.respond(legacyProfile, 200);
   await settle();
-  assert(app.elementFor("policy-input-postal").checked === false &&
-    app.elementFor("policy-output-postal").checked === false,
-    "an existing profile that omits POSTAL_ADDRESS must not silently gain it in the editor");
+  for (const id of [
+    "policy-input-card", "policy-input-bank", "policy-input-passport",
+    "policy-output-card", "policy-output-bank", "policy-output-passport",
+  ]) {
+    assert(app.elementFor(id).checked === false,
+      "an existing profile that omits the new masks must not silently gain " + id);
+  }
   assert(app.elementFor("policy-input-email").checked === true &&
     app.elementFor("policy-output-phone").checked === true,
     "the editor must still reflect the masks the stored profile selected");
@@ -2893,9 +2952,11 @@ async function scenarioPolicyPostalMask() {
   assert(revise, "saving an edited profile must revise it");
   const revisePayload = JSON.parse(revise.options.body);
   assert(revisePayload.expected_revision === 1, "the pinned revision must be sent");
-  assert(revisePayload.input_masks.indexOf("POSTAL_ADDRESS") < 0 &&
-    revisePayload.output_masks.indexOf("POSTAL_ADDRESS") < 0,
-    "saving an untouched legacy profile must not add postal masking");
+  for (const mask of ["CARD_NUMBER", "BANK_ACCOUNT", "PASSPORT"]) {
+    assert(revisePayload.input_masks.indexOf(mask) < 0 &&
+      revisePayload.output_masks.indexOf(mask) < 0,
+      "saving an untouched legacy profile must not add the " + mask + " mask");
+  }
   revise.respond({ ...legacyProfile, revision: 2 }, 200);
   await settle();
   app.lastMatching("/workspace/api/admin/policy/profiles?limit=25").respond(
@@ -2914,22 +2975,25 @@ async function scenarioPolicyPostalMask() {
       input_check_enabled: true,
       output_check_enabled: true,
       input_masks: ["EMAIL"],
-      output_masks: ["POSTAL_ADDRESS"],
-      revision: "profile:profile-postal-output:1",
+      output_masks: [
+        "EMAIL", "MY_PHONE", "MYKAD", "POSTAL_ADDRESS",
+        "CARD_NUMBER", "BANK_ACCOUNT", "PASSPORT",
+      ],
+      revision: "profile:profile-all-masks:1",
       settings_digest: "d".repeat(64),
       source: {
         scope_type: "user",
         scope_id: "user-alice",
-        profile_id: "profile-postal-output",
-        profile_name: "Postal output only",
+        profile_id: "profile-all-masks",
+        profile_name: "All masks",
         revision: 1,
       },
       sources: [
         {
           scope_type: "user",
           scope_id: "user-alice",
-          profile_id: "profile-postal-output",
-          profile_name: "Postal output only",
+          profile_id: "profile-all-masks",
+          profile_name: "All masks",
           revision: 1,
         },
       ],
@@ -2947,12 +3011,17 @@ async function scenarioPolicyPostalMask() {
     (element) => String(element.className).split(" ").indexOf("effective-block") >= 0 &&
       element.getAttribute("data-stage") === "input"
   );
-  assert(outputBlock && collect(outputBlock).some(
-    (element) => element.textContent === "POSTAL_ADDRESS" &&
-      String(element.className).split(" ").indexOf("is-mask") >= 0
-  ), "the effective preview must show postal masking on output");
-  assert(inputBlock && inputBlock.textContent.indexOf("POSTAL_ADDRESS") < 0,
-    "the effective preview must not show postal masking on an input channel that omits it");
+  for (const mask of [
+    "POSTAL_ADDRESS", "CARD_NUMBER", "BANK_ACCOUNT", "PASSPORT",
+  ]) {
+    assert(outputBlock && collect(outputBlock).some(
+      (element) => element.textContent === mask &&
+        String(element.className).split(" ").indexOf("is-mask") >= 0
+    ), "the effective preview must show the " + mask + " mask on output");
+    assert(inputBlock && inputBlock.textContent.indexOf(mask) < 0,
+      "the effective preview must not show the " + mask +
+        " mask on an input channel that omits it");
+  }
 }
 
 async function scenarioPolicyLimits() {

@@ -715,6 +715,7 @@ button.danger:hover:not(:disabled) { background: #8f1d17; border-color: #8f1d17;
 .monitor-columns { grid-template-columns: minmax(0, 3fr) minmax(0, 2fr); gap: var(--space-5); }
 .monitor-side { display: grid; gap: var(--space-4); align-content: start; min-width: 0; }
 #live-traffic .cols-6 { grid-template-columns: minmax(130px, 1.5fr) repeat(4, minmax(72px, 1fr)) 96px; min-width: 620px; }
+#live-recent .cols-6 { grid-template-columns: 96px 110px repeat(3, minmax(72px, 1fr)) minmax(120px, 1.4fr); min-width: 720px; }
 #live-http .cols-7 { grid-template-columns: 96px 130px minmax(96px, .5fr) 64px minmax(200px, 1fr) 56px 72px; min-width: 800px; }
 #key-list .cols-7 { grid-template-columns: minmax(130px, 1.2fr) minmax(150px, 1.4fr) 90px 110px 80px 130px minmax(120px, .9fr); min-width: 980px; }
 #key-list .admin-table-head > div:nth-child(5) { text-align: right; }
@@ -934,6 +935,7 @@ _WORKSPACE_JS = """
   var settingsForm = byId("settings-form");
   var settingsPause = byId("settings-pause");
   var settingsPauseWarning = byId("settings-pause-warning");
+  var settingsThinkingWarning = byId("settings-thinking-warning");
   var settingsSharedKey = byId("settings-shared-key");
   var settingsInputCategories = byId("settings-input-categories");
   var settingsOutputCategories = byId("settings-output-categories");
@@ -1036,10 +1038,16 @@ _WORKSPACE_JS = """
   var policyInputPhone = byId("policy-input-phone");
   var policyInputMykad = byId("policy-input-mykad");
   var policyInputPostal = byId("policy-input-postal");
+  var policyInputCard = byId("policy-input-card");
+  var policyInputBank = byId("policy-input-bank");
+  var policyInputPassport = byId("policy-input-passport");
   var policyOutputEmail = byId("policy-output-email");
   var policyOutputPhone = byId("policy-output-phone");
   var policyOutputMykad = byId("policy-output-mykad");
   var policyOutputPostal = byId("policy-output-postal");
+  var policyOutputCard = byId("policy-output-card");
+  var policyOutputBank = byId("policy-output-bank");
+  var policyOutputPassport = byId("policy-output-passport");
   var policyDisabledNote = byId("policy-disabled-note");
   var policyLimitWarning = byId("policy-limit-warning");
   var policyLimitFields = [
@@ -1695,7 +1703,10 @@ _WORKSPACE_JS = """
         !Array.isArray(raw.input_masks) || !Array.isArray(raw.output_masks)) {
       return null;
     }
-    var allowed = { EMAIL: true, MY_PHONE: true, MYKAD: true, POSTAL_ADDRESS: true };
+    var allowed = {
+      EMAIL: true, MY_PHONE: true, MYKAD: true, POSTAL_ADDRESS: true,
+      CARD_NUMBER: true, BANK_ACCOUNT: true, PASSPORT: true
+    };
     var input = [];
     var output = [];
     var i;
@@ -1984,9 +1995,11 @@ _WORKSPACE_JS = """
   function syncPolicyFormNote() {
     var relaxed = !policyInputEnabled.checked || !policyOutputEnabled.checked ||
       !policyInputEmail.checked || !policyInputPhone.checked || !policyInputMykad.checked ||
-      !policyInputPostal.checked ||
+      !policyInputPostal.checked || !policyInputCard.checked || !policyInputBank.checked ||
+      !policyInputPassport.checked ||
       !policyOutputEmail.checked || !policyOutputPhone.checked || !policyOutputMykad.checked ||
-      !policyOutputPostal.checked;
+      !policyOutputPostal.checked || !policyOutputCard.checked || !policyOutputBank.checked ||
+      !policyOutputPassport.checked;
     policyDisabledNote.hidden = !relaxed;
   }
 
@@ -2022,8 +2035,8 @@ _WORKSPACE_JS = """
   }
 
   // A stored profile is applied exactly as saved.  Only a brand-new profile
-  // selects every mask by default, so editing an existing profile never adds
-  // postal-address masking that the administrator did not choose.
+  // selects every mask by default, so editing an existing profile never adds a
+  // mask type that the administrator did not choose.
   function storedMaskChecked(settings, field, mask) {
     return settings[field].indexOf(mask) >= 0;
   }
@@ -2042,6 +2055,12 @@ _WORKSPACE_JS = """
       ? storedMaskChecked(profile.settings, "input_masks", "MYKAD") : true;
     policyInputPostal.checked = profile
       ? storedMaskChecked(profile.settings, "input_masks", "POSTAL_ADDRESS") : true;
+    policyInputCard.checked = profile
+      ? storedMaskChecked(profile.settings, "input_masks", "CARD_NUMBER") : true;
+    policyInputBank.checked = profile
+      ? storedMaskChecked(profile.settings, "input_masks", "BANK_ACCOUNT") : true;
+    policyInputPassport.checked = profile
+      ? storedMaskChecked(profile.settings, "input_masks", "PASSPORT") : true;
     policyOutputEmail.checked = profile
       ? storedMaskChecked(profile.settings, "output_masks", "EMAIL") : true;
     policyOutputPhone.checked = profile
@@ -2050,6 +2069,12 @@ _WORKSPACE_JS = """
       ? storedMaskChecked(profile.settings, "output_masks", "MYKAD") : true;
     policyOutputPostal.checked = profile
       ? storedMaskChecked(profile.settings, "output_masks", "POSTAL_ADDRESS") : true;
+    policyOutputCard.checked = profile
+      ? storedMaskChecked(profile.settings, "output_masks", "CARD_NUMBER") : true;
+    policyOutputBank.checked = profile
+      ? storedMaskChecked(profile.settings, "output_masks", "BANK_ACCOUNT") : true;
+    policyOutputPassport.checked = profile
+      ? storedMaskChecked(profile.settings, "output_masks", "PASSPORT") : true;
     if (profile && positiveInteger(profile.settings.ceiling.context_messages)) {
       policyCeiling = profile.settings.ceiling;
     }
@@ -2066,8 +2091,8 @@ _WORKSPACE_JS = """
     policyCancel.disabled = false;
     setStatus(policyState, profile
       ? "Editing " + profile.name + " at revision " + profile.revision +
-        ". Unselected masks, including postal address, stay off unless you select them."
-      : "New profile. Input and output checks and all masks, including postal address, are selected by default.");
+        ". Unselected masks stay off unless you select them."
+      : "New profile. Input and output checks and all masks are selected by default.");
     syncPolicyFormNote();
     try { policyName.focus(); } catch (error) { /* non-fatal */ }
   }
@@ -2118,12 +2143,16 @@ _WORKSPACE_JS = """
     return true;
   }
 
-  function selectedPolicyMasks(emailNode, phoneNode, mykadNode, postalNode) {
+  function selectedPolicyMasks(emailNode, phoneNode, mykadNode, postalNode,
+      cardNode, bankNode, passportNode) {
     var masks = [];
     if (emailNode.checked) { masks.push("EMAIL"); }
     if (phoneNode.checked) { masks.push("MY_PHONE"); }
     if (mykadNode.checked) { masks.push("MYKAD"); }
     if (postalNode.checked) { masks.push("POSTAL_ADDRESS"); }
+    if (cardNode.checked) { masks.push("CARD_NUMBER"); }
+    if (bankNode.checked) { masks.push("BANK_ACCOUNT"); }
+    if (passportNode.checked) { masks.push("PASSPORT"); }
     return masks;
   }
 
@@ -2164,9 +2193,11 @@ _WORKSPACE_JS = """
       input_check_enabled: policyInputEnabled.checked,
       output_check_enabled: policyOutputEnabled.checked,
       input_masks: selectedPolicyMasks(
-        policyInputEmail, policyInputPhone, policyInputMykad, policyInputPostal),
+        policyInputEmail, policyInputPhone, policyInputMykad, policyInputPostal,
+        policyInputCard, policyInputBank, policyInputPassport),
       output_masks: selectedPolicyMasks(
-        policyOutputEmail, policyOutputPhone, policyOutputMykad, policyOutputPostal),
+        policyOutputEmail, policyOutputPhone, policyOutputMykad, policyOutputPostal,
+        policyOutputCard, policyOutputBank, policyOutputPassport),
       limits: limits
     };
     var path = "/workspace/api/admin/policy/profiles";
@@ -6504,6 +6535,7 @@ _WORKSPACE_JS = """
       appendSettingRow(limitLines[limitIndex].label, limitLines[limitIndex].value);
     }
     var operational = isObject(data.operational) ? data.operational : {};
+    settingsThinkingWarning.hidden = operational.thinking_disabled === true;
     for (var operationalKey in operational) {
       if (!Object.prototype.hasOwnProperty.call(operational, operationalKey)) { continue; }
       appendSettingRow("Operational · " + operationalKey, operational[operationalKey]);
@@ -6746,19 +6778,30 @@ _WORKSPACE_JS = """
       liveRecent.appendChild(empty);
       return;
     }
-    renderTableHead(liveRecent, ["Time", "Result", "Tokens", "Tokens/s", "Total"], 5);
+    renderTableHead(liveRecent, ["Time", "Result", "Tokens", "Tokens/s", "Total", "Guard category"], 6);
     for (var index = 0; index < recent.length; index += 1) {
       var item = recent[index];
       var row = document.createElement("div");
-      row.className = "admin-table-row cols-5";
+      row.className = "admin-table-row cols-6";
       row.appendChild(tableCell(formatClock(item.at), "cell-muted", "Time"));
       var result = tableCell(item.decision, "monitor-result is-" + item.decision, "Result");
       row.appendChild(result);
       row.appendChild(tableCell(monitorCount(item.reply_tokens), "cell-num", "Tokens"));
       row.appendChild(tableCell(monitorCount(item.tokens_per_second), "cell-num", "Tokens/s"));
       row.appendChild(tableCell(monitorSeconds(item.total_ms), "cell-num", "Total"));
+      row.appendChild(tableCell(guardCategoryText(item), "cell-muted", "Guard category"));
       liveRecent.appendChild(row);
     }
+  }
+
+  function guardCategoryText(item) {
+    var blocked = isObject(item) && Array.isArray(item.block_categories)
+      ? item.block_categories : [];
+    if (blocked.length) { return blocked.join(", "); }
+    var allowed = isObject(item) && Array.isArray(item.allowed_categories)
+      ? item.allowed_categories : [];
+    if (allowed.length) { return "Allowed: " + allowed.join(", "); }
+    return "–";
   }
 
   function appendTrafficEmpty(container) {
@@ -8088,6 +8131,7 @@ _WORKSPACE_JS = """
     settingsPause.checked = false;
     settingsSharedKey.checked = false;
     settingsPauseWarning.hidden = true;
+    settingsThinkingWarning.hidden = true;
     settingsReason.value = "";
     settingsSave.disabled = false;
     monitorPauseBanner.hidden = true;
@@ -8504,10 +8548,16 @@ _WORKSPACE_JS = """
   policyInputPhone.addEventListener("change", syncPolicyFormNote);
   policyInputMykad.addEventListener("change", syncPolicyFormNote);
   policyInputPostal.addEventListener("change", syncPolicyFormNote);
+  policyInputCard.addEventListener("change", syncPolicyFormNote);
+  policyInputBank.addEventListener("change", syncPolicyFormNote);
+  policyInputPassport.addEventListener("change", syncPolicyFormNote);
   policyOutputEmail.addEventListener("change", syncPolicyFormNote);
   policyOutputPhone.addEventListener("change", syncPolicyFormNote);
   policyOutputMykad.addEventListener("change", syncPolicyFormNote);
   policyOutputPostal.addEventListener("change", syncPolicyFormNote);
+  policyOutputCard.addEventListener("change", syncPolicyFormNote);
+  policyOutputBank.addEventListener("change", syncPolicyFormNote);
+  policyOutputPassport.addEventListener("change", syncPolicyFormNote);
   for (var limitIndex = 0; limitIndex < policyLimitFields.length; limitIndex += 1) {
     policyLimitFields[limitIndex].input.addEventListener("input", syncPolicyLimitWarning);
   }
@@ -9107,6 +9157,9 @@ WORKSPACE_HTML = """<!doctype html>
 <label for="policy-input-phone"><input id="policy-input-phone" type="checkbox" checked> Mask MY_PHONE</label>
 <label for="policy-input-mykad"><input id="policy-input-mykad" type="checkbox" checked> Mask MYKAD</label>
 <label for="policy-input-postal"><input id="policy-input-postal" type="checkbox" checked> Mask Postal address</label>
+<label for="policy-input-card"><input id="policy-input-card" type="checkbox" checked> Mask Card number</label>
+<label for="policy-input-bank"><input id="policy-input-bank" type="checkbox" checked> Mask Bank account</label>
+<label for="policy-input-passport"><input id="policy-input-passport" type="checkbox" checked> Mask Passport</label>
 </div>
 </fieldset>
 <fieldset>
@@ -9117,6 +9170,9 @@ WORKSPACE_HTML = """<!doctype html>
 <label for="policy-output-phone"><input id="policy-output-phone" type="checkbox" checked> Mask MY_PHONE</label>
 <label for="policy-output-mykad"><input id="policy-output-mykad" type="checkbox" checked> Mask MYKAD</label>
 <label for="policy-output-postal"><input id="policy-output-postal" type="checkbox" checked> Mask Postal address</label>
+<label for="policy-output-card"><input id="policy-output-card" type="checkbox" checked> Mask Card number</label>
+<label for="policy-output-bank"><input id="policy-output-bank" type="checkbox" checked> Mask Bank account</label>
+<label for="policy-output-passport"><input id="policy-output-passport" type="checkbox" checked> Mask Passport</label>
 </div>
 </fieldset>
 <fieldset>
@@ -9285,6 +9341,7 @@ WORKSPACE_HTML = """<!doctype html>
 <h3 id="settings-heading">Settings</h3>
 <button id="settings-refresh" class="ghost" type="button">Refresh settings</button>
 </div>
+<p id="settings-thinking-warning" class="admin-warning" role="alert" hidden>Model thinking is not turned off. Long answers can fail. Set NASI_LEMAK_GENERATION_ENABLE_THINKING=false on the server.</p>
 <p class="admin-note">Changes are recorded with a reason and can be rolled back. Model, guard and policy identity values stay read-only below.</p>
 <p id="admin-settings-state" class="admin-note" role="status" aria-live="polite"></p>
 <form id="settings-form" data-admin-write class="settings-form">

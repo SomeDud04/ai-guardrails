@@ -445,6 +445,145 @@ class SharedPiiSpanTests(unittest.TestCase):
             ["POSTAL_ADDRESS", "EMAIL", "MY_PHONE", "MYKAD"],
         )
 
+    def test_live_owasp_values_are_now_masked(self):
+        # 2 Nov 2026 live evidence: these three values reached the model raw.
+        cases = {
+            "+60 12-345 6789": "[MY_PHONE]",
+            "My synthetic passport is A12345678.":
+                "My synthetic passport is [PASSPORT].",
+            "My synthetic account is 5140123456789012.":
+                "My synthetic account is [BANK_ACCOUNT].",
+        }
+        for text, expected in cases.items():
+            with self.subTest(text=text):
+                self.assertEqual(mask_text(text), expected)
+                self.assertEqual(mask_pii(text), expected)
+
+    def test_card_numbers_require_a_full_luhn_valid_digit_run(self):
+        cases = {
+            "Card 4111 1111 1111 1111.": "Card [CARD_NUMBER].",
+            "Card 4111111111111111": "Card [CARD_NUMBER]",
+            "Card 3782 822463 10005": "Card [CARD_NUMBER]",
+            "pay with 5500-0000-0000-0004": "pay with [CARD_NUMBER]",
+            "Card 4222222222222": "Card [CARD_NUMBER]",
+            "Card 4000000000000000006": "Card [CARD_NUMBER]",
+        }
+        for text, expected in cases.items():
+            with self.subTest(text=text):
+                self.assertEqual(mask_text(text), expected)
+                self.assertEqual(mask_pii(text), expected)
+                self.assertEqual(
+                    [item.entity_type for item in find_redactions(text)],
+                    ["CARD_NUMBER"],
+                )
+
+        negatives = (
+            "Card 4111111111111112",          # Luhn-invalid 16 digits
+            "Card 41111111111111119999",      # valid prefix inside a longer run
+            "Card 4111 1111 1111 1111 9999",  # longer separator-joined run
+            "Card 4111.1111.1111.1111",       # dots are not accepted separators
+            "Card 1234567890123",             # 13 digits, Luhn-invalid
+        )
+        for text in negatives:
+            with self.subTest(text=text):
+                self.assertEqual(mask_text(text), text)
+                self.assertEqual(mask_pii(text), text)
+                self.assertEqual(find_redactions(text), [])
+
+    def test_labelled_bank_account_masks_only_the_number(self):
+        cases = {
+            "My synthetic account is 5140123456789012.":
+                "My synthetic account is [BANK_ACCOUNT].",
+            "Account No: 1234 5678": "Account No: [BANK_ACCOUNT]",
+            "A/C no. 1234-5678": "A/C no. [BANK_ACCOUNT]",
+            "akaun: 12345678": "akaun: [BANK_ACCOUNT]",
+            "bank account number 12345678901234567":
+                "bank account number [BANK_ACCOUNT]",
+            "account no is: 123456789": "account no is: [BANK_ACCOUNT]",
+        }
+        for text, expected in cases.items():
+            with self.subTest(text=text):
+                self.assertEqual(mask_text(text), expected)
+                self.assertEqual(mask_pii(text), expected)
+                self.assertEqual(
+                    [item.entity_type for item in find_redactions(text)],
+                    ["BANK_ACCOUNT"],
+                )
+
+        text = "My synthetic account is 5140123456789012."
+        self.assertEqual(
+            [(item.entity_type, text[item.start:item.end])
+             for item in find_redactions(text)],
+            [("BANK_ACCOUNT", "5140123456789012")],
+        )
+
+    def test_unlabelled_or_out_of_range_bank_values_stay_raw(self):
+        cases = (
+            "unlabelled 12345678 stays raw",
+            "account is 1234567",              # 7 digits, too short
+            "account 123456789012345678",      # 18 digits, too long
+            "accounting is 12345678",          # not an accepted label
+        )
+        for text in cases:
+            with self.subTest(text=text):
+                self.assertEqual(mask_text(text), text)
+                self.assertEqual(find_redactions(text), [])
+
+    def test_labelled_passport_masks_only_the_value(self):
+        cases = {
+            "My synthetic passport is A12345678.":
+                "My synthetic passport is [PASSPORT].",
+            "Passport No: AB123456": "Passport No: [PASSPORT]",
+            "pasport is A123456": "pasport is [PASSPORT]",
+            "passport no. AB123456789": "passport no. [PASSPORT]",
+        }
+        for text, expected in cases.items():
+            with self.subTest(text=text):
+                self.assertEqual(mask_text(text), expected)
+                self.assertEqual(mask_pii(text), expected)
+                self.assertEqual(
+                    [item.entity_type for item in find_redactions(text)],
+                    ["PASSPORT"],
+                )
+
+        text = "My synthetic passport is A12345678."
+        self.assertEqual(
+            [(item.entity_type, text[item.start:item.end])
+             for item in find_redactions(text)],
+            [("PASSPORT", "A12345678")],
+        )
+
+    def test_unlabelled_or_malformed_passport_values_stay_raw(self):
+        cases = (
+            "unlabelled A12345678 stays raw",
+            "INV-0312345678",
+            "passport is A12345",             # 5 digits, too short
+            "passport is A1234567890",        # 10 digits, too long
+            "passport is ABC123456",          # three letters
+        )
+        for text in cases:
+            with self.subTest(text=text):
+                self.assertEqual(mask_text(text), text)
+                self.assertEqual(find_redactions(text), [])
+
+    def test_new_entity_types_can_be_selected_independently(self):
+        card = "Card 4111 1111 1111 1111"
+        bank = "account 12345678"
+        passport = "passport A123456"
+        existing = ("EMAIL", "MY_PHONE", "MYKAD", "POSTAL_ADDRESS")
+        self.assertEqual(mask_text(card, ("CARD_NUMBER",)), "Card [CARD_NUMBER]")
+        self.assertEqual(mask_text(bank, ("BANK_ACCOUNT",)), "account [BANK_ACCOUNT]")
+        self.assertEqual(mask_text(passport, ("PASSPORT",)), "passport [PASSPORT]")
+        for text, expected in (
+            (card, "Card [CARD_NUMBER]"),
+            (bank, "account [BANK_ACCOUNT]"),
+            (passport, "passport [PASSPORT]"),
+        ):
+            with self.subTest(text=text):
+                self.assertEqual(mask_text(text), expected)
+                self.assertEqual(mask_text(text, existing), text)
+        self.assertEqual(mask_text(card, ()), card)
+
 
 if __name__ == "__main__":
     unittest.main()

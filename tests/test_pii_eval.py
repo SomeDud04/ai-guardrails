@@ -174,7 +174,14 @@ class PiiGateAggregationTests(unittest.TestCase):
         self.assertEqual(report["gates"]["applicable_entities"], ["EMAIL"])
         self.assertEqual(
             report["gates"]["not_applicable_entities"],
-            ["MY_PHONE", "MYKAD", "POSTAL_ADDRESS"],
+            [
+                "MY_PHONE",
+                "MYKAD",
+                "POSTAL_ADDRESS",
+                "CARD_NUMBER",
+                "BANK_ACCOUNT",
+                "PASSPORT",
+            ],
         )
         self.assertTrue(report["gates"]["overall_pass"])
         self.assertEqual(report["gates"]["overall_status"], "pass")
@@ -222,7 +229,14 @@ class PiiGateAggregationTests(unittest.TestCase):
             report["gates"]["applicable_entities"], ["EMAIL", "MYKAD"]
         )
         self.assertEqual(
-            report["gates"]["not_applicable_entities"], ["MY_PHONE", "POSTAL_ADDRESS"]
+            report["gates"]["not_applicable_entities"],
+            [
+                "MY_PHONE",
+                "POSTAL_ADDRESS",
+                "CARD_NUMBER",
+                "BANK_ACCOUNT",
+                "PASSPORT",
+            ],
         )
         self.assertEqual(report["gates"]["overall_status"], "fail")
         self.assertFalse(report["gates"]["overall_pass"])
@@ -275,7 +289,7 @@ class PiiFixtureValidationTests(unittest.TestCase):
         variants.append(("bool offset", [boolean]))
 
         wrong_type = json.loads(json.dumps(base))
-        wrong_type["gold"][0]["type"] = "PASSPORT"
+        wrong_type["gold"][0]["type"] = "DRIVER_LICENCE"
         variants.append(("unsupported type", [wrong_type]))
 
         duplicate = json.loads(json.dumps(base))
@@ -738,7 +752,10 @@ class PiiCliTests(unittest.TestCase):
             for entity_type, result in report["per_entity"].items():
                 if result["gate_applicable"]:
                     self.assertEqual((result["precision"], result["recall"]), (1.0, 1.0), entity_type)
-            self.assertEqual(report["gates"]["not_applicable_entities"], ["POSTAL_ADDRESS"])
+            self.assertEqual(
+                report["gates"]["not_applicable_entities"],
+                ["POSTAL_ADDRESS", "CARD_NUMBER", "BANK_ACCOUNT", "PASSPORT"],
+            )
 
     def test_malformed_fixture_exits_two_without_raw_text(self):
         with tempfile.TemporaryDirectory(dir=Path(__file__).parent) as tmp:

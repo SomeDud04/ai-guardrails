@@ -169,8 +169,9 @@ the production recognizer has no field context. Excluding them or changing
 thresholds would manufacture a pass and is not permitted. The v1
 `EV-EMAIL-014` annotation is documented in
 [`label-adjudication.md`](../evals/pii/reviewed-labels-v2/label-adjudication.md);
-it is a label defect, not a v2 false positive. Passport numbers and bank account
-numbers are **not implemented and not evaluated** in this slice.
+it is a label defect, not a v2 false positive. The frozen corpora contain no
+card, bank-account or passport gold, so those new recognisers are implemented
+but not scored in this slice.
 
 ## Caller-review edge evidence (separate root)
 
@@ -235,15 +236,40 @@ unseen evidence and not an independent hold-out set.
   labelled development cases; they must not be tuned against this evaluation
   split.
 
+## Additional structured formats (2 November 2026)
+
+The live OWASP run let four more shapes reach the model. They are now masked by
+`nasi_lemak/pii.py`:
+
+- `CARD_NUMBER` (`[CARD_NUMBER]`): 13-19 ASCII digits, contiguous or grouped by
+  single spaces/hyphens, accepted only when the Luhn checksum passes. A span
+  inside a longer digit run is not partially masked.
+- `BANK_ACCOUNT` (`[BANK_ACCOUNT]`): a case-insensitive `account`, `acct`,
+  `acc`, `a/c`, `akaun` or `bank account` label, up to three filler tokens
+  (`no`, `no.`, `number`, `#`, `is`, `:`), then 8-17 digits that may contain
+  single spaces/hyphens. Only the digits are masked; the label stays.
+- `PASSPORT` (`[PASSPORT]`): a `passport`/`pasport` label with the same filler
+  tokens, then one or two ASCII letters and 6-9 digits. Only the value is
+  masked.
+- `MY_PHONE` accepts a space or dash after `+60`/`60`, so the reported
+  `+60 12-345 6789` form is masked.
+
+Limits: these are format heuristics. Unlabelled bank/passport values stay raw,
+so unlabelled letter-plus-digit order/product codes are not masked. A
+Luhn-valid number is masked even when it is not a real card. The frozen
+evaluation corpora predate these types and contain no gold for them, so no
+quality metric is claimed for card, bank-account or passport recognition.
+
 ## Limits
 
 - Agent-authored synthetic fixtures can encode the same expectations as the
   implementation. They are not independent review.
 - No native classifier, pretrained guard weights or English semantic quality
   was executed here. See [language-support.md](language-support.md).
-- The evaluator measures the three structured recognizers only. It does not
-  measure passport/bank coverage, free-text identity leakage, retrieval stores,
-  logs, traces, backups or provider-side retention.
+- The frozen evaluator corpora contain gold for EMAIL, MY_PHONE and MYKAD only;
+  the card, bank-account and passport recognisers are implemented but not
+  measured here. It also does not measure free-text identity leakage, retrieval
+  stores, logs, traces, backups or provider-side retention.
 - This is an offline quality gate. An evaluation failure does not disable the
   runtime gateway and is not a production incident signal.
 

@@ -11,6 +11,12 @@ phone groupings, but they do not validate identity documents, phone
 reachability or email deliverability, and they do not detect semantic PII in
 free text.
 
+``CARD_NUMBER`` recognises 13-19 digit payment-card candidates only when the
+Luhn checksum passes.  ``BANK_ACCOUNT`` and ``PASSPORT`` require an explicit
+account/passport label and mask only the value, never the label.  These are
+format heuristics: unlabelled bank/passport values stay raw, and a Luhn-valid
+number is masked even when it is not a real card.
+
 ``POSTAL_ADDRESS`` recognises two bounded Malaysian single-line address shapes.
 The first requires a house/unit number, a Jalan/Jln, Lorong/Lrg, Persiaran or
 similar street keyword, a capitalised street name and a five-digit postcode,
@@ -26,13 +32,24 @@ from __future__ import annotations
 import re
 from typing import NamedTuple
 
-ENTITY_TYPES = ("EMAIL", "MY_PHONE", "MYKAD", "POSTAL_ADDRESS")
+ENTITY_TYPES = (
+    "EMAIL",
+    "MY_PHONE",
+    "MYKAD",
+    "POSTAL_ADDRESS",
+    "CARD_NUMBER",
+    "BANK_ACCOUNT",
+    "PASSPORT",
+)
 
 MASK_TOKENS = {
     "EMAIL": "[EMAIL]",
     "MY_PHONE": "[MY_PHONE]",
     "MYKAD": "[MYKAD]",
     "POSTAL_ADDRESS": "[POSTAL_ADDRESS]",
+    "CARD_NUMBER": "[CARD_NUMBER]",
+    "BANK_ACCOUNT": "[BANK_ACCOUNT]",
+    "PASSPORT": "[PASSPORT]",
 }
 
 # Preserved literals and order from the original gateway implementation.
@@ -115,15 +132,73 @@ _LABELLED_ADDRESS = re.compile(
     rf"(?![\w])(?!\s*,?\s*\d{{5}}(?!\d))"
 )
 
+# Payment-card candidates: 13-19 ASCII digits, contiguous or grouped by single
+# spaces/hyphens.  The surrounding lookarounds reject any span that is only part
+# of a longer digit run, including one joined by a separator.  Candidates are
+# kept only when the Luhn checksum passes.
+_CARD_CANDIDATE = re.compile(
+    r"(?<![0-9])(?<![0-9][ -])(?:[0-9][ -]?){12,18}[0-9](?![ -]?[0-9])"
+)
+
+
+def _luhn_valid(value: str) -> bool:
+    """Return whether a digit/space/hyphen value passes the Luhn checksum."""
+
+    total = 0
+    digits = value.replace(" ", "").replace("-", "")
+    for index, char in enumerate(reversed(digits)):
+        digit = ord(char) - ord("0")
+        if index % 2:
+            digit *= 2
+            if digit > 9:
+                digit -= 9
+        total += digit
+    return total % 10 == 0
+
+
+class _LuhnPattern:
+    """Regex wrapper that yields only matches whose text passes Luhn."""
+
+    def __init__(self, pattern: re.Pattern[str]) -> None:
+        self._pattern = pattern
+
+    def finditer(self, text: str):
+        for match in self._pattern.finditer(text):
+            if _luhn_valid(match.group(0)):
+                yield match
+
+
+_CARD = _LuhnPattern(_CARD_CANDIDATE)
+
+# Labelled account/passport values.  A label may be followed by up to three
+# filler tokens (``no``/``no.``/``number``/``#``/``is``/``:``) before the value.
+# Only the value is captured, so the label and punctuation stay in the output.
+_LABEL_FILLER = r"(?:\s*(?:(?i:no\.?|number|is)|[#:])){0,3}"
+
+_BANK_ACCOUNT = re.compile(
+    rf"(?<![\w])(?i:bank\s+account|account|acct|acc|a/c|akaun)(?![\w])"
+    rf"{_LABEL_FILLER}\s*"
+    rf"(?P<bank>[0-9](?:[ -]?[0-9]){{7,16}})(?![ -]?[0-9])"
+)
+
+_PASSPORT = re.compile(
+    rf"(?<![\w])(?i:passport|pasport)(?![\w])"
+    rf"{_LABEL_FILLER}\s*"
+    rf"(?P<passport>[A-Za-z]{{1,2}}[0-9]{{6,9}})(?![0-9A-Za-z])"
+)
+
 # (entity type, compiled pattern, group holding the exact span).  Most
-# recognizers match the whole pattern; the labelled address masks only its
-# body so the label survives.
+# recognizers match the whole pattern; the labelled address, bank account and
+# passport mask only their value group so the label survives.
 _RECOGNIZERS = (
     ("EMAIL", _EMAIL, 0),
+    ("CARD_NUMBER", _CARD, 0),
     ("MY_PHONE", _PHONE, 0),
     ("MYKAD", _MYKAD, 0),
     ("POSTAL_ADDRESS", _POSTAL_ADDRESS, 0),
     ("POSTAL_ADDRESS", _LABELLED_ADDRESS, 1),
+    ("BANK_ACCOUNT", _BANK_ACCOUNT, "bank"),
+    ("PASSPORT", _PASSPORT, "passport"),
 )
 
 
@@ -154,11 +229,11 @@ def find_redactions(
 ) -> list[Redaction]:
     """Return production redaction spans in original-text coordinates.
 
-    The recognizers run in the same order as ``mask_text`` (email, phone,
-    MyKad, postal address with postcode, labelled postal address without
-    postcode).  Earlier replacements become mask tokens, which contain no
-    characters the later recognizers match, so later spans still lie in
-    untouched regions.
+    The recognizers run in the same order as ``mask_text`` (email, card number,
+    phone, MyKad, postal address with postcode, labelled postal address without
+    postcode, labelled bank account, labelled passport).  Earlier replacements
+    become mask tokens, which contain no characters the later recognizers match,
+    so later spans still lie in untouched regions.
     ``entity_types`` optionally narrows the recognizers for an explicit
     administrator-selected mask policy; ``None`` preserves the original
     all-recognizer behaviour.
@@ -199,8 +274,8 @@ def mask_text(
 ) -> str:
     """Replace every detected span with its fixed placeholder.
 
-    ``entity_types`` is optional and defaults to all four recognizers.  An
-    empty selection is a deliberate no-op.
+    ``entity_types`` is optional and defaults to all recognizers.  An empty
+    selection is a deliberate no-op.
     """
 
     pieces: list[str] = []

@@ -140,13 +140,25 @@ class WorkspacePageHTTPTests(WorkspaceHTTPBase):
         self.assertIn("#workspace-view {", html)
         self.assertIn("flex-direction: column;", html)
 
-    def test_policy_form_exposes_independent_postal_mask_checkboxes(self) -> None:
+    def test_policy_form_exposes_independent_mask_checkboxes(self) -> None:
         html = self._page().text
-        for control in ("policy-input-postal", "policy-output-postal"):
+        for control in (
+            "policy-input-postal",
+            "policy-output-postal",
+            "policy-input-card",
+            "policy-output-card",
+            "policy-input-bank",
+            "policy-output-bank",
+            "policy-input-passport",
+            "policy-output-passport",
+        ):
             self.assertRegex(
                 html, rf'<input id="{control}" type="checkbox" checked>'
             )
         self.assertEqual(html.count("Mask Postal address"), 2)
+        self.assertEqual(html.count("Mask Card number"), 2)
+        self.assertEqual(html.count("Mask Bank account"), 2)
+        self.assertEqual(html.count("Mask Passport"), 2)
         self.assertIn("Postal address masking recognises", html)
         self.assertIn(
             "A numbered street address that follows an explicit Address: or "
@@ -155,6 +167,19 @@ class WorkspacePageHTTPTests(WorkspaceHTTPBase):
         )
         self.assertIn("bounded ASCII Malaysian single-line address shape", html)
         self.assertIn("each direction is selected independently", html)
+
+    def test_settings_panel_warns_when_model_thinking_is_not_disabled(self) -> None:
+        html = self._page().text
+        self.assertRegex(
+            html,
+            r'<p id="settings-thinking-warning" class="admin-warning" '
+            r'role="alert" hidden>',
+        )
+        self.assertIn(
+            "Model thinking is not turned off. Long answers can fail. Set "
+            "NASI_LEMAK_GENERATION_ENABLE_THINKING=false on the server.",
+            html,
+        )
 
     def test_policy_form_exposes_the_four_chat_limit_fields(self) -> None:
         html = self._page().text
