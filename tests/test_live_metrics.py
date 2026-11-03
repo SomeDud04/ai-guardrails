@@ -168,6 +168,17 @@ class LiveMetricsTests(unittest.TestCase):
         self.assertEqual(row["block_categories"], [])
         self.assertEqual(row["allowed_categories"], [])
 
+    def test_a_block_source_is_copied_into_the_sample(self) -> None:
+        self.finish(status=403, block_source="deny_phrase_input")
+        row = self.metrics.snapshot()["recent"][0]
+        self.assertEqual(row["block_source"], "deny_phrase_input")
+
+    def test_a_missing_or_non_string_block_source_is_none(self) -> None:
+        self.finish()
+        self.assertIsNone(self.metrics.snapshot()["recent"][0]["block_source"])
+        self.finish(status=413, block_source=7)
+        self.assertIsNone(self.metrics.snapshot()["recent"][0]["block_source"])
+
 
 if __name__ == "__main__":
     unittest.main()

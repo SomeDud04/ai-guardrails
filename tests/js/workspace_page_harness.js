@@ -1472,6 +1472,30 @@ async function respondMonitor(app, settingsOverrides) {
           tokens_per_second: 10,
           request_id: "req_abcdef1234567890",
         },
+        {
+          at: 1700000003,
+          decision: "blocked",
+          total_ms: 300,
+          reply_tokens: 0,
+          tokens_per_second: 0,
+          block_source: "deny_phrase_input",
+        },
+        {
+          at: 1700000004,
+          decision: "blocked",
+          total_ms: 200,
+          reply_tokens: 0,
+          tokens_per_second: 0,
+          block_source: "size_limit",
+        },
+        {
+          at: 1700000005,
+          decision: "blocked",
+          total_ms: 400,
+          reply_tokens: 0,
+          tokens_per_second: 0,
+          block_source: "deny_phrase_output",
+        },
       ],
     },
     200
@@ -1547,19 +1571,25 @@ async function scenarioAdmin() {
     "time per stage must render");
   assert(app.elementFor("live-recent").textContent.indexOf("340") >= 0,
     "the latest requests must render");
-  assert(app.elementFor("live-recent").textContent.indexOf("Guard category") >= 0,
-    "the latest requests must label the guard category column");
+  assert(app.elementFor("live-recent").textContent.indexOf("Stopped by") >= 0,
+    "the latest requests must label the stopped-by column");
   const guardCategoryCells = collect(app.elementFor("live-recent")).filter(
-    (element) => element.getAttribute("data-label") === "Guard category"
+    (element) => element.getAttribute("data-label") === "Stopped by"
   );
-  assert(guardCategoryCells.length === 3,
-    "every recent request must render one guard category cell");
+  assert(guardCategoryCells.length === 6,
+    "every recent request must render one stopped-by cell");
   assert(guardCategoryCells[0].textContent === "Allowed: Safe chat",
     "allowed request categories must render as an allowed list");
   assert(guardCategoryCells[1].textContent === "PII, Jailbreak",
     "blocked request categories must be joined with commas");
   assert(guardCategoryCells[2].textContent === "–",
-    "a request with no category data must render a dash");
+    "a request with no category or source data must render a dash");
+  assert(guardCategoryCells[3].textContent === "Deny phrase",
+    "a deny-phrase block must say what stopped it");
+  assert(guardCategoryCells[4].textContent === "Size limit",
+    "an over-limit request must say what stopped it");
+  assert(guardCategoryCells[5].textContent === "Deny phrase (reply)",
+    "a deny-phrase reply block must say what stopped it");
   const recentTimeCells = collect(app.elementFor("live-recent")).filter(
     (element) => element.getAttribute("data-label") === "Time"
   );
@@ -1569,7 +1599,7 @@ async function scenarioAdmin() {
   const recentRequestCells = collect(app.elementFor("live-recent")).filter(
     (element) => element.getAttribute("data-label") === "Request"
   );
-  assert(recentRequestCells.length === 3,
+  assert(recentRequestCells.length === 6,
     "every recent request must render one request cell");
   assert(recentRequestCells[0].textContent === "text-1",
     "the request cell must drop the req_ prefix");

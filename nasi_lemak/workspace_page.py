@@ -6785,7 +6785,7 @@ _WORKSPACE_JS = """
       liveRecent.appendChild(empty);
       return;
     }
-    renderTableHead(liveRecent, ["Time", "Request", "Result", "Tokens", "Tokens/s", "Total", "Guard category"], 7);
+    renderTableHead(liveRecent, ["Time", "Request", "Result", "Tokens", "Tokens/s", "Total", "Stopped by"], 7);
     for (var index = 0; index < recent.length; index += 1) {
       var item = recent[index];
       var row = document.createElement("div");
@@ -6798,7 +6798,7 @@ _WORKSPACE_JS = """
       row.appendChild(tableCell(monitorCount(item.reply_tokens), "cell-num", "Tokens"));
       row.appendChild(tableCell(monitorCount(item.tokens_per_second), "cell-num", "Tokens/s"));
       row.appendChild(tableCell(monitorSeconds(item.total_ms), "cell-num", "Total"));
-      row.appendChild(tableCell(guardCategoryText(item), "cell-muted", "Guard category"));
+      row.appendChild(tableCell(guardCategoryText(item), "cell-muted", "Stopped by"));
       liveRecent.appendChild(row);
     }
   }
@@ -6810,6 +6810,10 @@ _WORKSPACE_JS = """
     var allowed = isObject(item) && Array.isArray(item.allowed_categories)
       ? item.allowed_categories : [];
     if (allowed.length) { return "Allowed: " + allowed.join(", "); }
+    var blockSource = isObject(item) ? item.block_source : null;
+    if (blockSource === "deny_phrase_input") { return "Deny phrase"; }
+    if (blockSource === "deny_phrase_output") { return "Deny phrase (reply)"; }
+    if (blockSource === "size_limit") { return "Size limit"; }
     return "–";
   }
 

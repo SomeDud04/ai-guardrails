@@ -836,6 +836,7 @@ class Gateway:
                 _audit_sink("request_blocked", "blocked", "INPUT_LIMIT")
             except Exception:
                 return self._error(503, "UNAVAILABLE", request_id)
+            timing["block_source"] = "size_limit"
             return self._error(413, "INPUT_LIMIT", request_id)
         except Exception:
             self._terminal_best_effort(
@@ -847,6 +848,7 @@ class Gateway:
                 _audit_sink("request_blocked", "blocked", "INPUT_LIMIT")
             except Exception:
                 return self._error(503, "UNAVAILABLE", request_id)
+            timing["block_source"] = "size_limit"
             return self._error(413, "INPUT_LIMIT", request_id)
         # Track the current pipeline stage so a generic failure is labelled with
         # the step that raised it.  Only fixed vocabulary values are stored.
@@ -873,6 +875,7 @@ class Gateway:
                 ):
                     categories = _known_categories(result)
                     timing["block_categories"] = categories
+                    timing["block_source"] = "guard"
                     LOGGER.warning(
                         "request_blocked request_id=%s stage=%s categories=%s",
                         request_id,
@@ -894,6 +897,7 @@ class Gateway:
             # disables this server-side policy control.
             if any(self._denied(message["content"]) for message in messages):
                 _audit_sink("request_blocked", "blocked", "POLICY_BLOCK")
+                timing["block_source"] = "deny_phrase_input"
                 return self._blocked(request_id, "INPUT_POLICY_BLOCK")
             # A cancelled/deadlined workspace request must not launch new
             # inference after a successful scan.
@@ -939,6 +943,7 @@ class Gateway:
                 _audit_sink("request_blocked", "blocked", "INPUT_LIMIT")
             except Exception:
                 return self._error(503, "UNAVAILABLE", request_id)
+            timing["block_source"] = "size_limit"
             return self._error(413, "INPUT_LIMIT", request_id)
         except Exception:
             self._terminal_best_effort(
@@ -975,6 +980,7 @@ class Gateway:
                 if not safe:
                     categories = _known_categories(result)
                     timing["block_categories"] = categories
+                    timing["block_source"] = "guard"
                     LOGGER.warning(
                         "request_blocked request_id=%s stage=%s categories=%s",
                         request_id,
@@ -988,6 +994,7 @@ class Gateway:
             # policy deny list.
             if self._denied(output):
                 _audit_sink("request_blocked", "blocked", "POLICY_BLOCK")
+                timing["block_source"] = "deny_phrase_output"
                 return self._blocked(request_id, "OUTPUT_POLICY_BLOCK")
             masked_output = mask_pii(output, control.output_masks)
             _sink("output_masked", masked_output != output)

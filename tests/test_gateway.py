@@ -125,9 +125,11 @@ class GatewayTests(unittest.TestCase):
                 self.assertEqual(self.call(body)[0], 400)
 
     def test_oversized_character_budget_returns_input_limit(self):
-        status, body = self.call(request([{"role": "user", "content": "x" * 8193}]))
+        status, body = self.call(request([{"role": "user", "content": "界" * 4000}]))
         self.assertEqual(status, 413)
         self.assertEqual(body["error"]["code"], "INPUT_LIMIT")
+        sample = self.gateway.metrics.snapshot()["recent"][0]
+        self.assertEqual(sample["block_source"], "size_limit")
 
     def test_exact_token_coverage_is_required(self):
         self.adapters.token_count = lambda _messages: 99
@@ -136,6 +138,9 @@ class GatewayTests(unittest.TestCase):
         self.assertEqual(status, 413)
         self.assertEqual(result["error"]["code"], "INPUT_LIMIT")
         self.assertEqual([e["event_type"] for e in gateway.audit_events()], ["request_started", "request_blocked"])
+        self.assertEqual(
+            gateway.metrics.snapshot()["recent"][0]["block_source"], "size_limit"
+        )
 
     def test_bad_token_counter_results_fail_closed(self):
         for invalid_count in (True, -1, "unknown", None):
@@ -249,6 +254,44 @@ class GatewayTests(unittest.TestCase):
         sample = self.gateway.metrics.snapshot()["recent"][0]
         self.assertEqual(sample["block_categories"], ["PII", "Jailbreak"])
         self.assertEqual(sample["allowed_categories"], [])
+        self.assertEqual(sample["block_source"], "guard")
+
+    def test_a_deny_phrase_input_block_records_the_stop_source(self):
+        gateway = Gateway(
+            self.key,
+            Path(self.tmp.name) / "deny-input.sqlite3",
+            self.adapters,
+            Policy(deny_phrases=("forbidden phrase",)),
+        )
+        status, _ = gateway.handle(
+            "POST",
+            "/v1/chat/completions",
+            {"Authorization": "Bearer " + self.key},
+            request([{"role": "user", "content": "a forbidden phrase here"}]),
+        )
+        self.assertEqual(status, 403)
+        sample = gateway.metrics.snapshot()["recent"][0]
+        self.assertEqual(sample["block_source"], "deny_phrase_input")
+        self.assertEqual(sample["block_categories"], [])
+
+    def test_a_deny_phrase_output_block_records_the_stop_source(self):
+        gateway = Gateway(
+            self.key,
+            Path(self.tmp.name) / "deny-output.sqlite3",
+            self.adapters,
+            Policy(deny_phrases=("forbidden answer",)),
+        )
+        self.adapters.generated = "forbidden answer"
+        status, _ = gateway.handle(
+            "POST",
+            "/v1/chat/completions",
+            {"Authorization": "Bearer " + self.key},
+            request(),
+        )
+        self.assertEqual(status, 403)
+        sample = gateway.metrics.snapshot()["recent"][0]
+        self.assertEqual(sample["block_source"], "deny_phrase_output")
+        self.assertEqual(sample["block_categories"], [])
 
     def test_allowed_input_block_records_categories_without_a_block(self):
         self._allow(input_allow_categories=("PII",))

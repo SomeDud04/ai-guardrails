@@ -104,6 +104,7 @@ class LiveMetrics:
                 return
             finished_at = self._clock()
             request_id = timing.get("request_id")
+            block_source = timing.get("block_source")
             decision = (
                 "allowed" if status == 200
                 else "blocked" if status in (403, 413)
@@ -123,6 +124,7 @@ class LiveMetrics:
                     "reply_tokens": timing.get("reply_tokens"),
                     "block_categories": list(timing.get("block_categories") or []),
                     "allowed_categories": list(timing.get("allowed_categories") or []),
+                    "block_source": block_source if isinstance(block_source, str) else None,
                 }
             )
 
