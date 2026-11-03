@@ -473,8 +473,11 @@ Each schema change makes the new gateway refuse an older database. Stop the gate
 take a backup, run `workspace_cli init` with the migration DSN as the default UID
 10001, reapply `workspace_roles.sql`, then start the gateway. Schema 6 added key owners
 and saved settings, and each existing key's owner became whoever generated it. Schema
-7 adds the auditor role, and no existing account becomes an auditor.
-`scripts/rehearse_schema_v7.sh` runs all of this on a throwaway copy of the live
+7 adds the auditor role, and no existing account becomes an auditor. Schema 8 keeps,
+for each API key request, the figures Monitor shows (reply tokens, tokens per second,
+total time and what stopped it), so the key's history matches Monitor and survives a
+restart; requests from before the upgrade show "–" in those columns.
+`scripts/rehearse_schema_v8.sh` runs all of this on a throwaway copy of the live
 database first. To go back, restore the pre-migration backup.
 
 ## Transcript retention

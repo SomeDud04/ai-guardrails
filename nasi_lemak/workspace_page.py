@@ -720,7 +720,7 @@ button.danger:hover:not(:disabled) { background: #8f1d17; border-color: #8f1d17;
 #key-list .cols-7 { grid-template-columns: minmax(130px, 1.2fr) minmax(150px, 1.4fr) 90px 110px 80px 130px minmax(120px, .9fr); min-width: 980px; }
 #key-list .admin-table-head > div:nth-child(5) { text-align: right; }
 #key-list .admin-confirm { grid-column: 1 / -1; }
-#key-history .cols-6 { grid-template-columns: 140px 110px minmax(120px, 1fr) 90px 90px 70px; min-width: 640px; }
+#key-history .cols-10 { grid-template-columns: 140px 110px minmax(120px, 1fr) 90px repeat(3, minmax(72px, 1fr)) minmax(120px, 1.4fr) 90px 70px; min-width: 980px; }
 .key-details { display: grid; gap: var(--space-3); margin-top: var(--space-4); padding-top: var(--space-3); border-top: 1px solid var(--line); }
 .key-details-head { display: flex; flex-wrap: wrap; align-items: center; justify-content: space-between; gap: var(--space-2); }
 .key-details-head h3, .key-details h4 { margin: 0; }
@@ -5816,7 +5816,10 @@ _WORKSPACE_JS = """
   function renderKeyHistory(items, reset) {
     if (reset) {
       clearNode(keyHistory);
-      renderTableHead(keyHistory, ["Time", "Request", "IP address", "Result", "Code", "Text"], 6);
+      renderTableHead(keyHistory, [
+        "Time", "Request", "IP address", "Result", "Tokens", "Tokens/s", "Total",
+        "Stopped by", "Code", "Text"
+      ], 10);
     }
     if (reset && items.length === 0) {
       appendEmpty(keyHistory, "No requests have been recorded for this key.");
@@ -5825,7 +5828,7 @@ _WORKSPACE_JS = """
       var request = items[index];
       if (!isObject(request) || typeof request.request_id !== "string") { continue; }
       var row = document.createElement("div");
-      row.className = "admin-table-row cols-6";
+      row.className = "admin-table-row cols-10";
       row.setAttribute("data-request", request.request_id);
       row.appendChild(tableCell(formatDate(request.created_at), "cell-muted", "Time"));
       row.appendChild(tableCell(shortRequestId(request.request_id), "cell-muted", "Request"));
@@ -5833,6 +5836,10 @@ _WORKSPACE_JS = """
         typeof request.client_ip === "string" ? request.client_ip : "—", "", "IP address"
       ));
       row.appendChild(tableCell(keyOutcomeLabel(request.outcome), "", "Result"));
+      row.appendChild(tableCell(monitorCount(request.reply_tokens), "cell-num", "Tokens"));
+      row.appendChild(tableCell(monitorCount(request.tokens_per_second), "cell-num", "Tokens/s"));
+      row.appendChild(tableCell(monitorSeconds(request.total_ms), "cell-num", "Total"));
+      row.appendChild(tableCell(guardCategoryText(request), "cell-muted", "Stopped by"));
       row.appendChild(tableCell(
         typeof request.error_code === "string" && request.error_code
           ? request.error_code : "—", "cell-muted", "Code"

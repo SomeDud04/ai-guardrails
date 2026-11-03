@@ -52,7 +52,7 @@ from .controls import API_KEY_PREFIX, block_detail
 from .workspace_governance import AlertAdminMixin, PolicyAdminMixin
 
 SCHEMA_PATH = Path(__file__).with_name("workspace_schema.sql")
-SCHEMA_VERSION = 7
+SCHEMA_VERSION = 8
 MAX_RETENTION_DAYS = 36500
 # Version 2 adds outcome/request_id/error_code to ws_messages. Runtime stores
 # open with ``migrate=False`` and therefore require an explicit provisioning
@@ -88,6 +88,18 @@ _SCHEMA_V6_ALTERS = (
 _SCHEMA_V7_ALTERS = (
     ("ws_users", "ALTER TABLE ws_users ADD COLUMN auditor INTEGER NOT NULL DEFAULT 0"),
 )
+# Version 8 keeps, per key request, the figures Monitor shows: reply tokens,
+# generation and total time, and what stopped it.  Older rows stay null.
+_SCHEMA_V8_ALTERS = (
+    ("ws_api_key_outcomes", "ALTER TABLE ws_api_key_outcomes ADD COLUMN reply_tokens INTEGER"),
+    ("ws_api_key_outcomes", "ALTER TABLE ws_api_key_outcomes ADD COLUMN generation_ms INTEGER"),
+    ("ws_api_key_outcomes", "ALTER TABLE ws_api_key_outcomes ADD COLUMN total_ms INTEGER"),
+    ("ws_api_key_outcomes", "ALTER TABLE ws_api_key_outcomes ADD COLUMN block_source TEXT"),
+    ("ws_api_key_outcomes", "ALTER TABLE ws_api_key_outcomes ADD COLUMN block_categories TEXT"),
+    ("ws_api_key_outcomes", "ALTER TABLE ws_api_key_outcomes ADD COLUMN allowed_categories TEXT"),
+)
+# The only values a stored "stopped by" field may hold.
+BLOCK_SOURCES = ("guard", "deny_phrase_input", "deny_phrase_output", "size_limit")
 USER_ROLES = ("employee", "admin", "auditor")
 MAX_AUDIT_EXPORT_ROWS = 100_000
 
@@ -214,6 +226,51 @@ def _optional_metadata(value: Any, field: str) -> str | None:
     if not candidate or len(candidate) > 128:
         raise ValueError(f"{field} is invalid")
     return candidate
+
+
+def _bounded_count(value: Any) -> int | None:
+    if isinstance(value, bool) or not isinstance(value, (int, float)):
+        return None
+    number = int(round(value))
+    return number if 0 <= number <= 10_000_000 else None
+
+
+def _category_text(value: Any) -> str | None:
+    from .qwen3guard import CATEGORY_VALUES, INPUT_ONLY_CATEGORY_VALUES
+
+    known = set(CATEGORY_VALUES) | set(INPUT_ONLY_CATEGORY_VALUES)
+    if not isinstance(value, (list, tuple)):
+        return None
+    names = [item for item in value if isinstance(item, str) and item in known]
+    return ",".join(names) or None
+
+
+def _clean_figures(figures: Any) -> dict[str, Any]:
+    figures = figures if isinstance(figures, dict) else {}
+    source = figures.get("block_source")
+    return {
+        "reply_tokens": _bounded_count(figures.get("reply_tokens")),
+        "generation_ms": _bounded_count(figures.get("generation_ms")),
+        "total_ms": _bounded_count(figures.get("total_ms")),
+        "block_source": source if source in BLOCK_SOURCES else None,
+        "block_categories": _category_text(figures.get("block_categories")),
+        "allowed_categories": _category_text(figures.get("allowed_categories")),
+    }
+
+
+def _public_figures(row: dict[str, Any]) -> dict[str, Any]:
+    tokens, generation = row["reply_tokens"], row["generation_ms"]
+    return {
+        "reply_tokens": tokens,
+        "total_ms": row["total_ms"],
+        # Same formula as the Monitor screen.
+        "tokens_per_second": (
+            round(tokens / (generation / 1000.0), 1) if tokens and generation else None
+        ),
+        "block_source": row["block_source"],
+        "block_categories": (row["block_categories"] or "").split(",") if row["block_categories"] else [],
+        "allowed_categories": (row["allowed_categories"] or "").split(",") if row["allowed_categories"] else [],
+    }
 
 
 def _validate_limit(limit: Any) -> int:
@@ -664,7 +721,7 @@ class WorkspaceStore(PolicyAdminMixin, AlertAdminMixin):
             version = int(current)
             if version == SCHEMA_VERSION:
                 return
-            if version not in (1, 2, 3, 4, 5, 6):
+            if version not in (1, 2, 3, 4, 5, 6, 7):
                 raise WorkspaceConfigError("unsupported workspace schema version")
             if version == 1:
                 # Preserve the original v1 -> v2 data migration, then add the
@@ -687,7 +744,9 @@ class WorkspaceStore(PolicyAdminMixin, AlertAdminMixin):
                 db.execute(statement)
             for statement in _schema_v5_statements():
                 db.execute(statement)
-            for table, statement in (*_SCHEMA_V6_ALTERS, *_SCHEMA_V7_ALTERS):
+            for table, statement in (
+                *_SCHEMA_V6_ALTERS, *_SCHEMA_V7_ALTERS, *_SCHEMA_V8_ALTERS
+            ):
                 column = _alter_added_column(statement)
                 if column and self._column_exists(db, table, column):
                     continue
@@ -2676,17 +2735,37 @@ class WorkspaceStore(PolicyAdminMixin, AlertAdminMixin):
         alert: dict[str, Any] | None = None,
         prompt: str | None = None,
         reply: str | None = None,
+        figures: dict[str, Any] | None = None,
     ) -> None:
-        """Store how a key's request ended, in one transaction."""
+        """Store how a key's request ended, in one transaction.
+
+        ``figures`` holds what Monitor shows for the request: counts, times, the
+        fixed ``block_source`` value and guard category names.  Anything outside
+        that vocabulary is dropped rather than stored.
+        """
         prepared = self._prepare_block_alert(
             alert, outcome=outcome, request_id=request_id
         )
+        figures = _clean_figures(figures)
         now = self._now()
         with self._backend.transaction() as db:
             db.execute(
-                "INSERT INTO ws_api_key_outcomes(request_id, outcome, error_code, created_at) "
-                "VALUES (?, ?, ?, ?)",
-                (request_id, outcome, error_code, now),
+                "INSERT INTO ws_api_key_outcomes(request_id, outcome, error_code, "
+                "reply_tokens, generation_ms, total_ms, block_source, "
+                "block_categories, allowed_categories, created_at) "
+                "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+                (
+                    request_id,
+                    outcome,
+                    error_code,
+                    figures["reply_tokens"],
+                    figures["generation_ms"],
+                    figures["total_ms"],
+                    figures["block_source"],
+                    figures["block_categories"],
+                    figures["allowed_categories"],
+                    now,
+                ),
             )
             if prepared is not None:
                 self._insert_block_alert(
@@ -2730,6 +2809,8 @@ class WorkspaceStore(PolicyAdminMixin, AlertAdminMixin):
             params: list[Any] = [key_id]
             sql = (
                 "SELECT u.request_id, u.created_at, u.client_ip, o.outcome, o.error_code, "
+                "o.reply_tokens, o.generation_ms, o.total_ms, o.block_source, "
+                "o.block_categories, o.allowed_categories, "
                 "t.request_id AS text_id FROM ws_api_key_uses AS u "
                 "LEFT JOIN ws_api_key_outcomes AS o ON o.request_id = u.request_id "
                 "LEFT JOIN ws_api_key_text AS t ON t.request_id = u.request_id "
@@ -2761,6 +2842,7 @@ class WorkspaceStore(PolicyAdminMixin, AlertAdminMixin):
                         "outcome": row["outcome"],
                         "error_code": row["error_code"],
                         "has_text": row["text_id"] is not None,
+                        **_public_figures(row),
                     }
                     for row in rows[:limit]
                 ],

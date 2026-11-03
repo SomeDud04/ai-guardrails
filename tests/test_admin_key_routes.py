@@ -140,11 +140,15 @@ class AdminRouteTests(ApiKeyBase):
         self.assertIn("no-store", response.headers.get("cache-control", ""))
         rows = list(csv.reader(io.StringIO(response.text)))
         self.assertEqual(
-            rows[0], ["time", "request_id", "client_ip", "outcome", "error_code"]
+            rows[0],
+            [
+                "time", "request_id", "client_ip", "outcome", "error_code",
+                "reply_tokens", "tokens_per_second", "total_ms", "stopped_by",
+            ],
         )
         self.assertEqual(len(rows), 106)
         formula = next(row for row in rows[1:] if row[1] == "'=request")
-        self.assertEqual(formula[2:], ["'+1", "allowed", "'=err"])
+        self.assertEqual(formula[2:5], ["'+1", "allowed", "'=err"])
         self.assertTrue(formula[0].endswith("+00:00"))
         self.assertEqual(len({row[1] for row in rows[1:]}), 105)
 

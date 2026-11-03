@@ -250,6 +250,12 @@ CREATE TABLE IF NOT EXISTS ws_api_key_outcomes (
     request_id TEXT PRIMARY KEY,
     outcome TEXT NOT NULL CHECK (outcome IN ('allowed', 'blocked', 'failed')),
     error_code TEXT,
+    reply_tokens INTEGER,
+    generation_ms INTEGER,
+    total_ms INTEGER,
+    block_source TEXT,
+    block_categories TEXT,
+    allowed_categories TEXT,
     created_at DOUBLE PRECISION NOT NULL
 );
 

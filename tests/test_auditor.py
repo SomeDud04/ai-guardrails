@@ -291,7 +291,7 @@ class AuditorMigrationTests(unittest.TestCase):
     def test_schema_files_agree_on_the_new_column(self) -> None:
         schema = (ROOT / "nasi_lemak/workspace_schema.sql").read_text(encoding="utf-8")
         self.assertIn("auditor INTEGER NOT NULL DEFAULT 0", schema)
-        self.assertEqual(workspace_store.SCHEMA_VERSION, 7)
+        self.assertGreaterEqual(workspace_store.SCHEMA_VERSION, 7)
 
 
 if __name__ == "__main__":

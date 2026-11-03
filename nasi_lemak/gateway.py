@@ -670,6 +670,19 @@ class Gateway:
                 "digest": metadata["digest"],
                 "sources": metadata["sources"],
             }
+        # Monitor takes the same finish time, so both show the same total.
+        timing["finished"] = time.perf_counter()
+        started = timing.get("started")
+        figures = {
+            "reply_tokens": timing.get("reply_tokens"),
+            "generation_ms": timing.get("generation_ms"),
+            "total_ms": (
+                round((timing["finished"] - started) * 1000.0) if started is not None else None
+            ),
+            "block_source": timing.get("block_source"),
+            "block_categories": timing.get("block_categories"),
+            "allowed_categories": timing.get("allowed_categories"),
+        }
         prompt = reply = None
         if key["store_text"]:
             prompt = json.dumps(
@@ -686,6 +699,7 @@ class Gateway:
                 alert=alert,
                 prompt=prompt,
                 reply=reply,
+                figures=figures,
             )
         except Exception:
             self._log_failure(request_id, "other", None)

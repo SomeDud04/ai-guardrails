@@ -122,6 +122,22 @@ def _csv_time(timestamp: float) -> str:
     return datetime.fromtimestamp(timestamp, timezone.utc).isoformat()
 
 
+_BLOCK_SOURCE_LABELS = {
+    "deny_phrase_input": "Deny phrase",
+    "deny_phrase_output": "Deny phrase (reply)",
+    "size_limit": "Size limit",
+}
+
+
+def _stopped_by(item: dict[str, Any]) -> str:
+    """The same wording as Monitor's "Stopped by" column."""
+    if item.get("block_categories"):
+        return ", ".join(item["block_categories"])
+    if item.get("allowed_categories"):
+        return "Allowed: " + ", ".join(item["allowed_categories"])
+    return _BLOCK_SOURCE_LABELS.get(item.get("block_source") or "", "")
+
+
 def _csv_response(content: str, filename: str) -> Response:
     response = Response(content, media_type="text/csv")
     response.headers["Content-Disposition"] = f'attachment; filename="{filename}"'
@@ -641,7 +657,10 @@ def register_admin_policy_routes(app: FastAPI, runtime: Any) -> None:
         output = io.StringIO()
         writer = csv.writer(output)
         writer.writerow(
-            ["time", "request_id", "client_ip", "outcome", "error_code"]
+            [
+                "time", "request_id", "client_ip", "outcome", "error_code",
+                "reply_tokens", "tokens_per_second", "total_ms", "stopped_by",
+            ]
         )
         for item in rows[:5000]:
             writer.writerow(
@@ -651,6 +670,10 @@ def register_admin_policy_routes(app: FastAPI, runtime: Any) -> None:
                     _csv_cell(item["client_ip"]),
                     _csv_cell(item["outcome"]),
                     _csv_cell(item["error_code"]),
+                    _csv_cell(item.get("reply_tokens")),
+                    _csv_cell(item.get("tokens_per_second")),
+                    _csv_cell(item.get("total_ms")),
+                    _csv_cell(_stopped_by(item)),
                 ]
             )
         return _csv_response(output.getvalue(), "api-key-requests.csv")

@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# Rehearse the schema 7 upgrade on a throwaway copy of the live database.
+# Rehearse the schema 8 upgrade on a throwaway copy of the live database.
 #
 # Run as root on the VM after building the new image.  The live gateway and
 # database keep running: this only reads a pg_dump of the live database, then
@@ -43,8 +43,9 @@ rm -f "$WORK/live.dump"
 
 before_version=$(sql -c 'SELECT MAX(version) FROM ws_schema_migrations')
 before_users=$(sql -c 'SELECT COUNT(*) FROM ws_users')
+before_outcomes=$(sql -c 'SELECT COUNT(*) FROM ws_api_key_outcomes')
 echo "copied the live database: schema $before_version, $before_users accounts"
-test "$before_version" = 6
+test "$before_version" = 7
 
 mkdir "$WORK/workspace"
 cp .secrets/workspace/workspace_key "$WORK/workspace/workspace_key"
@@ -67,10 +68,11 @@ sql -c "CREATE ROLE nl_rehearsal_runtime LOGIN PASSWORD '$PASSWORD' IN ROLE nasi
 after_version=$(sql -c 'SELECT MAX(version) FROM ws_schema_migrations')
 after_users=$(sql -c 'SELECT COUNT(*) FROM ws_users')
 echo "after the migration: schema $after_version, $after_users accounts"
-test "$after_version" = 7
+test "$after_version" = 8
 test "$after_users" = "$before_users"
-test "$(sql -c 'SELECT COUNT(*) FROM ws_users WHERE auditor <> 0')" = 0
-echo "no existing account became an auditor"
+test "$(sql -c 'SELECT COUNT(*) FROM ws_api_key_outcomes')" = "$before_outcomes"
+test "$(sql -c 'SELECT COUNT(*) FROM ws_api_key_outcomes WHERE total_ms IS NOT NULL')" = 0
+echo "all $before_outcomes existing key request results kept; older rows have no figures"
 
 ADMIN_ID=$(sql -c "SELECT id FROM ws_users WHERE role = 'admin' AND disabled = 0 ORDER BY created_at LIMIT 1")
 test -n "$ADMIN_ID"
@@ -115,9 +117,18 @@ store.record_api_key_result(
         "sources": metadata["sources"],
     },
     prompt="rehearsal prompt",
+    figures={
+        "reply_tokens": 0,
+        "generation_ms": None,
+        "total_ms": 5200,
+        "block_source": "guard",
+        "block_categories": ["Jailbreak"],
+    },
 )
 row = store.list_api_key_requests(admin, resolved["id"])["items"][0]
 assert row["outcome"] == "blocked" and row["client_ip"] == "192.168.90.50"
+assert row["total_ms"] == 5200 and row["block_source"] == "guard"
+assert row["block_categories"] == ["Jailbreak"]
 text = store.read_api_key_text(admin, resolved["id"], "req_rehearsal")
 assert text["prompt"] == "rehearsal prompt"
 alerts = store.list_block_alerts(admin)["items"]
@@ -169,7 +180,7 @@ else:
 store.set_user_role(admin, reader, "employee")
 store.delete_user(admin, reader, "rehearsal.auditor")
 store.close()
-print("runtime account: keys, history, alerts, settings, auditor and export all worked")
+print("runtime account: keys, history with figures, alerts, settings, auditor and export all worked")
 PY
 
 refused() {

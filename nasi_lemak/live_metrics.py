@@ -97,7 +97,8 @@ class LiveMetrics:
     def leave(self, timing: dict[str, Any], status: int) -> None:
         """Close one request.  One that never reached the pipeline is not a sample."""
         started = timing.pop("started", None)
-        finished = time.perf_counter()
+        # A named key's history row records the same finish time.
+        finished = timing.pop("finished", None) or time.perf_counter()
         with self._lock:
             self._in_flight -= 1
             if started is None:

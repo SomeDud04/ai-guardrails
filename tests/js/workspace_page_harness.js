@@ -2042,6 +2042,10 @@ async function scenarioAdmin() {
           outcome: "allowed",
           error_code: null,
           has_text: true,
+          reply_tokens: 340,
+          tokens_per_second: 42.5,
+          total_ms: 19000,
+          allowed_categories: ["Safe chat"],
         },
         {
           request_id: "req_text-2",
@@ -2071,6 +2075,23 @@ async function scenarioAdmin() {
     "both tables must show the same short request id for the same request");
   assert(historyRequestCells[1].textContent === "text-2",
     "key history must shorten the request id after the req_ prefix");
+  assert(historyText.indexOf("Tokens/s") >= 0 && historyText.indexOf("Stopped by") >= 0,
+    "the history must label the monitor figures");
+  const monitorFigureLabels = ["Tokens", "Tokens/s", "Total", "Stopped by"];
+  for (const label of monitorFigureLabels) {
+    const historyCells = collect(app.elementFor("key-history")).filter(
+      (element) => element.getAttribute("data-label") === label
+    );
+    const monitorCells = collect(app.elementFor("live-recent")).filter(
+      (element) => element.getAttribute("data-label") === label
+    );
+    assert(historyCells.length === 2,
+      "every key history row must render one " + label + " cell");
+    assert(historyCells[0].textContent === monitorCells[0].textContent,
+      "the key history must show the same " + label + " text as Monitor");
+    assert(historyCells[1].textContent === "–",
+      "an old key history row must render a dash for " + label);
+  }
   assert(app.elementFor("key-history-more").hidden === false,
     "a history page with a next cursor must offer Load more");
 
