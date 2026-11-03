@@ -20,6 +20,7 @@ from typing import Any
 
 from .audit import AuditStore, SqliteAuditStore
 from .controls import API_KEY_PREFIX, GatewayControl, block_detail
+from .deny_variants import variants as _deny_variants
 from .live_metrics import LiveMetrics
 from .diagnostics import GENERATION_TRUNCATED, SIGNAL_CODES, record_signal
 from .generation import GenerationError, conservative_byte_budget
@@ -115,6 +116,25 @@ def _normalize_deny_text_spaced(text: str) -> str:
         for char in normalized
     )
     return " ".join(spaced.split()).casefold()
+
+
+# Bound once for the variant check in ``Policy.denies``.  The configured text
+# is still normalized through the module attributes, so callers that observe
+# them (tests included) see exactly one pass for the message itself.
+_DENY_NORMALIZE = _normalize_deny_text
+_DENY_NORMALIZE_SPACED = _normalize_deny_text_spaced
+
+
+def _denies_variant(
+    text: str,
+    normalized_phrases: tuple[str, ...],
+    spaced_phrases: tuple[str, ...],
+) -> bool:
+    normalized = _DENY_NORMALIZE(text)
+    if any(phrase in normalized for phrase in normalized_phrases):
+        return True
+    spaced = _DENY_NORMALIZE_SPACED(text)
+    return any(phrase in spaced for phrase in spaced_phrases)
 
 
 def log_rejection(request_id: str, status: int, reason: str) -> None:
@@ -264,9 +284,12 @@ class Policy:
         into a space (catching one standing in for the word separator).  A
         phrase is only compared with the candidate in its own form, so real
         whitespace is still required: ``"notallowed"`` never matches
-        ``"not allowed"``.  Callers check each message (or the complete
-        buffered output) separately: this method never joins turn boundaries,
-        so a phrase split across turns is not matched.
+        ``"not allowed"``.  The same check is repeated for the light-encoding
+        candidates from :mod:`nasi_lemak.deny_variants` (spaced-out letters,
+        ROT13 and printable Base64), so those cannot hide the phrase either.
+        Callers check each message (or the complete buffered output)
+        separately: this method never joins turn boundaries, so a phrase split
+        across turns is not matched.
         """
         if not isinstance(text, str):
             return True
@@ -276,7 +299,16 @@ class Policy:
         ):
             return True
         spaced = _normalize_deny_text_spaced(text)
-        return any(phrase in spaced for phrase in self._spaced_deny_phrases)
+        if any(phrase in spaced for phrase in self._spaced_deny_phrases):
+            return True
+        return any(
+            _denies_variant(
+                variant,
+                self._normalized_deny_phrases,
+                self._spaced_deny_phrases,
+            )
+            for variant in _deny_variants(text)
+        )
 
     @property
     def digest(self) -> str:
