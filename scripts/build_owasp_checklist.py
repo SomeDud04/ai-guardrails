@@ -721,13 +721,19 @@ def _normalise_zip(data: bytes) -> bytes:
 
 
 def workbook_contents(data: bytes) -> list[tuple[str, bytes]]:
-    """Each member's name and uncompressed bytes.
+    """Each member's name and uncompressed bytes, with line breaks unified.
 
-    Compressed bytes depend on the platform's zlib build, so a Linux rebuild can
-    differ from a Windows one byte for byte while holding identical content.
+    Compressed bytes depend on the platform's zlib build, and openpyxl writes
+    sheets through a text-mode temporary file, so a Windows build stores a line
+    break inside a cell as CRLF where Linux stores LF (and a payload's own CRLF
+    as CR CR LF).  Neither is a content
+    change, so both are ignored here.
     """
     with zipfile.ZipFile(io.BytesIO(data)) as archive:
-        return [(info.filename, archive.read(info.filename)) for info in archive.infolist()]
+        return [
+            (info.filename, re.sub(rb"\r+\n", b"\n", archive.read(info.filename)))
+            for info in archive.infolist()
+        ]
 
 
 def build(payload_root: Path = PAYLOAD_ROOT, workbook: Path = WORKBOOK,
