@@ -1448,6 +1448,8 @@ async function respondMonitor(app, settingsOverrides) {
       recent: [
         {
           at: 1700000000,
+          received_at: 1699999990,
+          request_id: "req_text-1",
           decision: "allowed",
           total_ms: 19000,
           reply_tokens: 340,
@@ -1468,6 +1470,7 @@ async function respondMonitor(app, settingsOverrides) {
           total_ms: 1200,
           reply_tokens: 12,
           tokens_per_second: 10,
+          request_id: "req_abcdef1234567890",
         },
       ],
     },
@@ -1557,6 +1560,23 @@ async function scenarioAdmin() {
     "blocked request categories must be joined with commas");
   assert(guardCategoryCells[2].textContent === "–",
     "a request with no category data must render a dash");
+  const recentTimeCells = collect(app.elementFor("live-recent")).filter(
+    (element) => element.getAttribute("data-label") === "Time"
+  );
+  assert(recentTimeCells[0].textContent ===
+      new Date(1699999990 * 1000).toLocaleTimeString(),
+    "the latest requests must show when the request arrived");
+  const recentRequestCells = collect(app.elementFor("live-recent")).filter(
+    (element) => element.getAttribute("data-label") === "Request"
+  );
+  assert(recentRequestCells.length === 3,
+    "every recent request must render one request cell");
+  assert(recentRequestCells[0].textContent === "text-1",
+    "the request cell must drop the req_ prefix");
+  assert(recentRequestCells[1].textContent === "–",
+    "a request without an id must render a dash");
+  assert(recentRequestCells[2].textContent === "abcdef123456",
+    "the request cell must keep the first twelve characters after the prefix");
   assert(app.elementFor("live-traffic").textContent.indexOf("192.168.90.50") >= 0,
     "traffic by IP must render");
   assert(app.elementFor("live-http").textContent.indexOf("/chat") >= 0,
@@ -1986,7 +2006,7 @@ async function scenarioAdmin() {
     {
       items: [
         {
-          request_id: "req-text-1",
+          request_id: "req_text-1",
           created_at: 1700000200,
           client_ip: "192.168.0.5",
           outcome: "allowed",
@@ -1994,7 +2014,7 @@ async function scenarioAdmin() {
           has_text: true,
         },
         {
-          request_id: "req-text-2",
+          request_id: "req_text-2",
           created_at: 1700000100,
           client_ip: "10.0.0.5",
           outcome: "blocked",
@@ -2010,6 +2030,17 @@ async function scenarioAdmin() {
   const historyText = app.elementFor("key-history").textContent;
   assert(historyText.indexOf("192.168.0.5") >= 0 && historyText.indexOf("Allowed") >= 0,
     "the history must show the request IP and result");
+  assert(historyText.indexOf("Request") >= 0,
+    "the history must label the request column");
+  const historyRequestCells = collect(app.elementFor("key-history")).filter(
+    (element) => element.getAttribute("data-label") === "Request"
+  );
+  assert(historyRequestCells.length === 2,
+    "every key history row must render one request cell");
+  assert(historyRequestCells[0].textContent === recentRequestCells[0].textContent,
+    "both tables must show the same short request id for the same request");
+  assert(historyRequestCells[1].textContent === "text-2",
+    "key history must shorten the request id after the req_ prefix");
   assert(app.elementFor("key-history-more").hidden === false,
     "a history page with a next cursor must offer Load more");
 
@@ -2045,7 +2076,7 @@ async function scenarioAdmin() {
   const successfulExport = app.lastMatching("/workspace/api/admin/api-keys/key-2/requests.csv");
   assert(successfulExport && successfulExport !== failedExport,
     "Export must fetch the CSV path again");
-  successfulExport.respond("time,request_id\n1700000200,req-text-1\n", 200);
+  successfulExport.respond("time,request_id\n1700000200,req_text-1\n", 200);
   await settle();
   const exportDownload = downloadedExports()[0];
   assert(exportDownload && exportDownload.clicked === 1,
@@ -2092,12 +2123,12 @@ async function scenarioAdmin() {
   viewText.dispatch("click");
   await settle();
   const textCall = app.lastMatching(
-    "/workspace/api/admin/api-keys/key-2/requests/req-text-1/text"
+    "/workspace/api/admin/api-keys/key-2/requests/req_text-1/text"
   );
   assert(textCall, "View must read the stored request text");
   textCall.respond(
     {
-      request_id: "req-text-1",
+      request_id: "req_text-1",
       prompt: JSON.stringify([
         { role: "user", content: "Harness prompt text" },
       ]),

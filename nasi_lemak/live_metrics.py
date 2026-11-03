@@ -102,6 +102,8 @@ class LiveMetrics:
             self._in_flight -= 1
             if started is None:
                 return
+            finished_at = self._clock()
+            request_id = timing.get("request_id")
             decision = (
                 "allowed" if status == 200
                 else "blocked" if status in (403, 413)
@@ -109,7 +111,9 @@ class LiveMetrics:
             )
             self._samples.append(
                 {
-                    "at": self._clock(),
+                    "at": finished_at,
+                    "received_at": timing.get("received_at", finished_at),
+                    "request_id": request_id if isinstance(request_id, str) else None,
                     "decision": decision,
                     "total_ms": round((finished - started) * 1000.0),
                     "input_ms": timing.get("input_ms"),

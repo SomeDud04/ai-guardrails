@@ -715,12 +715,12 @@ button.danger:hover:not(:disabled) { background: #8f1d17; border-color: #8f1d17;
 .monitor-columns { grid-template-columns: minmax(0, 3fr) minmax(0, 2fr); gap: var(--space-5); }
 .monitor-side { display: grid; gap: var(--space-4); align-content: start; min-width: 0; }
 #live-traffic .cols-6 { grid-template-columns: minmax(130px, 1.5fr) repeat(4, minmax(72px, 1fr)) 96px; min-width: 620px; }
-#live-recent .cols-6 { grid-template-columns: 96px 110px repeat(3, minmax(72px, 1fr)) minmax(120px, 1.4fr); min-width: 720px; }
+#live-recent .cols-7 { grid-template-columns: 96px 110px 110px repeat(3, minmax(72px, 1fr)) minmax(120px, 1.4fr); min-width: 780px; }
 #live-http .cols-7 { grid-template-columns: 96px 130px minmax(96px, .5fr) 64px minmax(200px, 1fr) 56px 72px; min-width: 800px; }
 #key-list .cols-7 { grid-template-columns: minmax(130px, 1.2fr) minmax(150px, 1.4fr) 90px 110px 80px 130px minmax(120px, .9fr); min-width: 980px; }
 #key-list .admin-table-head > div:nth-child(5) { text-align: right; }
 #key-list .admin-confirm { grid-column: 1 / -1; }
-#key-history .cols-5 { grid-template-columns: 140px minmax(120px, 1fr) 90px 90px 70px; min-width: 520px; }
+#key-history .cols-6 { grid-template-columns: 140px 110px minmax(120px, 1fr) 90px 90px 70px; min-width: 640px; }
 .key-details { display: grid; gap: var(--space-3); margin-top: var(--space-4); padding-top: var(--space-3); border-top: 1px solid var(--line); }
 .key-details-head { display: flex; flex-wrap: wrap; align-items: center; justify-content: space-between; gap: var(--space-2); }
 .key-details-head h3, .key-details h4 { margin: 0; }
@@ -1251,6 +1251,12 @@ _WORKSPACE_JS = """
 
   function shortId(value) {
     return typeof value === "string" ? value.slice(0, 8) : "unknown";
+  }
+
+  function shortRequestId(value) {
+    if (typeof value !== "string" || !value) { return "–"; }
+    var trimmed = value.indexOf("req_") === 0 ? value.slice(4) : value;
+    return trimmed ? trimmed.slice(0, 12) : "–";
   }
 
   function formatClock(seconds) {
@@ -5810,7 +5816,7 @@ _WORKSPACE_JS = """
   function renderKeyHistory(items, reset) {
     if (reset) {
       clearNode(keyHistory);
-      renderTableHead(keyHistory, ["Time", "IP address", "Result", "Code", "Text"], 5);
+      renderTableHead(keyHistory, ["Time", "Request", "IP address", "Result", "Code", "Text"], 6);
     }
     if (reset && items.length === 0) {
       appendEmpty(keyHistory, "No requests have been recorded for this key.");
@@ -5819,9 +5825,10 @@ _WORKSPACE_JS = """
       var request = items[index];
       if (!isObject(request) || typeof request.request_id !== "string") { continue; }
       var row = document.createElement("div");
-      row.className = "admin-table-row cols-5";
+      row.className = "admin-table-row cols-6";
       row.setAttribute("data-request", request.request_id);
       row.appendChild(tableCell(formatDate(request.created_at), "cell-muted", "Time"));
+      row.appendChild(tableCell(shortRequestId(request.request_id), "cell-muted", "Request"));
       row.appendChild(tableCell(
         typeof request.client_ip === "string" ? request.client_ip : "—", "", "IP address"
       ));
@@ -6778,12 +6785,14 @@ _WORKSPACE_JS = """
       liveRecent.appendChild(empty);
       return;
     }
-    renderTableHead(liveRecent, ["Time", "Result", "Tokens", "Tokens/s", "Total", "Guard category"], 6);
+    renderTableHead(liveRecent, ["Time", "Request", "Result", "Tokens", "Tokens/s", "Total", "Guard category"], 7);
     for (var index = 0; index < recent.length; index += 1) {
       var item = recent[index];
       var row = document.createElement("div");
-      row.className = "admin-table-row cols-6";
-      row.appendChild(tableCell(formatClock(item.at), "cell-muted", "Time"));
+      row.className = "admin-table-row cols-7";
+      var receivedAt = typeof item.received_at === "number" ? item.received_at : item.at;
+      row.appendChild(tableCell(formatClock(receivedAt), "cell-muted", "Time"));
+      row.appendChild(tableCell(shortRequestId(item.request_id), "cell-muted", "Request"));
       var result = tableCell(item.decision, "monitor-result is-" + item.decision, "Result");
       row.appendChild(result);
       row.appendChild(tableCell(monitorCount(item.reply_tokens), "cell-num", "Tokens"));

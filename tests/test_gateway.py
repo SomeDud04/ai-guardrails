@@ -313,6 +313,22 @@ class GatewayTests(unittest.TestCase):
         for key in ("input_ms", "generation_ms", "output_ms", "total_ms"):
             self.assertIsInstance(sample[key], int)
 
+    def test_a_request_sample_matches_the_response_request_id(self):
+        status, body = self.call(request())
+        self.assertEqual(status, 200)
+        sample = self.gateway.metrics.snapshot()["recent"][0]
+        self.assertEqual(sample["request_id"], body["id"])
+        self.assertLessEqual(sample["received_at"], sample["at"])
+
+    def test_an_early_rejection_still_records_identity_and_arrival(self):
+        timing = {}
+        status, body = self.gateway._pipeline(
+            "GET", "/v1/chat/completions", {}, request(), timing
+        )
+        self.assertEqual(status, 404)
+        self.assertEqual(timing["request_id"], body["error"]["request_id"])
+        self.assertIsInstance(timing["received_at"], float)
+
     def test_a_blocked_request_never_records_generation(self):
         self.adapters.attack_result = {"decision": "block"}
         self.assertEqual(self.call(request())[0], 403)

@@ -722,6 +722,10 @@ class Gateway:
         stay absent.
         """
         request_id = "req_" + uuid.uuid4().hex
+        # Every request carries its identity and arrival time from the start,
+        # including early rejections, so Monitor and key history can be matched.
+        timing["request_id"] = request_id
+        timing["received_at"] = time.time()
         if method != "POST" or path != "/v1/chat/completions":
             return self._error(404, "INVALID_REQUEST", request_id)
         if not isinstance(headers, dict):

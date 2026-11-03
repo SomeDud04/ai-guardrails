@@ -134,6 +134,24 @@ class LiveMetricsTests(unittest.TestCase):
             self.finish()
         self.assertEqual(self.metrics.snapshot()["samples"], MAX_SAMPLES)
 
+    def test_a_sample_keeps_the_arrival_time_and_request_id(self) -> None:
+        self.finish(received_at=990.0, request_id="req_abcdef123456")
+        row = self.metrics.snapshot()["recent"][0]
+        self.assertEqual(row["at"], 1000.0)
+        self.assertEqual(row["received_at"], 990.0)
+        self.assertEqual(row["at"] - row["received_at"], 10.0)
+        self.assertEqual(row["request_id"], "req_abcdef123456")
+
+    def test_missing_arrival_time_falls_back_to_the_finish_time(self) -> None:
+        self.finish()
+        row = self.metrics.snapshot()["recent"][0]
+        self.assertEqual(row["received_at"], row["at"])
+        self.assertIsNone(row["request_id"])
+
+    def test_a_non_string_request_id_is_not_a_sample_identifier(self) -> None:
+        self.finish(request_id=123)
+        self.assertIsNone(self.metrics.snapshot()["recent"][0]["request_id"])
+
     def test_guard_categories_are_copied_into_the_sample(self) -> None:
         self.finish(
             status=403,
