@@ -212,10 +212,14 @@ def _error_payload(request_id: str, code: str) -> dict[str, Any]:
 def _input_safety_label(result_sink: dict[str, Any]) -> str:
     """Coarse label for the validated input verdict; ``unknown`` if it did not run.
 
-    The gateways expose only ``allow``/``block``; the categorical classifier
-    severity is discarded by the adapters and is deliberately not invented.
+    The gateways expose ``allow``/``block`` plus ``allowed_by_policy`` when a
+    flagged verdict was released by the policy allow-list; the categorical
+    classifier severity is discarded by the adapters and is deliberately not
+    invented.
     """
     decision = result_sink.get("input_decision")
+    if decision == "allowed_by_policy":
+        return "allowed by policy"
     if decision == "allow":
         return "safe"
     if decision == "block":
@@ -225,6 +229,8 @@ def _input_safety_label(result_sink: dict[str, Any]) -> str:
 
 def _output_safety_label(result_sink: dict[str, Any]) -> str:
     """Coarse label for the validated output verdict; ``unknown`` if it did not run."""
+    if result_sink.get("output_allowed_by_policy") is True:
+        return "allowed by policy"
     value = result_sink.get("output_safe")
     if value is True:
         return "safe"
@@ -1632,6 +1638,10 @@ def make_app(
         "control_concurrency": control_limit,
         "max_body_bytes": body_limit,
         "body_read_timeout": read_timeout,
+        "thinking_disabled": str(
+            env.get("NASI_LEMAK_GENERATION_ENABLE_THINKING", "")
+        ).strip().lower()
+        == "false",
     }
     app.state.mode = configured_mode
     app.state.guards_active = guards_active

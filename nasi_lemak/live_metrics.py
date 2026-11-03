@@ -117,6 +117,8 @@ class LiveMetrics:
                     "output_ms": timing.get("output_ms"),
                     "prompt_tokens": timing.get("prompt_tokens"),
                     "reply_tokens": timing.get("reply_tokens"),
+                    "block_categories": list(timing.get("block_categories") or []),
+                    "allowed_categories": list(timing.get("allowed_categories") or []),
                 }
             )
 

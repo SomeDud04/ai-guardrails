@@ -445,8 +445,26 @@ class OperationalEnvironmentTests(unittest.TestCase):
                 "control_concurrency": 3,
                 "max_body_bytes": 2048,
                 "body_read_timeout": 1.5,
+                "thinking_disabled": False,
             },
         )
+
+    def test_thinking_disabled_only_for_the_exact_false_value(self) -> None:
+        cases = {
+            "false": True,
+            " FALSE ": True,
+            "False": True,
+            "true": False,
+            "0": False,
+            "no": False,
+            "": False,
+        }
+        for raw, expected in cases.items():
+            with self.subTest(raw=raw):
+                app = self._app({"NASI_LEMAK_GENERATION_ENABLE_THINKING": raw})
+                self.assertIs(app.state.operational["thinking_disabled"], expected)
+        app = self._app({})
+        self.assertIs(app.state.operational["thinking_disabled"], False)
 
     def test_explicit_arguments_win_over_environment(self) -> None:
         app = self._app(

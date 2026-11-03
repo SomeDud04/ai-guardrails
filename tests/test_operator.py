@@ -246,6 +246,7 @@ class EffectiveLimitsAdminTests(OperatorTestBase):
                     "control_concurrency": 3,
                     "max_body_bytes": 2048,
                     "body_read_timeout": 1.5,
+                    "thinking_disabled": False,
                 },
             )
 

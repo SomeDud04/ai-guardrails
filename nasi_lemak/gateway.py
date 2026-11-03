@@ -27,7 +27,7 @@ from .generation import GenerationError, conservative_byte_budget
 from .guards import GuardInputLimit
 from .limits import LIMIT_FIELDS, ChatLimits, tighten
 from .pii import mask_text
-from .qwen3guard import serialize_messages
+from .qwen3guard import CATEGORY_VALUES, INPUT_ONLY_CATEGORY_VALUES, serialize_messages
 from .scan_context import ScanContext
 from .system_settings import RuntimeSettings
 
@@ -68,6 +68,11 @@ MAX_POLICY_VERSION_LENGTH = 128
 MAX_DENY_PHRASES = 64
 MAX_DENY_PHRASE_LENGTH = 256
 _APP_ID = re.compile(r"[A-Za-z0-9][A-Za-z0-9._-]*\Z")
+# The only category names a guard verdict may contribute, across both lanes.
+# Anything else is dropped rather than logged or stored.
+KNOWN_CATEGORY_VALUES = frozenset(CATEGORY_VALUES) | frozenset(
+    INPUT_ONLY_CATEGORY_VALUES
+)
 
 
 class _InputLimit(Exception):
@@ -350,6 +355,18 @@ def _ip_allowed(client_ip: str | None, networks: list[str]) -> bool:
     except ValueError:
         return False
     return any(address in ipaddress.ip_network(network) for network in networks)
+
+
+def _known_categories(result: dict[str, Any]) -> list[str]:
+    """Filter a verdict's categories to fixed vocabulary, preserving order."""
+    categories = result.get("categories")
+    if not isinstance(categories, (list, tuple)):
+        return []
+    return [
+        category
+        for category in categories
+        if isinstance(category, str) and category in KNOWN_CATEGORY_VALUES
+    ]
 
 
 def _policy_allows(result: dict[str, Any], allowed: tuple[str, ...]) -> bool:
@@ -695,8 +712,10 @@ class Gateway:
         filled alongside the existing successful stages.  It never changes
         control ordering, audit rows, releases or return values.  Keys are
         bounded pipeline facts only: ``input_decision`` (the validated adapter
-        verdict ``allow``/``block``), ``output_safe`` (the validated output
-        verdict boolean), ``sanitized_messages`` (the exact masked messages
+        verdict ``allow``/``block``, or ``allowed_by_policy``), ``output_safe``
+        (the validated output verdict boolean), ``output_allowed_by_policy``
+        (true only when the output allow-list released a flagged verdict),
+        ``sanitized_messages`` (the exact masked messages
         passed to generation), ``audit_started_at`` and ``audit_terminal_at``
         (the timestamps the audit store itself wrote) and ``api_key_name``.  Raw withheld output and
         classifier text are never written.  Fields for stages that did not run
@@ -848,10 +867,23 @@ class Gateway:
                 if result["decision"] == "block" and not _policy_allows(
                     result, self._allowed_categories("input")
                 ):
+                    categories = _known_categories(result)
+                    timing["block_categories"] = categories
+                    LOGGER.warning(
+                        "request_blocked request_id=%s stage=%s categories=%s",
+                        request_id,
+                        "input",
+                        ",".join(categories) or "-",
+                    )
                     _sink("input_decision", "block")
                     _audit_sink("request_blocked", "blocked", "POLICY_BLOCK")
                     return self._blocked(request_id, "INPUT_GUARD_BLOCK")
-                _sink("input_decision", "allow")
+                if result["decision"] == "block":
+                    categories = _known_categories(result)
+                    timing["allowed_categories"] = categories
+                    _sink("input_decision", "allowed_by_policy")
+                else:
+                    _sink("input_decision", "allow")
             stage = "other"
             # Deny phrases are literal policy text, checked across every accepted
             # input turn before generation.  Disabling the model classifier never
@@ -927,11 +959,24 @@ class Gateway:
                 timing["output_ms"] = _elapsed_ms(scan_started)
                 if not isinstance(result, dict) or not isinstance(result.get("safe"), bool):
                     raise ValueError("invalid output result")
-                safe = result["safe"] or _policy_allows(
+                allowed_by_policy = not result["safe"] and _policy_allows(
                     result, self._allowed_categories("output")
                 )
+                safe = result["safe"] or allowed_by_policy
                 _sink("output_safe", safe)
+                if allowed_by_policy:
+                    categories = _known_categories(result)
+                    timing["allowed_categories"] = categories
+                    _sink("output_allowed_by_policy", True)
                 if not safe:
+                    categories = _known_categories(result)
+                    timing["block_categories"] = categories
+                    LOGGER.warning(
+                        "request_blocked request_id=%s stage=%s categories=%s",
+                        request_id,
+                        "output",
+                        ",".join(categories) or "-",
+                    )
                     _audit_sink("request_blocked", "blocked", "POLICY_BLOCK")
                     return self._blocked(request_id, "OUTPUT_GUARD_BLOCK")
             # The complete buffered output is checked before any release.

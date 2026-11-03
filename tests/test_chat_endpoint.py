@@ -149,6 +149,34 @@ class ChatAllowPathTests(ChatEndpointTestBase):
             ),
         )
 
+    def test_input_allowed_by_policy_is_labelled_and_still_allowed(self) -> None:
+        self.gateway.policy = Policy(input_allow_categories=("PII",))
+        self.adapters.attack_result = {"decision": "block", "categories": ["PII"]}
+
+        response = self.post({"prompt": PII_PROMPT})
+
+        self.assertEqual(response.status_code, 200, response.text)
+        payload = response.json()
+        self.assertEqual(payload["decision"], "ALLOW")
+        self.assertEqual(payload["input_safety_label"], "allowed by policy")
+        self.assertEqual(payload["output_safety_label"], "safe")
+        sample = self.gateway.metrics.snapshot()["recent"][0]
+        self.assertEqual(sample["allowed_categories"], ["PII"])
+        self.assertEqual(sample["block_categories"], [])
+
+    def test_output_allowed_by_policy_is_labelled_and_still_allowed(self) -> None:
+        self.gateway.policy = Policy(output_allow_categories=("PII",))
+        self.adapters.output_result = {"safe": False, "categories": ["PII"]}
+
+        response = self.post({"prompt": "Hello"})
+
+        self.assertEqual(response.status_code, 200, response.text)
+        payload = response.json()
+        self.assertEqual(payload["input_safety_label"], "safe")
+        self.assertEqual(payload["output_safety_label"], "allowed by policy")
+        sample = self.gateway.metrics.snapshot()["recent"][0]
+        self.assertEqual(sample["allowed_categories"], ["PII"])
+
     def test_chat_does_not_create_a_second_audit_row_shape(self) -> None:
         self.post()
         events = self.gateway.audit_events()

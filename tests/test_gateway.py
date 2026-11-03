@@ -238,6 +238,52 @@ class GatewayTests(unittest.TestCase):
         }
         self.assertEqual(self.call(request())[0], 200)
 
+    def test_blocked_input_records_known_categories_only(self):
+        self.adapters.attack_result = {
+            "decision": "block",
+            "categories": ["PII", "Jailbreak", "NotACategory", 7],
+        }
+        with self.assertLogs("nasi_lemak.gateway", level="WARNING") as captured:
+            self.assertEqual(self.call(request())[0], 403)
+        self.assertIn("categories=PII,Jailbreak", "\n".join(captured.output))
+        sample = self.gateway.metrics.snapshot()["recent"][0]
+        self.assertEqual(sample["block_categories"], ["PII", "Jailbreak"])
+        self.assertEqual(sample["allowed_categories"], [])
+
+    def test_allowed_input_block_records_categories_without_a_block(self):
+        self._allow(input_allow_categories=("PII",))
+        self.adapters.attack_result = {"decision": "block", "categories": ["PII"]}
+        result_sink = {}
+        status, _ = self.gateway.handle(
+            "POST",
+            "/v1/chat/completions",
+            {"Authorization": "Bearer " + self.key},
+            request(),
+            result_sink=result_sink,
+        )
+        self.assertEqual(status, 200)
+        self.assertEqual(result_sink["input_decision"], "allowed_by_policy")
+        sample = self.gateway.metrics.snapshot()["recent"][0]
+        self.assertEqual(sample["allowed_categories"], ["PII"])
+        self.assertEqual(sample["block_categories"], [])
+
+    def test_allowed_output_block_records_categories_without_a_block(self):
+        self._allow(output_allow_categories=("PII",))
+        self.adapters.output_result = {"safe": False, "categories": ["PII"]}
+        result_sink = {}
+        status, _ = self.gateway.handle(
+            "POST",
+            "/v1/chat/completions",
+            {"Authorization": "Bearer " + self.key},
+            request(),
+            result_sink=result_sink,
+        )
+        self.assertEqual(status, 200)
+        self.assertIs(result_sink["output_allowed_by_policy"], True)
+        sample = self.gateway.metrics.snapshot()["recent"][0]
+        self.assertEqual(sample["allowed_categories"], ["PII"])
+        self.assertEqual(sample["block_categories"], [])
+
     def test_input_block_holds_for_a_mixed_or_empty_category_list(self):
         self._allow(input_allow_categories=("Copyright Violation",))
         for categories in (["Copyright Violation", "Violent"], [], None):

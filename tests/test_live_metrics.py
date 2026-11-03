@@ -134,6 +134,22 @@ class LiveMetricsTests(unittest.TestCase):
             self.finish()
         self.assertEqual(self.metrics.snapshot()["samples"], MAX_SAMPLES)
 
+    def test_guard_categories_are_copied_into_the_sample(self) -> None:
+        self.finish(
+            status=403,
+            block_categories=["PII", "Jailbreak"],
+            allowed_categories=["Violent"],
+        )
+        row = self.metrics.snapshot()["recent"][0]
+        self.assertEqual(row["block_categories"], ["PII", "Jailbreak"])
+        self.assertEqual(row["allowed_categories"], ["Violent"])
+
+    def test_guard_categories_default_to_empty_lists(self) -> None:
+        self.finish()
+        row = self.metrics.snapshot()["recent"][0]
+        self.assertEqual(row["block_categories"], [])
+        self.assertEqual(row["allowed_categories"], [])
+
 
 if __name__ == "__main__":
     unittest.main()
