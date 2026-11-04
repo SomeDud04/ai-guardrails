@@ -407,6 +407,26 @@ the re-baselining map) is `N/A`. The report keeps reply excerpts of synthetic
 corpus text and never the key. It is evidence for one deployment and one day,
 not an independent accuracy measure.
 
+`--dataset PATH` sends a guard-lane dataset instead of the 128 corpus rows, for
+example the 181-case `evals\guards\owasp-llm-top10-2026-v2.json`. Only
+`input`-stage cases can be sent: a dataset containing any `output` case is
+refused with exit code 2 before a request is made, because judging one would
+need a fabricated model reply. Each case goes through the same request builder
+and classifier as a corpus row. The report metadata adds `dataset_id` and
+`dataset_path`, every row adds `language` and `expected`, and
+`totals_by_language` gives the five Result counts for each language present;
+the console summary prints one totals line per language. `--only` filters by
+dataset case ids, and unknown ids are refused. The report never contains the
+key.
+
+```text
+$env:NASI_LEMAK_OWASP_API_KEY = Read-Host "Paste the key"
+.\.venv\Scripts\python.exe scripts\run_owasp_live.py `
+    --base-url http://192.168.90.41:8080 `
+    --dataset evals\guards\owasp-llm-top10-2026-v2.json `
+    --report owasp-guard-lane-live.json
+```
+
 ### Local capacity harness
 
 ```text

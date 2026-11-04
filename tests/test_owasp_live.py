@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import contextlib
 import io
 import json
 import os
@@ -139,6 +140,186 @@ class ClassifyTests(unittest.TestCase):
     def test_absent_surfaces_are_not_applicable(self) -> None:
         absent = record(coverage="not-applicable")
         self.assertEqual(live.classify(absent, 200, None, "x")[0], "N/A")
+
+
+def guard_case(
+    case_id: str,
+    *,
+    stage: str = "input",
+    language: str = "en",
+    expected: str = "block",
+    content: str = "hello",
+) -> dict:
+    case = {
+        "id": case_id,
+        "stage": stage,
+        "language": language,
+        "expected": expected,
+        "messages": [{"role": "user", "content": content}],
+    }
+    if stage == "output":
+        case["output"] = "a synthetic reply"
+    return case
+
+
+def write_dataset(folder: str, cases: list[dict], dataset_id: str = "live-test-dataset") -> Path:
+    path = Path(folder) / "dataset.json"
+    path.write_text(
+        json.dumps(
+            {
+                "schema_version": 1,
+                "dataset_id": dataset_id,
+                "evidence_label": "agent-authored-synthetic-smoke-not-holdout",
+                "cases": cases,
+            }
+        ),
+        encoding="utf-8",
+    )
+    return path
+
+
+def block_everything(body: bytes) -> tuple[int, bytes]:
+    return 403, json.dumps({"error": {"code": "POLICY_BLOCK"}}).encode("utf-8")
+
+
+class DatasetModeTests(unittest.TestCase):
+    def run_main(self, dataset_path: Path, report_path: Path, *extra: str) -> tuple[int, str]:
+        output = io.StringIO()
+        with mock.patch.dict(os.environ, {live.KEY_ENV: "test-key"}), mock.patch.object(
+            live, "make_sender", lambda base, key, timeout: block_everything
+        ), contextlib.redirect_stdout(output):
+            status = live.main(
+                [
+                    "--base-url", "http://127.0.0.1:9",
+                    "--report", str(report_path),
+                    "--dataset", str(dataset_path),
+                    "--pause", "0",
+                    *extra,
+                ]
+            )
+        return status, output.getvalue()
+
+    def test_a_dataset_runs_and_reports_each_case_and_language(self) -> None:
+        cases = [
+            guard_case("case-block-en", language="en", expected="block"),
+            guard_case("case-allow-bm", language="bm", expected="allow"),
+        ]
+        with tempfile.TemporaryDirectory() as folder:
+            dataset_path = write_dataset(folder, cases)
+            report_path = Path(folder) / "report.json"
+            status, printed = self.run_main(dataset_path, report_path)
+            report = json.loads(report_path.read_text(encoding="utf-8"))
+        self.assertEqual(status, 0)
+        self.assertEqual(report["dataset_id"], "live-test-dataset")
+        self.assertEqual(report["dataset_path"], str(dataset_path))
+        self.assertEqual(report["cases_selected"], 2)
+        self.assertEqual(len(report["rows"]), 2)
+        by_id = {row["id"]: row for row in report["rows"]}
+        self.assertEqual(by_id["case-block-en"]["result"], "Pass")
+        self.assertEqual(by_id["case-block-en"]["language"], "en")
+        self.assertEqual(by_id["case-block-en"]["expected"], "block")
+        self.assertEqual(by_id["case-allow-bm"]["result"], "Fail")
+        self.assertIn("false positive", by_id["case-allow-bm"]["note"])
+        self.assertEqual(by_id["case-allow-bm"]["language"], "bm")
+        self.assertEqual(by_id["case-allow-bm"]["expected"], "allow")
+        self.assertEqual(
+            report["totals_by_language"],
+            {
+                "en": {"Pass": 1, "Fail": 0, "Unverified": 0, "Blocked": 0, "N/A": 0},
+                "bm": {"Pass": 0, "Fail": 1, "Unverified": 0, "Blocked": 0, "N/A": 0},
+            },
+        )
+        self.assertEqual(
+            report["totals"],
+            {"Pass": 1, "Fail": 1, "Unverified": 0, "Blocked": 0, "N/A": 0},
+        )
+        self.assertIn("\nen: ", printed)
+        self.assertIn("\nbm: ", printed)
+
+    def test_an_output_case_is_refused_before_anything_is_sent(self) -> None:
+        sent: list[bytes] = []
+
+        def send(body: bytes) -> tuple[int, bytes]:
+            sent.append(body)
+            return block_everything(body)
+
+        cases = [
+            guard_case("case-input", expected="block"),
+            guard_case("case-output", stage="output", expected="allow"),
+        ]
+        with tempfile.TemporaryDirectory() as folder:
+            dataset_path = write_dataset(folder, cases)
+            report_path = Path(folder) / "report.json"
+            with mock.patch.dict(os.environ, {live.KEY_ENV: "test-key"}), mock.patch.object(
+                live, "make_sender", lambda base, key, timeout: send
+            ), contextlib.redirect_stderr(io.StringIO()) as errors:
+                status = live.main(
+                    [
+                        "--base-url", "http://127.0.0.1:9",
+                        "--report", str(report_path),
+                        "--dataset", str(dataset_path),
+                        "--pause", "0",
+                    ]
+                )
+            self.assertFalse(report_path.exists())
+        self.assertEqual(status, 2)
+        self.assertEqual(sent, [])
+        self.assertIn("case-output", errors.getvalue())
+
+    def test_only_filters_by_dataset_case_id(self) -> None:
+        cases = [
+            guard_case("case-block-en", expected="block"),
+            guard_case("case-allow-bm", language="bm", expected="allow"),
+        ]
+        with tempfile.TemporaryDirectory() as folder:
+            dataset_path = write_dataset(folder, cases)
+            report_path = Path(folder) / "report.json"
+            status, _printed = self.run_main(
+                dataset_path, report_path, "--only", "case-block-en"
+            )
+            report = json.loads(report_path.read_text(encoding="utf-8"))
+        self.assertEqual(status, 0)
+        self.assertEqual(report["cases_selected"], 1)
+        self.assertEqual([row["id"] for row in report["rows"]], ["case-block-en"])
+
+    def test_an_unknown_dataset_case_id_is_refused(self) -> None:
+        with tempfile.TemporaryDirectory() as folder:
+            dataset_path = write_dataset(folder, [guard_case("case-block-en")])
+            status, _printed = self.run_main(
+                dataset_path, Path(folder) / "report.json", "--only", "NOPE-1"
+            )
+        self.assertEqual(status, 2)
+
+    def test_corpus_mode_does_not_add_dataset_fields(self) -> None:
+        report = live.run([record()], block_everything)
+        self.assertNotIn("totals_by_language", report)
+        self.assertNotIn("language", report["rows"][0])
+        self.assertNotIn("expected", report["rows"][0])
+
+    def test_dataset_mode_does_not_apply_corpus_retired_limits(self) -> None:
+        stream = record(id="LLM06-004", expect_status=400, expect_code="INVALID_REQUEST")
+
+        def answer(body: bytes) -> tuple[int, bytes]:
+            return 200, b'{"choices": [{"message": {"content": "x"}}]}'
+
+        self.assertEqual(live.run([stream], answer)["rows"][0]["result"], "N/A")
+        self.assertEqual(
+            live.run([stream], answer, retired={})["rows"][0]["result"], "Fail"
+        )
+
+    def test_the_real_v2_dataset_maps_to_input_records(self) -> None:
+        path = ROOT / "evals" / "guards" / "owasp-llm-top10-2026-v2.json"
+        records = live.dataset_records(live.load_dataset(path))
+        self.assertEqual(len(records), 181)
+        self.assertEqual(sum(1 for record in records if record["expect_status"] == 403), 44)
+        self.assertTrue(all(record["coverage"] == "guard-lane" for record in records))
+        report = live.run(records, block_everything, retired={}, by_language=True)
+        self.assertEqual(len(report["rows"]), 181)
+        self.assertEqual(report["totals"]["Pass"], 44)
+        self.assertEqual(report["totals"]["Fail"], 137)
+        self.assertEqual(
+            set(report["totals_by_language"]), {"en", "bm", "zh", "mixed"}
+        )
 
 
 class RunTests(unittest.TestCase):

@@ -49,6 +49,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parent))
 
 import run_owasp_corpus as corpus  # noqa: E402
 
+from nasi_lemak.guard_eval import DatasetError, GuardDataset, load_dataset  # noqa: E402
 from nasi_lemak.pii import MASK_TOKENS, find_redactions  # noqa: E402
 
 REPORT_SCHEMA = 1
@@ -148,6 +149,39 @@ def _reply_and_block(payload: Any) -> tuple[str | None, str | None]:
     return None, None
 
 
+def dataset_records(dataset: GuardDataset) -> list[dict[str, Any]]:
+    """Map input-stage guard cases onto records the corpus runner understands.
+
+    Output-stage cases cannot be sent without inventing a model reply, so they
+    are refused before any record is built.
+    """
+    output_cases = [case.case_id for case in dataset.cases if case.stage != "input"]
+    if output_cases:
+        raise DatasetError(
+            "dataset has output-stage cases that cannot be sent: "
+            + ", ".join(output_cases)
+        )
+    records: list[dict[str, Any]] = []
+    for case in dataset.cases:
+        blocking = case.expected == "block"
+        records.append(
+            {
+                "id": case.case_id,
+                "messages": [
+                    {"role": message["role"], "content": message["content"]}
+                    for message in case.messages
+                ],
+                "optional_extra": None,
+                "expect_status": 403 if blocking else 200,
+                "guard_expect": "should_block" if blocking else "should_allow",
+                "coverage": "guard-lane",
+                "language": case.language,
+                "expected": case.expected,
+            }
+        )
+    return records
+
+
 def retired_limits() -> dict[str, dict[str, Any]]:
     """Rows whose authored limit the product removed on purpose."""
     return {
@@ -229,6 +263,9 @@ def run_record(
     retired: dict[str, dict[str, Any]] | None = None,
 ) -> dict[str, Any]:
     row: dict[str, Any] = {"id": record["id"], "sent_at": datetime.now(timezone.utc).isoformat()}
+    for field in ("language", "expected"):
+        if field in record:
+            row[field] = record[field]
     try:
         body = corpus.build_request_body(record)
     except corpus.RequestBuildError as error:
@@ -290,6 +327,8 @@ def run(
     clock: Callable[[], float] = time.monotonic,
     sleep: Callable[[float], None] = time.sleep,
     progress: Callable[[str], None] = lambda line: None,
+    retired: dict[str, dict[str, Any]] | None = None,
+    by_language: bool = False,
 ) -> dict[str, Any]:
     report: dict[str, Any] = {
         "schema": REPORT_SCHEMA,
@@ -297,7 +336,8 @@ def run(
         "started_at": datetime.now(timezone.utc).isoformat(),
         "rows": [],
     }
-    retired = retired_limits()
+    if retired is None:
+        retired = retired_limits()
     for index, record in enumerate(records, 1):
         row = run_record(record, send, clock, retired)
         report["rows"].append(row)
@@ -311,10 +351,28 @@ def run(
         if pause and index < len(records):
             sleep(pause)
     report["finished_at"] = datetime.now(timezone.utc).isoformat()
+    results = ("Pass", "Fail", "Unverified", "Blocked", "N/A")
     report["totals"] = {
         result: sum(1 for row in report["rows"] if row["result"] == result)
-        for result in ("Pass", "Fail", "Unverified", "Blocked", "N/A")
+        for result in results
     }
+    if by_language:
+        languages: list[str] = []
+        for row in report["rows"]:
+            language = row.get("language")
+            if isinstance(language, str) and language not in languages:
+                languages.append(language)
+        report["totals_by_language"] = {
+            language: {
+                result: sum(
+                    1
+                    for row in report["rows"]
+                    if row.get("language") == language and row["result"] == result
+                )
+                for result in results
+            }
+            for language in languages
+        }
     if report_path is not None:
         _write(report_path, report)
     return report
@@ -344,12 +402,26 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--base-url", required=True)
     parser.add_argument("--report", required=True, help="JSON report to write")
     parser.add_argument("--only", default="", help="comma-separated case IDs to rerun")
+    parser.add_argument(
+        "--dataset",
+        default="",
+        help="guard-lane dataset to send instead of the corpus rows",
+    )
     parser.add_argument("--timeout", type=float, default=DEFAULT_TIMEOUT)
     parser.add_argument("--pause", type=float, default=1.0, help="seconds between cases")
     parser.add_argument("--api-key-env", default=KEY_ENV)
     args = parser.parse_args(argv)
 
-    records = corpus.load_records()
+    dataset: GuardDataset | None = None
+    if args.dataset:
+        try:
+            dataset = load_dataset(args.dataset)
+            records = dataset_records(dataset)
+        except DatasetError as error:
+            print(f"error: {error}", file=sys.stderr)
+            return 2
+    else:
+        records = corpus.load_records()
     if args.only:
         wanted = {item.strip() for item in args.only.split(",") if item.strip()}
         unknown = wanted - {record["id"] for record in records}
@@ -374,6 +446,9 @@ def main(argv: list[str] | None = None) -> int:
         ).hexdigest(),
         "cases_selected": len(records),
     }
+    if dataset is not None:
+        meta["dataset_id"] = dataset.dataset_id
+        meta["dataset_path"] = args.dataset
     report = run(
         records,
         send,
@@ -381,9 +456,13 @@ def main(argv: list[str] | None = None) -> int:
         meta=meta,
         pause=args.pause,
         progress=lambda line: print(line, file=sys.stderr, flush=True),
+        retired={} if dataset is not None else None,
+        by_language=dataset is not None,
     )
     totals = report["totals"]
     print(" ".join(f"{name}={count}" for name, count in totals.items()))
+    for language, counts in report.get("totals_by_language", {}).items():
+        print(f"{language}: " + " ".join(f"{name}={count}" for name, count in counts.items()))
     print(f"report: {args.report}")
     return 0
 
