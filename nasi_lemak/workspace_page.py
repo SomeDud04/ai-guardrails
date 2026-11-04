@@ -395,6 +395,15 @@ textarea:focus-visible { outline-offset: -2px; }
 .admin-table-row .cell-muted { color: var(--muted-dim); font-size: .8125rem; }
 .admin-table-row .cell-actions { display: flex; flex-wrap: wrap; gap: var(--space-1); align-content: center; justify-content: flex-start; }
 .admin-table-row .cell-actions button { min-height: 28px; padding: 0 6px; font-size: .8125rem; white-space: nowrap; }
+.admin-table-row .row-actions { min-width: 0; }
+.admin-table-row .row-actions > summary {
+  display: inline-block; min-height: 28px; padding: 0 8px;
+  border: 1px solid var(--line-strong); border-radius: var(--radius);
+  color: var(--text-soft); font-size: .8125rem; cursor: pointer; list-style: none;
+}
+.admin-table-row .row-actions > summary::-webkit-details-marker { display: none; }
+.admin-table-row .row-actions > summary:focus-visible { outline: 2px solid var(--ok); outline-offset: 1px; }
+.admin-table-row .row-actions-menu { display: flex; flex-wrap: wrap; gap: var(--space-1); margin-top: var(--space-1); }
 .admin-table-empty { margin: 0; padding: var(--space-3); color: var(--muted-dim); font-size: .875rem; }
 .monitor-head { display: flex; flex-wrap: wrap; align-items: center; justify-content: space-between; gap: var(--space-3); }
 .monitor-head label { display: flex; align-items: center; gap: var(--space-2); color: var(--muted); font-size: .875rem; }
@@ -720,6 +729,7 @@ button.danger:hover:not(:disabled) { background: #8f1d17; border-color: #8f1d17;
 #key-list .cols-7 { grid-template-columns: minmax(130px, 1.2fr) minmax(150px, 1.4fr) 90px 110px 80px 130px minmax(120px, .9fr); min-width: 980px; }
 #key-list .admin-table-head > div:nth-child(5) { text-align: right; }
 #key-list .admin-confirm { grid-column: 1 / -1; }
+#key-list .admin-table-row[data-selected="true"] { background: var(--surface-raised); border-left: 3px solid var(--focus); }
 #key-history .cols-10 { grid-template-columns: 140px 110px minmax(120px, 1fr) 90px repeat(3, minmax(72px, 1fr)) minmax(120px, 1.4fr) 90px 70px; min-width: 980px; }
 .key-details { display: grid; gap: var(--space-3); margin-top: var(--space-4); padding-top: var(--space-3); border-top: 1px solid var(--line); }
 .key-details-head { display: flex; flex-wrap: wrap; align-items: center; justify-content: space-between; gap: var(--space-2); }
@@ -856,6 +866,9 @@ _WORKSPACE_JS = """
   var keyCopy = byId("key-copy");
   var keyDone = byId("key-done");
   var keyState = byId("key-state");
+  var keySearch = byId("key-search");
+  var keyShowRevoked = byId("key-show-revoked");
+  var keyHiddenNote = byId("key-hidden-note");
   var keyList = byId("key-list");
   var keyMore = byId("key-more");
   var keyOwner = byId("key-owner");
@@ -1178,6 +1191,7 @@ _WORKSPACE_JS = """
   var adminActiveConfirm = null;
   var adminListChain = Promise.resolve();
   var adminSection = "monitor";
+  var adminStatusSeq = 0;
   var adminKeys = [];
   var keyCursor = null;
   var keyLoading = false;
@@ -1189,6 +1203,8 @@ _WORKSPACE_JS = """
   var keyHistorySeq = 0;
   var keySaving = false;
   var keyTextSeq = 0;
+  var keySearchText = "";
+  var openRowActions = null;
   var adminStateEpoch = 0;
   var adminDepartmentsLoaded = false;
   var adminUsersLoaded = false;
@@ -1275,6 +1291,25 @@ _WORKSPACE_JS = """
     node.textContent = text || "";
     if (kind) { node.setAttribute("data-kind", kind); }
     else { node.removeAttribute("data-kind"); }
+  }
+
+  // Admin messages are shared by every tab.  Successful messages fade on their
+  // own, but only when no newer message has replaced them in the meantime.
+  function setAdminStatus(text, kind) {
+    adminStatusSeq += 1;
+    var seq = adminStatusSeq;
+    setStatus(adminStatus, text, kind);
+    if (kind === "ok") {
+      setTimeout(function () {
+        if (seq !== adminStatusSeq) { return; }
+        setStatus(adminStatus, "");
+      }, 8000);
+    }
+  }
+
+  function clearAdminStatus() {
+    adminStatusSeq += 1;
+    setStatus(adminStatus, "");
   }
 
   function clearNode(node) {
@@ -4333,6 +4368,7 @@ _WORKSPACE_JS = """
       setStatus(globalStatus, "Administrator access is not available for this account.", "denied");
       return;
     }
+    if (section !== adminSection) { clearAdminStatus(); }
     adminSection = section;
     setAdminSectionTabs(section);
     if (section !== "keys") { hideCreatedKey(); }
@@ -4727,7 +4763,9 @@ _WORKSPACE_JS = """
   function adminGuard(result, node) {
     if (authFailure(result)) { return true; }
     if (result.status === 403) {
-      setStatus(node, "Administrator permission was denied by the server.", "denied");
+      var message = "Administrator permission was denied by the server.";
+      if (node === adminStatus) { setAdminStatus(message, "denied"); }
+      else { setStatus(node, message, "denied"); }
       return true;
     }
     return false;
@@ -4894,7 +4932,7 @@ _WORKSPACE_JS = """
       "Confirm enable", function (box) {
         var epoch = sessionEpoch;
         var token = adminStateEpoch;
-        setStatus(adminStatus, "Enabling @" + item.username + "…");
+        setAdminStatus("Enabling @" + item.username + "…");
         api("/workspace/api/admin/users/" + encodeURIComponent(item.id) + "/enable", {
           method: "POST",
           body: "{}"
@@ -4905,18 +4943,18 @@ _WORKSPACE_JS = """
             return;
           }
           if (!result.ok) {
-            setStatus(adminStatus, result.status === 409
+            setAdminStatus(result.status === 409
               ? "The account is already active. Nothing was changed."
               : serverMessage(result, timeoutOrNetwork(result)), "error");
             closeRoleConfirm(box, row);
             return;
           }
-          setStatus(adminStatus, "Account @" + item.username +
+          setAdminStatus("Account @" + item.username +
             " enabled. Previously revoked sessions stay revoked; the user can sign in again with their existing password.", "ok");
           closeRoleConfirm(box, row);
           queueAdminList(function () { return loadUsers(true); }).then(function (ok) {
             if (!ok && epoch === sessionEpoch && token === adminStateEpoch) {
-              setStatus(adminStatus, "Account enabled, but the list could not be refreshed.", "warning");
+              setAdminStatus("Account enabled, but the list could not be refreshed.", "warning");
             }
           });
         });
@@ -4930,7 +4968,7 @@ _WORKSPACE_JS = """
       item.username, "Confirm delete", function (box) {
         var epoch = sessionEpoch;
         var token = adminStateEpoch;
-        setStatus(adminStatus, "Deleting @" + item.username + "…");
+        setAdminStatus("Deleting @" + item.username + "…");
         api("/workspace/api/admin/users/" + encodeURIComponent(item.id) + "/delete", {
           method: "POST",
           body: JSON.stringify({ confirm_username: item.username })
@@ -4941,7 +4979,7 @@ _WORKSPACE_JS = """
             return;
           }
           if (!result.ok) {
-            setStatus(adminStatus, result.status === 409
+            setAdminStatus(result.status === 409
               ? "Deletion was refused: this account authored retained policy or grant history, is the target of a user-scoped policy assignment, has an in-progress turn, or is the last active administrator. Nothing was deleted."
               : serverMessage(result, timeoutOrNetwork(result)), "error");
             closeRoleConfirm(box, row);
@@ -4950,13 +4988,13 @@ _WORKSPACE_JS = """
           var data = isObject(result.data) ? result.data : {};
           var conversations = typeof data.deleted_conversations === "number" ? data.deleted_conversations : 0;
           var messages = typeof data.deleted_messages === "number" ? data.deleted_messages : 0;
-          setStatus(adminStatus, "Account @" + item.username + " deleted. Removed " +
+          setAdminStatus("Account @" + item.username + " deleted. Removed " +
             conversations + " conversation(s) and " + messages +
             " message(s); its sessions were revoked. Access history keeps the administrative event without transcript content.", "ok");
           closeRoleConfirm(box, row);
           queueAdminList(function () { return loadUsers(true); }).then(function (ok) {
             if (!ok && epoch === sessionEpoch && token === adminStateEpoch) {
-              setStatus(adminStatus, "Account deleted, but the list could not be refreshed.", "warning");
+              setAdminStatus("Account deleted, but the list could not be refreshed.", "warning");
             }
           });
         });
@@ -5096,7 +5134,7 @@ _WORKSPACE_JS = """
       var password = input.value;
       if (password.length < 12) {
         input.value = "";
-        setStatus(adminStatus, "The new password must be at least 12 characters. Nothing was changed.", "error");
+        setAdminStatus("The new password must be at least 12 characters. Nothing was changed.", "error");
         input.focus();
         return;
       }
@@ -5104,7 +5142,7 @@ _WORKSPACE_JS = """
       resettingPassword = true;
       confirmButton.disabled = true;
       cancelButton.disabled = true;
-      setStatus(adminStatus, "Resetting password…");
+      setAdminStatus("Resetting password…");
       var epoch = sessionEpoch;
       api("/workspace/api/admin/users/" + encodeURIComponent(item.id) + "/reset-password", {
         method: "POST",
@@ -5116,10 +5154,10 @@ _WORKSPACE_JS = """
         cancelButton.disabled = false;
         if (adminGuard(result, adminStatus)) { return; }
         if (!result.ok) {
-          setStatus(adminStatus, serverMessage(result, timeoutOrNetwork(result)), "error");
+          setAdminStatus(serverMessage(result, timeoutOrNetwork(result)), "error");
           return;
         }
-        setStatus(adminStatus, "Password reset for @" + item.username + ". Existing sign-ins for this account were revoked.", "ok");
+        setAdminStatus("Password reset for @" + item.username + ". Existing sign-ins for this account were revoked.", "ok");
         if (form.parentNode) { form.parentNode.removeChild(form); }
         row.adminResetForm = null;
       });
@@ -5156,7 +5194,7 @@ _WORKSPACE_JS = """
     askConfirm(row, question, granting ? "Confirm grant" : "Confirm revoke", function (box) {
       var epoch = sessionEpoch;
       var token = adminStateEpoch;
-      setStatus(adminStatus, (granting ? "Granting " : "Revoking ") + accessName +
+      setAdminStatus((granting ? "Granting " : "Revoking ") + accessName +
         (granting ? " to " : " from ") + fullName + "…");
       api("/workspace/api/admin/users/" + encodeURIComponent(item.id) + "/role", {
         method: "POST",
@@ -5170,7 +5208,7 @@ _WORKSPACE_JS = """
         if (!result.ok) {
           // The server is authoritative; a 409 means the requested change
           // would have removed the last administrator.
-          setStatus(adminStatus, result.status === 409
+          setAdminStatus(result.status === 409
             ? "The role change was refused because the workspace must keep at least one administrator. Nothing was changed."
             : serverMessage(result, timeoutOrNetwork(result)), "error");
           closeRoleConfirm(box, row);
@@ -5179,7 +5217,7 @@ _WORKSPACE_JS = """
         var success = accessName.charAt(0).toUpperCase() + accessName.slice(1) +
           (granting ? " granted to " : " revoked from ") +
           fullName + " (@" + item.username + ").";
-        setStatus(adminStatus, success);
+        setAdminStatus(success);
         closeRoleConfirm(box, row);
         if (selfChange) {
           // A role change to this account changes what the cookie profile may
@@ -5188,7 +5226,7 @@ _WORKSPACE_JS = """
           loadProfile({ quiet: true }).then(function (ok) {
             if (epoch !== sessionEpoch) { return; }
             if (!ok) {
-              setStatus(adminStatus,
+              setAdminStatus(
                 "The role changed, but your profile could not be refreshed. Reload the page before continuing.",
                 "warning");
               return;
@@ -5199,7 +5237,7 @@ _WORKSPACE_JS = """
             }
             queueAdminList(function () { return loadUsers(true); }).then(function (refreshed) {
               if (!refreshed && epoch === sessionEpoch && token === adminStateEpoch) {
-                setStatus(adminStatus, success + " The user list could not be refreshed.", "warning");
+                setAdminStatus(success + " The user list could not be refreshed.", "warning");
               }
             });
           });
@@ -5207,7 +5245,7 @@ _WORKSPACE_JS = """
         }
         queueAdminList(function () { return loadUsers(true); }).then(function (ok) {
           if (!ok && epoch === sessionEpoch && token === adminStateEpoch) {
-            setStatus(adminStatus, success + " The user list could not be refreshed.", "warning");
+            setAdminStatus(success + " The user list could not be refreshed.", "warning");
           }
         });
       });
@@ -5218,6 +5256,7 @@ _WORKSPACE_JS = """
     if (reset) {
       clearNode(userList);
       renderTableHead(userList, ["Account", "Role", "Department", "Status", "Actions"], 5);
+      openRowActions = null;
     }
     var query = userSearchText.toLowerCase();
     var selfId = profile && profile.user ? profile.user.id : null;
@@ -5245,6 +5284,61 @@ _WORKSPACE_JS = """
       actions.className = "cell-actions";
       actions.setAttribute("data-label", "Actions");
       actions.setAttribute("data-admin-write", "");
+      var menu = document.createElement("details");
+      menu.className = "row-actions";
+      var menuSummary = document.createElement("summary");
+      menuSummary.textContent = "Manage";
+      menuSummary.setAttribute("aria-label", "Manage @" + item.username);
+      menu.appendChild(menuSummary);
+      var menuButtons = document.createElement("div");
+      menuButtons.className = "row-actions-menu";
+      menu.appendChild(menuButtons);
+      menu.addEventListener("toggle", function (rowMenu) {
+        return function () {
+          var open = rowMenu.open === true || rowMenu.getAttribute("open") !== null;
+          if (!open) {
+            if (openRowActions === rowMenu) { openRowActions = null; }
+            return;
+          }
+          if (openRowActions && openRowActions !== rowMenu) {
+            openRowActions.open = false;
+            openRowActions.removeAttribute("open");
+          }
+          openRowActions = rowMenu;
+        };
+      }(menu));
+
+      var resetButton = document.createElement("button");
+      resetButton.type = "button";
+      resetButton.className = "ghost";
+      resetButton.textContent = "Reset password";
+      resetButton.addEventListener("click", function (target, userItem) {
+        return function () { openPasswordReset(target, userItem); };
+      }(row, item));
+      menuButtons.appendChild(resetButton);
+      if (!item.disabled) {
+        var roleButton = document.createElement("button");
+        roleButton.type = "button";
+        roleButton.className = item.role === "admin" ? "danger" : "ghost";
+        roleButton.textContent = item.role === "admin" ? "Revoke admin" : "Grant admin";
+        roleButton.addEventListener("click", function (target, userItem, displayName) {
+          return function () { openRoleChange(target, userItem, displayName); };
+        }(row, item, fullName));
+        menuButtons.appendChild(roleButton);
+        if (item.role !== "admin") {
+          var auditorButton = document.createElement("button");
+          auditorButton.type = "button";
+          auditorButton.className = "ghost";
+          auditorButton.textContent = item.role === "auditor" ? "Revoke auditor" : "Make auditor";
+          auditorButton.addEventListener("click", function (target, userItem, displayName) {
+            return function () {
+              openRoleChange(target, userItem, displayName,
+                userItem.role === "auditor" ? "employee" : "auditor");
+            };
+          }(row, item, fullName));
+          menuButtons.appendChild(auditorButton);
+        }
+      }
       if (item.disabled) {
         var enableButton = document.createElement("button");
         enableButton.type = "button";
@@ -5254,7 +5348,7 @@ _WORKSPACE_JS = """
         enableButton.addEventListener("click", function (target, userItem, displayName) {
           return function () { openEnableUser(target, userItem, displayName); };
         }(row, item, fullName));
-        actions.appendChild(enableButton);
+        menuButtons.appendChild(enableButton);
       }
       if (!item.disabled && item.id !== selfId) {
         var disableButton = document.createElement("button");
@@ -5268,7 +5362,7 @@ _WORKSPACE_JS = """
               "Confirm disable", function () {
                 var epoch = sessionEpoch;
                 var token = adminStateEpoch;
-                setStatus(adminStatus, "Disabling @" + userItem.username + "…");
+                setAdminStatus("Disabling @" + userItem.username + "…");
                 api("/workspace/api/admin/users/" + encodeURIComponent(userItem.id) + "/disable", {
                   method: "POST",
                   body: "{}"
@@ -5276,53 +5370,22 @@ _WORKSPACE_JS = """
                   if (epoch !== sessionEpoch || token !== adminStateEpoch) { return; }
                   if (adminGuard(result, adminStatus)) { return; }
                   if (!result.ok) {
-                    setStatus(adminStatus, serverMessage(result, timeoutOrNetwork(result)), "error");
+                    setAdminStatus(serverMessage(result, timeoutOrNetwork(result)), "error");
                     return;
                   }
-                  setStatus(adminStatus, "Account @" + userItem.username +
+                  setAdminStatus("Account @" + userItem.username +
                     " disabled. Existing sign-ins were revoked.", "ok");
                   queueAdminList(function () { return loadUsers(true); }).then(function (ok) {
                     if (!ok && epoch === sessionEpoch && token === adminStateEpoch) {
-                      setStatus(adminStatus, "Account disabled, but the list could not be refreshed.", "warning");
+                      setAdminStatus("Account disabled, but the list could not be refreshed.", "warning");
                     }
                   });
                 });
               });
           };
         }(row, item));
-        actions.appendChild(disableButton);
+        menuButtons.appendChild(disableButton);
       }
-      if (!item.disabled) {
-        var roleButton = document.createElement("button");
-        roleButton.type = "button";
-        roleButton.className = item.role === "admin" ? "danger" : "ghost";
-        roleButton.textContent = item.role === "admin" ? "Revoke admin" : "Grant admin";
-        roleButton.addEventListener("click", function (target, userItem, displayName) {
-          return function () { openRoleChange(target, userItem, displayName); };
-        }(row, item, fullName));
-        actions.appendChild(roleButton);
-        if (item.role !== "admin") {
-          var auditorButton = document.createElement("button");
-          auditorButton.type = "button";
-          auditorButton.className = "ghost";
-          auditorButton.textContent = item.role === "auditor" ? "Revoke auditor" : "Make auditor";
-          auditorButton.addEventListener("click", function (target, userItem, displayName) {
-            return function () {
-              openRoleChange(target, userItem, displayName,
-                userItem.role === "auditor" ? "employee" : "auditor");
-            };
-          }(row, item, fullName));
-          actions.appendChild(auditorButton);
-        }
-      }
-      var resetButton = document.createElement("button");
-      resetButton.type = "button";
-      resetButton.className = "ghost";
-      resetButton.textContent = "Reset password";
-      resetButton.addEventListener("click", function (target, userItem) {
-        return function () { openPasswordReset(target, userItem); };
-      }(row, item));
-      actions.appendChild(resetButton);
       if (item.id !== selfId) {
         var deleteButton = document.createElement("button");
         deleteButton.type = "button";
@@ -5332,8 +5395,9 @@ _WORKSPACE_JS = """
         deleteButton.addEventListener("click", function (target, userItem, displayName) {
           return function () { openDeleteUser(target, userItem, displayName); };
         }(row, item, fullName));
-        actions.appendChild(deleteButton);
+        menuButtons.appendChild(deleteButton);
       }
+      actions.appendChild(menu);
       row.appendChild(actions);
       userList.appendChild(row);
       shown += 1;
@@ -5376,20 +5440,20 @@ _WORKSPACE_JS = """
             "? This removes read access to original confidential chat text in this scope.",
             "Revoke grant", function () {
               var epoch = sessionEpoch;
-              setStatus(adminStatus, "Revoking review access…");
+              setAdminStatus("Revoking review access…");
               api("/workspace/api/admin/review-grants/" + encodeURIComponent(grant.id), {
                 method: "DELETE"
               }).then(function (result) {
                 if (epoch !== sessionEpoch) { return; }
                 if (adminGuard(result, adminStatus)) { return; }
                 if (!result.ok) {
-                  setStatus(adminStatus, serverMessage(result, timeoutOrNetwork(result)), "error");
+                  setAdminStatus(serverMessage(result, timeoutOrNetwork(result)), "error");
                   return;
                 }
-                setStatus(adminStatus, "Review access revoked for @" + grant.username + ".", "ok");
+                setAdminStatus("Review access revoked for @" + grant.username + ".", "ok");
                 queueAdminList(function () { return loadGrants(true); }).then(function (ok) {
                   if (!ok && epoch === sessionEpoch) {
-                    setStatus(adminStatus, "Access revoked, but the grant list could not be refreshed.", "warning");
+                    setAdminStatus("Access revoked, but the grant list could not be refreshed.", "warning");
                   }
                 });
                 refreshReviewAccess();
@@ -5757,7 +5821,45 @@ _WORKSPACE_JS = """
     keyText.hidden = true;
   }
 
+  function keyRowFor(keyId) {
+    if (typeof keyId !== "string" || !keyId) { return null; }
+    for (var index = 0; index < keyList.children.length; index += 1) {
+      var row = keyList.children[index];
+      if (row.getAttribute("data-key") === keyId) { return row; }
+    }
+    return null;
+  }
+
+  function keyDetailsButtonFor(keyId) {
+    var row = keyRowFor(keyId);
+    if (!row) { return null; }
+    for (var index = 0; index < row.children.length; index += 1) {
+      var cell = row.children[index];
+      if (!cell || !cell.children) { continue; }
+      for (var childIndex = 0; childIndex < cell.children.length; childIndex += 1) {
+        var child = cell.children[childIndex];
+        if (child.tagName === "BUTTON" && child.textContent === "Details") {
+          return child;
+        }
+      }
+    }
+    return null;
+  }
+
+  function clearKeyDetailsMark() {
+    for (var index = 0; index < keyList.children.length; index += 1) {
+      keyList.children[index].removeAttribute("data-selected");
+    }
+  }
+
+  function markKeyDetailsRow(keyId) {
+    clearKeyDetailsMark();
+    var row = keyRowFor(keyId);
+    if (row) { row.setAttribute("data-selected", "true"); }
+  }
+
   function closeKeyDetails() {
+    var closingId = keyDetailsFor;
     keyDetailsFor = null;
     keyExportPath = "";
     keyDetails.hidden = true;
@@ -5770,6 +5872,11 @@ _WORKSPACE_JS = """
     clearNode(keyHistory);
     setStatus(keyDetailsState, "");
     setStatus(keyHistoryState, "");
+    clearKeyDetailsMark();
+    var detailsButton = keyDetailsButtonFor(closingId);
+    if (detailsButton) {
+      try { detailsButton.focus(); } catch (error) { /* focus is best effort */ }
+    }
   }
 
   function openKeyDetails(item) {
@@ -5783,6 +5890,11 @@ _WORKSPACE_JS = """
     clearNode(keyHistory);
     keyHistoryMore.hidden = true;
     keyDetailsHeading.textContent = item.name + " details";
+    markKeyDetailsRow(item.id);
+    try {
+      keyDetails.scrollIntoView({ block: "start", behavior: "smooth" });
+    } catch (error) { /* scrolling is optional */ }
+    try { keyDetailsHeading.focus(); } catch (error) { /* focus is best effort */ }
     keyExportPath = "/workspace/api/admin/api-keys/" +
       encodeURIComponent(item.id) + "/requests.csv";
     var revoked = keyStatus(item) === "revoked";
@@ -6039,7 +6151,7 @@ _WORKSPACE_JS = """
       "Its usage record is kept.", "Confirm revoke", function () {
       var epoch = sessionEpoch;
       var token = adminStateEpoch;
-      setStatus(adminStatus, "Revoking " + item.name + "…");
+      setAdminStatus("Revoking " + item.name + "…");
       api("/workspace/api/admin/api-keys/" + encodeURIComponent(item.id) + "/revoke", {
         method: "POST",
         body: "{}"
@@ -6047,10 +6159,10 @@ _WORKSPACE_JS = """
         if (epoch !== sessionEpoch || token !== adminStateEpoch) { return; }
         if (adminGuard(result, adminStatus)) { return; }
         if (!result.ok) {
-          setStatus(adminStatus, serverMessage(result, timeoutOrNetwork(result)), "error");
+          setAdminStatus(serverMessage(result, timeoutOrNetwork(result)), "error");
           return;
         }
-        setStatus(adminStatus, item.name + " revoked.", "ok");
+        setAdminStatus(item.name + " revoked.", "ok");
         queueAdminList(function () { return loadApiKeys(true); });
       });
     });
@@ -6058,16 +6170,37 @@ _WORKSPACE_JS = """
 
   function renderApiKeys() {
     clearNode(keyList);
+    var hiddenRevoked = 0;
+    var query = keySearchText.toLowerCase();
+    var showRevoked = keyShowRevoked.checked === true;
     if (!adminKeys.length) {
       appendEmpty(keyList, "No API keys have been generated.");
+      keyHiddenNote.textContent = "";
+      keyHiddenNote.hidden = true;
       return;
     }
     renderTableHead(keyList, [
       "Name", "Owner", "Key hint", "Status", "Requests", "Last used", "Actions"
     ], 7);
+    var shown = 0;
     for (var index = 0; index < adminKeys.length; index += 1) {
       var item = adminKeys[index];
       if (!isObject(item) || typeof item.id !== "string") { continue; }
+      var detailsOpen = item.id === keyDetailsFor;
+      var revoked = keyStatus(item) === "revoked";
+      if (!detailsOpen) {
+        var haystack = [
+          typeof item.name === "string" ? item.name : "",
+          keyOwnerName(item),
+          typeof item.owner_username === "string" ? item.owner_username : "",
+          typeof item.owner_department === "string" ? item.owner_department : ""
+        ].join(" ").toLowerCase();
+        if (query && haystack.indexOf(query) < 0) { continue; }
+        if (revoked && !showRevoked) {
+          hiddenRevoked += 1;
+          continue;
+        }
+      }
       var row = document.createElement("div");
       row.className = "admin-table-row cols-7";
       row.setAttribute("data-key", item.id);
@@ -6122,7 +6255,23 @@ _WORKSPACE_JS = """
       }
       row.appendChild(actions);
       keyList.appendChild(row);
+      shown += 1;
     }
+    if (shown === 0) {
+      appendEmpty(keyList, showRevoked
+        ? "No loaded API keys match this search. Search applies only to keys loaded so far."
+        : "No non-revoked API keys match. Tick Show revoked keys to include revoked keys.");
+    }
+    if (hiddenRevoked > 0) {
+      keyHiddenNote.textContent = hiddenRevoked === 1
+        ? "1 revoked key hidden"
+        : hiddenRevoked + " revoked keys hidden";
+      keyHiddenNote.hidden = false;
+    } else {
+      keyHiddenNote.textContent = "";
+      keyHiddenNote.hidden = true;
+    }
+    markKeyDetailsRow(keyDetailsFor);
   }
 
   function loadApiKeys(reset) {
@@ -6720,7 +6869,9 @@ _WORKSPACE_JS = """
         "cell-muted",
         "When and who"
       ));
-      row.appendChild(tableCell(item.stage + ": " + item.reason_text, "", "Why"));
+      var blockWhy = alertCategoryText(item);
+      row.appendChild(tableCell(item.stage + ": " + item.reason_text +
+        (blockWhy ? " (" + blockWhy + ")" : ""), "", "Why"));
       monitorBlocks.appendChild(row);
     }
   }
@@ -7448,11 +7599,24 @@ _WORKSPACE_JS = """
     // title so the row remains compact without hiding text permanently.
     var detail = Object.prototype.hasOwnProperty.call(BLOCK_DETAILS, item.reason_code)
       ? BLOCK_DETAILS[item.reason_code] : null;
-    if (detail) { return detail.reason; }
-    if (typeof item.reason_text === "string" && item.reason_text) {
-      return item.reason_text;
+    var reason = detail ? detail.reason
+      : (typeof item.reason_text === "string" && item.reason_text
+        ? item.reason_text : "Blocked by policy.");
+    var why = alertCategoryText(item);
+    return why ? reason + " (" + why + ")" : reason;
+  }
+
+  // The guard's category names, or "deny phrase" for a policy-text block, so a
+  // row says why without opening it.  Older alerts carry no categories.
+  function alertCategoryText(item) {
+    var names = isObject(item) && Array.isArray(item.categories)
+      ? item.categories.filter(function (name) { return typeof name === "string"; }) : [];
+    if (names.length) { return names.join(", "); }
+    if (isObject(item) && (item.reason_code === "INPUT_POLICY_BLOCK" ||
+        item.reason_code === "OUTPUT_POLICY_BLOCK")) {
+      return "deny phrase";
     }
-    return "Blocked by policy.";
+    return "";
   }
 
   function alertControlSource(item) {
@@ -7965,7 +8129,7 @@ _WORKSPACE_JS = """
   function loadAdminPanels() {
     if (!signedIn || !canViewAdmin()) { return; }
     adminLoaded = true;
-    setStatus(adminStatus, "Loading account administration data…");
+    setAdminStatus("Loading account administration data…");
     var epoch = sessionEpoch;
     Promise.all([
       queueAdminList(function () { return loadDepartments(true); }),
@@ -7977,9 +8141,9 @@ _WORKSPACE_JS = """
       var allOk = true;
       for (var i = 0; i < results.length; i += 1) { if (!results[i]) { allOk = false; } }
       if (!allOk && adminStatus.getAttribute("data-kind") !== "denied") {
-        setStatus(adminStatus, "Some account data could not be loaded. Check each list for details.", "warning");
+        setAdminStatus("Some account data could not be loaded. Check each list for details.", "warning");
       } else if (allOk) {
-        setStatus(adminStatus, "");
+        setAdminStatus("");
       }
     });
   }
@@ -8063,6 +8227,14 @@ _WORKSPACE_JS = """
     adminKeys = [];
     keyCursor = null;
     keyLoading = false;
+    keySearchText = "";
+    openRowActions = null;
+    if (keySearch) { keySearch.value = ""; }
+    if (keyShowRevoked) { keyShowRevoked.checked = false; }
+    if (keyHiddenNote) {
+      keyHiddenNote.textContent = "";
+      keyHiddenNote.hidden = true;
+    }
     creatingKey = false;
     keySubmit.disabled = false;
     keyName.value = "";
@@ -8185,7 +8357,7 @@ _WORKSPACE_JS = """
     setStatus(userState, "");
     setStatus(grantState, "");
     setStatus(accessState, "");
-    setStatus(adminStatus, "");
+    setAdminStatus("");
     setStatus(policyState, "");
     setStatus(policyHistoryState, "");
     setStatus(assignmentState, "");
@@ -8202,25 +8374,25 @@ _WORKSPACE_JS = """
     if (!signedIn || creatingKey) { return; }
     var name = keyName.value.trim();
     if (!name) {
-      setStatus(adminStatus, "Enter a name for this key.", "error");
+      setAdminStatus("Enter a name for this key.", "error");
       keyName.focus();
       return;
     }
     var owner = keyOwner.value;
     if (!owner) {
-      setStatus(adminStatus, "Choose an owner for this key.", "error");
+      setAdminStatus("Choose an owner for this key.", "error");
       keyOwner.focus();
       return;
     }
     var expires = keyExpirySeconds(keyExpires.value);
     if (expires === undefined) {
-      setStatus(adminStatus, "Enter a valid expiry date.", "error");
+      setAdminStatus("Enter a valid expiry date.", "error");
       keyExpires.focus();
       return;
     }
     var requestsPerMinute = parseKeyRpm(keyRpm.value);
     if (requestsPerMinute === undefined) {
-      setStatus(adminStatus, "Requests per minute must be 1 or more.", "error");
+      setAdminStatus("Requests per minute must be 1 or more.", "error");
       keyRpm.focus();
       return;
     }
@@ -8235,7 +8407,7 @@ _WORKSPACE_JS = """
     creatingKey = true;
     keySubmit.disabled = true;
     hideCreatedKey();
-    setStatus(adminStatus, "Generating key…");
+    setAdminStatus("Generating key…");
     var epoch = sessionEpoch;
     api("/workspace/api/admin/api-keys", {
       method: "POST",
@@ -8246,11 +8418,11 @@ _WORKSPACE_JS = """
       keySubmit.disabled = false;
       if (adminGuard(result, adminStatus)) { return; }
       if (result.status === 409) {
-        setStatus(adminStatus, "That name is already used. Names stay reserved after a key is revoked.", "error");
+        setAdminStatus("That name is already used. Names stay reserved after a key is revoked.", "error");
         return;
       }
       if (!result.ok || !isObject(result.data) || typeof result.data.key !== "string") {
-        setStatus(adminStatus, serverMessage(result, timeoutOrNetwork(result)), "error");
+        setAdminStatus(serverMessage(result, timeoutOrNetwork(result)), "error");
         return;
       }
       keyName.value = "";
@@ -8262,7 +8434,7 @@ _WORKSPACE_JS = """
       keyCreatedName.textContent = name;
       keySecret.textContent = result.data.key;
       keyCreated.hidden = false;
-      setStatus(adminStatus, "Key generated. Copy it now.", "ok");
+      setAdminStatus("Key generated. Copy it now.", "ok");
       queueAdminList(function () { return loadApiKeys(true); });
     });
   });
@@ -8273,23 +8445,32 @@ _WORKSPACE_JS = """
     if (typeof navigator !== "undefined" && navigator.clipboard &&
         typeof navigator.clipboard.writeText === "function") {
       navigator.clipboard.writeText(value).then(function () {
-        setStatus(adminStatus, "Key copied.", "ok");
+        setAdminStatus("Key copied.", "ok");
       }, function () {
-        setStatus(adminStatus, "Copy failed. Select the key and copy it by hand.", "error");
+        setAdminStatus("Copy failed. Select the key and copy it by hand.", "error");
       });
       return;
     }
-    setStatus(adminStatus, "Select the key and copy it by hand.", "warning");
+    setAdminStatus("Select the key and copy it by hand.", "warning");
   });
 
   keyDone.addEventListener("click", function () {
     hideCreatedKey();
-    setStatus(adminStatus, "");
+    setAdminStatus("");
     keyName.focus();
   });
 
   keyMore.addEventListener("click", function () {
     queueAdminList(function () { return loadApiKeys(false); });
+  });
+
+  keySearch.addEventListener("input", function () {
+    keySearchText = keySearch.value.trim();
+    renderApiKeys();
+  });
+
+  keyShowRevoked.addEventListener("change", function () {
+    renderApiKeys();
   });
 
   keyDetailsClose.addEventListener("click", function () {
@@ -8316,19 +8497,19 @@ _WORKSPACE_JS = """
     if (!signedIn || keySaving || !keyDetailsFor || keyEditForm.hidden) { return; }
     var owner = keyEditOwner.value;
     if (!owner) {
-      setStatus(adminStatus, "Choose an owner for this key.", "error");
+      setAdminStatus("Choose an owner for this key.", "error");
       keyEditOwner.focus();
       return;
     }
     var expires = keyExpirySeconds(keyEditExpires.value);
     if (expires === undefined) {
-      setStatus(adminStatus, "Enter a valid expiry date.", "error");
+      setAdminStatus("Enter a valid expiry date.", "error");
       keyEditExpires.focus();
       return;
     }
     var requestsPerMinute = parseKeyRpm(keyEditRpm.value);
     if (requestsPerMinute === undefined) {
-      setStatus(adminStatus, "Requests per minute must be 1 or more.", "error");
+      setAdminStatus("Requests per minute must be 1 or more.", "error");
       keyEditRpm.focus();
       return;
     }
@@ -8337,7 +8518,7 @@ _WORKSPACE_JS = """
     var token = adminStateEpoch;
     keySaving = true;
     keyEditSubmit.disabled = true;
-    setStatus(adminStatus, "Saving key options…");
+    setAdminStatus("Saving key options…");
     api("/workspace/api/admin/api-keys/" + encodeURIComponent(keyId), {
       method: "POST",
       body: JSON.stringify({
@@ -8353,10 +8534,10 @@ _WORKSPACE_JS = """
       keyEditSubmit.disabled = false;
       if (adminGuard(result, adminStatus)) { return; }
       if (!result.ok) {
-        setStatus(adminStatus, serverMessage(result, timeoutOrNetwork(result)), "error");
+        setAdminStatus(serverMessage(result, timeoutOrNetwork(result)), "error");
         return;
       }
-      setStatus(adminStatus, "Key options saved.", "ok");
+      setAdminStatus("Key options saved.", "ok");
       if (isObject(result.data) && result.data.id === keyId) {
         for (var i = 0; i < adminKeys.length; i += 1) {
           if (adminKeys[i].id === keyId) { adminKeys[i] = result.data; }
@@ -8373,13 +8554,13 @@ _WORKSPACE_JS = """
     if (!signedIn || creatingDepartment) { return; }
     var name = departmentName.value.trim();
     if (!name) {
-      setStatus(adminStatus, "Enter a department name.", "error");
+      setAdminStatus("Enter a department name.", "error");
       departmentName.focus();
       return;
     }
     creatingDepartment = true;
     departmentSubmit.disabled = true;
-    setStatus(adminStatus, "Creating department…");
+    setAdminStatus("Creating department…");
     var epoch = sessionEpoch;
     api("/workspace/api/admin/departments", {
       method: "POST",
@@ -8390,14 +8571,14 @@ _WORKSPACE_JS = """
       departmentSubmit.disabled = false;
       if (adminGuard(result, adminStatus)) { return; }
       if (!result.ok) {
-        setStatus(adminStatus, serverMessage(result, timeoutOrNetwork(result)), "error");
+        setAdminStatus(serverMessage(result, timeoutOrNetwork(result)), "error");
         return;
       }
       departmentName.value = "";
-      setStatus(adminStatus, "Department created.", "ok");
+      setAdminStatus("Department created.", "ok");
       queueAdminList(function () { return loadDepartments(true); }).then(function (ok) {
         if (!ok && epoch === sessionEpoch) {
-          setStatus(adminStatus, "Department created, but the list could not be refreshed.", "warning");
+          setAdminStatus("Department created, but the list could not be refreshed.", "warning");
         }
       });
     });
@@ -8413,19 +8594,19 @@ _WORKSPACE_JS = """
       ? userRole.value : "employee";
     var password = userPassword.value;
     if (!username || !fullName || !departmentId) {
-      setStatus(adminStatus, "Enter a username, full name and department.", "error");
+      setAdminStatus("Enter a username, full name and department.", "error");
       return;
     }
     if (password.length < 12) {
       userPassword.value = "";
-      setStatus(adminStatus, "The initial password must be at least 12 characters. Nothing was created.", "error");
+      setAdminStatus("The initial password must be at least 12 characters. Nothing was created.", "error");
       userPassword.focus();
       return;
     }
     userPassword.value = "";
     creatingUser = true;
     userSubmit.disabled = true;
-    setStatus(adminStatus, "Creating user account…");
+    setAdminStatus("Creating user account…");
     var epoch = sessionEpoch;
     api("/workspace/api/admin/users", {
       method: "POST",
@@ -8442,16 +8623,16 @@ _WORKSPACE_JS = """
       userSubmit.disabled = false;
       if (adminGuard(result, adminStatus)) { return; }
       if (!result.ok) {
-        setStatus(adminStatus, serverMessage(result, timeoutOrNetwork(result)), "error");
+        setAdminStatus(serverMessage(result, timeoutOrNetwork(result)), "error");
         return;
       }
       userUsername.value = "";
       userFullName.value = "";
       userPassword.value = "";
-      setStatus(adminStatus, "User account created. Share the initial password separately; it is never shown again.", "ok");
+      setAdminStatus("User account created. Share the initial password separately; it is never shown again.", "ok");
       queueAdminList(function () { return loadUsers(true); }).then(function (ok) {
         if (!ok && epoch === sessionEpoch) {
-          setStatus(adminStatus, "Account created, but the user list could not be refreshed.", "warning");
+          setAdminStatus("Account created, but the user list could not be refreshed.", "warning");
         }
       });
     });
@@ -8465,25 +8646,25 @@ _WORKSPACE_JS = """
     var userId = grantUser.value;
     var scope = grantScope.value === "global" ? "global" : "department";
     if (!userId) {
-      setStatus(adminStatus, "Select a reviewer for the grant.", "error");
+      setAdminStatus("Select a reviewer for the grant.", "error");
       return;
     }
     var payload = { user_id: userId, scope: scope };
     if (scope === "department") {
       if (!grantDepartment.value) {
-        setStatus(adminStatus, "Select a department for a department-scoped grant.", "error");
+        setAdminStatus("Select a department for a department-scoped grant.", "error");
         return;
       }
       payload.department_id = grantDepartment.value;
     } else if (!grantGlobalConfirm.checked) {
-      setStatus(adminStatus, "A global grant requires the explicit confirmation checkbox.", "error");
+      setAdminStatus("A global grant requires the explicit confirmation checkbox.", "error");
       grantGlobalConfirm.focus();
       return;
     }
     grantGlobalConfirm.checked = false;
     granting = true;
     grantSubmit.disabled = true;
-    setStatus(adminStatus, "Granting review access…");
+    setAdminStatus("Granting review access…");
     var epoch = sessionEpoch;
     api("/workspace/api/admin/review-grants", {
       method: "POST",
@@ -8494,15 +8675,15 @@ _WORKSPACE_JS = """
       grantSubmit.disabled = false;
       if (adminGuard(result, adminStatus)) { return; }
       if (!result.ok) {
-        setStatus(adminStatus, serverMessage(result, timeoutOrNetwork(result)), "error");
+        setAdminStatus(serverMessage(result, timeoutOrNetwork(result)), "error");
         return;
       }
-      setStatus(adminStatus, scope === "global"
+      setAdminStatus(scope === "global"
         ? "Global review grant created. This grants access to original confidential chat text in every department."
         : "Department review grant created.", "ok");
       queueAdminList(function () { return loadGrants(true); }).then(function (ok) {
         if (!ok && epoch === sessionEpoch) {
-          setStatus(adminStatus, "Grant created, but the grant list could not be refreshed.", "warning");
+          setAdminStatus("Grant created, but the grant list could not be refreshed.", "warning");
         }
       });
       refreshReviewAccess();
@@ -9046,10 +9227,15 @@ WORKSPACE_HTML = """<!doctype html>
 </div>
 </div>
 <p id="key-state" class="admin-note" role="status" aria-live="polite"></p>
+<div class="admin-toolbar">
+<label class="admin-search" for="key-search">Search keys<input id="key-search" type="search" autocomplete="off" spellcheck="false"></label>
+<label class="key-check" for="key-show-revoked"><input id="key-show-revoked" type="checkbox"> Show revoked keys</label>
+</div>
 <div id="key-list" class="admin-table" aria-label="API keys"></div>
+<p id="key-hidden-note" class="admin-search-note" hidden></p>
 <button id="key-more" class="admin-more" type="button" hidden>Load more keys</button>
 <div id="key-details" class="key-details" aria-label="API key details" hidden>
-<div class="key-details-head"><h3 id="key-details-heading">Key details</h3><button id="key-details-close" class="ghost" type="button">Close</button></div>
+<div class="key-details-head"><h3 id="key-details-heading" tabindex="-1">Key details</h3><button id="key-details-close" class="ghost" type="button">Close</button></div>
 <form id="key-edit-form" class="admin-form policy-form" novalidate>
 <label for="key-edit-owner">Owner</label>
 <select id="key-edit-owner" name="key-edit-owner" required></select>

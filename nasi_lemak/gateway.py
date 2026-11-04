@@ -669,6 +669,7 @@ class Gateway:
                 "revision": metadata["revision"],
                 "digest": metadata["digest"],
                 "sources": metadata["sources"],
+                "categories": list(timing.get("block_categories") or []),
             }
         # Monitor takes the same finish time, so both show the same total.
         timing["finished"] = time.perf_counter()
@@ -897,6 +898,7 @@ class Gateway:
                         ",".join(categories) or "-",
                     )
                     _sink("input_decision", "block")
+                    _sink("block_categories", list(categories))
                     _audit_sink("request_blocked", "blocked", "POLICY_BLOCK")
                     return self._blocked(request_id, "INPUT_GUARD_BLOCK")
                 if result["decision"] == "block":
@@ -1001,6 +1003,7 @@ class Gateway:
                         "output",
                         ",".join(categories) or "-",
                     )
+                    _sink("block_categories", list(categories))
                     _audit_sink("request_blocked", "blocked", "POLICY_BLOCK")
                     return self._blocked(request_id, "OUTPUT_GUARD_BLOCK")
             # The complete buffered output is checked before any release.

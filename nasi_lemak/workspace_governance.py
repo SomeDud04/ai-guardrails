@@ -89,6 +89,17 @@ def _require_bool(value: Any, field: str) -> bool:
     return value
 
 
+def _alert_categories(value: Any) -> str | None:
+    """Guard category names behind a block, fixed vocabulary only."""
+    from .qwen3guard import CATEGORY_VALUES, INPUT_ONLY_CATEGORY_VALUES
+
+    if not isinstance(value, (list, tuple)):
+        return None
+    known = set(CATEGORY_VALUES) | set(INPUT_ONLY_CATEGORY_VALUES)
+    names = [item for item in value if isinstance(item, str) and item in known]
+    return ",".join(dict.fromkeys(names)) or None
+
+
 def _require_safe_id(value: Any, field: str) -> str:
     if not isinstance(value, str) or _SAFE_ID_RE.fullmatch(value) is None:
         raise ValueError(f"{field} is invalid")
@@ -1294,7 +1305,7 @@ class AlertAdminMixin:
             return None
         if outcome != "blocked":
             raise ValueError("alert requires a blocked turn")
-        if not isinstance(alert, dict) or set(alert) != {
+        if not isinstance(alert, dict) or set(alert) - {"categories"} != {
             "stage",
             "reason_code",
             "revision",
@@ -1347,6 +1358,7 @@ class AlertAdminMixin:
             "revision": revision,
             "digest": digest,
             "sources": sources_json,
+            "categories": _alert_categories(alert.get("categories")),
         }
 
     @staticmethod
@@ -1367,8 +1379,9 @@ class AlertAdminMixin:
             INSERT INTO ws_block_alerts(
                 id, request_id, user_id, department_id, conversation_id,
                 message_id, stage, reason_code, reason_text, control_revision,
-                control_digest, control_sources, created_at, api_key_id
-            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                control_digest, control_sources, created_at, api_key_id,
+                categories
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
             ON CONFLICT (request_id) DO NOTHING
             """,
             (
@@ -1386,6 +1399,7 @@ class AlertAdminMixin:
                 prepared["sources"],
                 now,
                 api_key_id,
+                prepared.get("categories"),
             ),
         )
         if applied == 1:
@@ -1423,6 +1437,7 @@ class AlertAdminMixin:
             "created_at": float(row["created_at"]),
             "api_key_id": row["api_key_id"],
             "api_key_name": row["api_key_name"],
+            "categories": row["categories"].split(",") if row["categories"] else [],
             "read": read_at is not None,
             "read_at": float(read_at) if read_at is not None else None,
             "acknowledged": acknowledged_at is not None,
@@ -1439,7 +1454,7 @@ class AlertAdminMixin:
             "a.reason_text, a.control_revision, a.control_digest, "
             "a.control_sources, a.created_at, u.username, u.full_name, "
             "d.name AS department_name, s.read_at, s.acknowledged_at, "
-            "a.api_key_id, k.name AS api_key_name "
+            "a.api_key_id, k.name AS api_key_name, a.categories "
             "FROM ws_block_alerts AS a "
             "LEFT JOIN ws_api_keys AS k ON k.id = a.api_key_id "
             "JOIN ws_users AS u ON u.id = a.user_id "

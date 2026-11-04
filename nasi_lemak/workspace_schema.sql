@@ -201,7 +201,8 @@ CREATE TABLE IF NOT EXISTS ws_block_alerts (
     control_digest TEXT NOT NULL,
     control_sources TEXT NOT NULL,
     created_at DOUBLE PRECISION NOT NULL,
-    api_key_id TEXT
+    api_key_id TEXT,
+    categories TEXT
 );
 
 -- Per-administrator read/acknowledgement state.  Absence of a row means unread

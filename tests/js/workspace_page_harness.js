@@ -125,6 +125,10 @@ function makeElement(id) {
     focus() {
       element.focused += 1;
     },
+    scrollIntoView(options) {
+      element.scrolledIntoView = (element.scrolledIntoView || 0) + 1;
+      element.scrollOptions = options;
+    },
   };
   Object.defineProperty(element, "textContent", {
     get() {
@@ -2023,6 +2027,31 @@ async function scenarioAdmin() {
   assert(app.elementFor("key-list").textContent.indexOf("nlk_synthetic_value") < 0,
     "the list must never hold the full key");
 
+  const hiddenKeyNote = app.elementFor("key-hidden-note");
+  assert(!findDataRow(app.elementFor("key-list"), "data-key", "key-3"),
+    "revoked keys must stay hidden until Show revoked keys is ticked");
+  assert(hiddenKeyNote.hidden === false &&
+      hiddenKeyNote.textContent === "1 revoked key hidden",
+    "hidden revoked keys must be counted under the list");
+  app.elementFor("key-search").value = "Harness";
+  app.elementFor("key-search").dispatch("input");
+  assert(findDataRow(app.elementFor("key-list"), "data-key", "key-2") &&
+      !findDataRow(app.elementFor("key-list"), "data-key", "key-1"),
+    "key search must filter by key name");
+  app.elementFor("key-search").value = "Alice Tan";
+  app.elementFor("key-search").dispatch("input");
+  assert(findDataRow(app.elementFor("key-list"), "data-key", "key-1") &&
+      findDataRow(app.elementFor("key-list"), "data-key", "key-2"),
+    "key search must filter by owner name");
+  app.elementFor("key-search").value = "";
+  app.elementFor("key-search").dispatch("input");
+  app.elementFor("key-show-revoked").checked = true;
+  app.elementFor("key-show-revoked").dispatch("change");
+  assert(findDataRow(app.elementFor("key-list"), "data-key", "key-3"),
+    "revoked keys must appear when Show revoked keys is ticked");
+  assert(hiddenKeyNote.hidden === true && hiddenKeyNote.textContent === "",
+    "the hidden count must clear when no revoked key is hidden");
+
   const activeKeyRow = findDataRow(app.elementFor("key-list"), "data-key", "key-2");
   assert(activeKeyRow && findButton(activeKeyRow, "Details"),
     "an active key must offer Details");
@@ -2030,6 +2059,12 @@ async function scenarioAdmin() {
   await settle();
   assert(app.elementFor("key-details").hidden === false,
     "Details must open the key panel");
+  assert(activeKeyRow.getAttribute("data-selected") === "true",
+    "opening Details must mark its key row");
+  assert(app.elementFor("key-details").scrolledIntoView === 1,
+    "opening Details must scroll the panel into view");
+  assert(app.elementFor("key-details-heading").focused === 1,
+    "opening Details must move focus to the heading");
   const keyHistory = app.lastMatching("/workspace/api/admin/api-keys/key-2/requests?limit=25");
   assert(keyHistory, "Details must load the key request history");
   keyHistory.respond(
@@ -2168,6 +2203,16 @@ async function scenarioAdmin() {
   await settle();
   assert(app.elementFor("admin-status").textContent.indexOf("saved") >= 0,
     "a successful save must be reported");
+  const rerenderedKeyRow = findDataRow(app.elementFor("key-list"), "data-key", "key-2");
+  assert(rerenderedKeyRow && rerenderedKeyRow.getAttribute("data-selected") === "true",
+    "re-rendering the key list must keep the open key marked");
+  const okStatusTimer = app.timers.filter(
+    (timer) => timer.delay === 8000 && !timer.cleared
+  ).pop();
+  assert(okStatusTimer, "a successful admin message must schedule its own expiry");
+  okStatusTimer.fn();
+  assert(app.elementFor("admin-status").textContent === "",
+    "a successful admin message must clear once its timer fires");
 
   const viewText = findButton(app.elementFor("key-history"), "View");
   assert(viewText, "only a request with stored text must offer View");
@@ -2194,11 +2239,34 @@ async function scenarioAdmin() {
     "View must show the prompt and reply as plain text");
   assert(shownText.indexOf("recorded") >= 0,
     "the stored text must say the read was recorded");
+  app.elementFor("key-history-export").dispatch("click");
+  await settle();
+  app.lastMatching("/workspace/api/admin/api-keys/key-2/requests.csv").respond(
+    "time,request_id\n1700000200,req_text-1\n", 200
+  );
+  await settle();
+  assert(app.elementFor("admin-status").textContent.indexOf("downloaded") >= 0,
+    "the tab switch fixture needs a successful admin message");
   app.elementFor("key-details-close").dispatch("click");
+  const closedRowButton = findButton(rerenderedKeyRow, "Details");
+  assert(closedRowButton, "the closed key row must still offer Details");
+  assert(rerenderedKeyRow.getAttribute("data-selected") === null,
+    "closing Details must clear the row mark");
+  assert(closedRowButton.focused === 1,
+    "closing Details must return focus to that row's Details button");
   assert(app.elementFor("key-text").textContent === "",
     "closing Details must clear the stored text");
   assert(app.elementFor("key-text").hidden === true,
     "closing Details must hide the stored text");
+
+  app.elementFor("key-show-revoked").checked = false;
+  app.elementFor("key-show-revoked").dispatch("change");
+  assert(!findDataRow(app.elementFor("key-list"), "data-key", "key-3"),
+    "unticking Show revoked keys must hide revoked keys again");
+  assert(app.elementFor("key-hidden-note").textContent === "1 revoked key hidden",
+    "the hidden count must return when revoked keys are hidden");
+  app.elementFor("key-show-revoked").checked = true;
+  app.elementFor("key-show-revoked").dispatch("change");
 
   const revokedRow = findDataRow(app.elementFor("key-list"), "data-key", "key-3");
   assert(revokedRow && !findButton(revokedRow, "Revoke"),
@@ -2211,11 +2279,25 @@ async function scenarioAdmin() {
     { items: [], next: null }, 200
   );
   await settle();
+  app.elementFor("key-show-revoked").checked = false;
+  app.elementFor("key-show-revoked").dispatch("change");
+  assert(findDataRow(app.elementFor("key-list"), "data-key", "key-3"),
+    "an open key row must stay visible when revoked keys are hidden");
+  app.elementFor("key-search").value = "nothing matches";
+  app.elementFor("key-search").dispatch("input");
+  assert(findDataRow(app.elementFor("key-list"), "data-key", "key-3"),
+    "an open key row must stay visible while a search excludes it");
+  app.elementFor("key-search").value = "";
+  app.elementFor("key-search").dispatch("input");
+  app.elementFor("key-show-revoked").checked = true;
+  app.elementFor("key-show-revoked").dispatch("change");
   app.elementFor("key-details-close").dispatch("click");
   app.elementFor("admin-tab-access").dispatch("click");
   await settle();
   assert(app.elementFor("key-secret").textContent === "",
     "leaving the tab must clear the key from the page");
+  assert(app.elementFor("admin-status").textContent === "",
+    "switching admin tabs must clear the previous status message");
   assert(app.elementFor("admin-access-panel").hidden === false,
     "selecting access must restore the access panel");
   assert(app.elementFor("department-list").textContent.indexOf("Human Resources") >= 0,
@@ -2283,9 +2365,38 @@ async function scenarioAdmin() {
   );
   assert(aliceRow.children[4].getAttribute("data-label") === "Actions",
     "the action group must stay associated with the user row");
+  assert(aliceRow.children[4].getAttribute("data-admin-write") === "",
+    "admin write actions must stay hidden from auditors");
+  const aliceMenu = findByClass(aliceRow, "row-actions");
+  assert(aliceMenu && aliceMenu.tagName === "DETAILS",
+    "user actions must live inside a Manage details menu");
+  const aliceSummary = aliceMenu.children[0];
+  assert(aliceSummary.tagName === "SUMMARY" && aliceSummary.textContent === "Manage" &&
+      aliceSummary.getAttribute("aria-label") === "Manage @alice",
+    "the actions menu must be labelled Manage for the account");
+  const aliceMenuLabels = collect(findByClass(aliceMenu, "row-actions-menu"))
+    .filter((element) => element.tagName === "BUTTON")
+    .map((element) => element.textContent.trim());
+  assert(aliceMenuLabels.join(",") ===
+      "Reset password,Grant admin,Make auditor,Disable,Delete",
+    "the Manage menu must keep every action with Delete last");
   assert(findButton(aliceRow, "Grant admin"), "an employee must be offered Grant admin");
   let selfRow = findDataRow(app.elementFor("user-list"), "data-user", "user-admin");
   assert(findButton(selfRow, "Revoke admin"), "an administrator must be offered Revoke admin");
+  const selfMenu = findByClass(selfRow, "row-actions");
+  const selfMenuLabels = collect(findByClass(selfMenu, "row-actions-menu"))
+    .filter((element) => element.tagName === "BUTTON")
+    .map((element) => element.textContent.trim());
+  assert(selfMenuLabels.join(",") === "Reset password,Revoke admin",
+    "the current administrator's menu must keep its permitted actions");
+  selfMenu.setAttribute("open", "");
+  selfMenu.open = true;
+  selfMenu.dispatch("toggle");
+  aliceMenu.setAttribute("open", "");
+  aliceMenu.open = true;
+  aliceMenu.dispatch("toggle");
+  assert(selfMenu.open === false && selfMenu.getAttribute("open") === null,
+    "opening one row's Manage menu must close any other open row menu");
   findButton(aliceRow, "Grant admin").dispatch("click");
   const cancelRoleBox = findByClass(aliceRow, "admin-confirm");
   assert(cancelRoleBox, "a role change must open an inline confirmation");

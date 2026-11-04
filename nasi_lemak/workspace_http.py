@@ -1419,6 +1419,8 @@ def register_workspace_routes(app: FastAPI, runtime: WorkspaceRuntime) -> None:
                     {
                         "created_at": item["created_at"],
                         "stage": item["stage"],
+                        "reason_code": item["reason_code"],
+                        "categories": item.get("categories", []),
                         "reason_text": item["reason_text"],
                         "username": item["username"],
                         "department_name": item["department_name"],
@@ -2108,6 +2110,7 @@ def _run_turn_pipeline(
                 "revision": control.revision,
                 "digest": control.digest,
                 "sources": control.metadata()["sources"],
+                "categories": list(result_sink.get("block_categories") or []),
             }
         except Exception:
             fail("failed", "UNAVAILABLE", block_request_id)

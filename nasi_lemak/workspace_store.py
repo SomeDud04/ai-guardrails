@@ -52,7 +52,7 @@ from .controls import API_KEY_PREFIX, block_detail
 from .workspace_governance import AlertAdminMixin, PolicyAdminMixin
 
 SCHEMA_PATH = Path(__file__).with_name("workspace_schema.sql")
-SCHEMA_VERSION = 8
+SCHEMA_VERSION = 9
 MAX_RETENTION_DAYS = 36500
 # Version 2 adds outcome/request_id/error_code to ws_messages. Runtime stores
 # open with ``migrate=False`` and therefore require an explicit provisioning
@@ -97,6 +97,10 @@ _SCHEMA_V8_ALTERS = (
     ("ws_api_key_outcomes", "ALTER TABLE ws_api_key_outcomes ADD COLUMN block_source TEXT"),
     ("ws_api_key_outcomes", "ALTER TABLE ws_api_key_outcomes ADD COLUMN block_categories TEXT"),
     ("ws_api_key_outcomes", "ALTER TABLE ws_api_key_outcomes ADD COLUMN allowed_categories TEXT"),
+)
+# Version 9 keeps the guard category names behind each block alert.
+_SCHEMA_V9_ALTERS = (
+    ("ws_block_alerts", "ALTER TABLE ws_block_alerts ADD COLUMN categories TEXT"),
 )
 # The only values a stored "stopped by" field may hold.
 BLOCK_SOURCES = ("guard", "deny_phrase_input", "deny_phrase_output", "size_limit")
@@ -721,7 +725,7 @@ class WorkspaceStore(PolicyAdminMixin, AlertAdminMixin):
             version = int(current)
             if version == SCHEMA_VERSION:
                 return
-            if version not in (1, 2, 3, 4, 5, 6, 7):
+            if version not in (1, 2, 3, 4, 5, 6, 7, 8):
                 raise WorkspaceConfigError("unsupported workspace schema version")
             if version == 1:
                 # Preserve the original v1 -> v2 data migration, then add the
@@ -745,7 +749,8 @@ class WorkspaceStore(PolicyAdminMixin, AlertAdminMixin):
             for statement in _schema_v5_statements():
                 db.execute(statement)
             for table, statement in (
-                *_SCHEMA_V6_ALTERS, *_SCHEMA_V7_ALTERS, *_SCHEMA_V8_ALTERS
+                *_SCHEMA_V6_ALTERS, *_SCHEMA_V7_ALTERS, *_SCHEMA_V8_ALTERS,
+                *_SCHEMA_V9_ALTERS,
             ):
                 column = _alter_added_column(statement)
                 if column and self._column_exists(db, table, column):

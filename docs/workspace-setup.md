@@ -476,8 +476,10 @@ and saved settings, and each existing key's owner became whoever generated it. S
 7 adds the auditor role, and no existing account becomes an auditor. Schema 8 keeps,
 for each API key request, the figures Monitor shows (reply tokens, tokens per second,
 total time and what stopped it), so the key's history matches Monitor and survives a
-restart; requests from before the upgrade show "–" in those columns.
-`scripts/rehearse_schema_v8.sh` runs all of this on a throwaway copy of the live
+restart; requests from before the upgrade show "–" in those columns. Schema 9 keeps
+the guard category names behind each block alert, so the Alerts tab says why a prompt
+was blocked; older alerts have none.
+`scripts/rehearse_schema_v9.sh` runs all of this on a throwaway copy of the live
 database first. To go back, restore the pre-migration backup.
 
 ## Transcript retention
