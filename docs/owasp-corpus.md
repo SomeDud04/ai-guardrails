@@ -549,6 +549,31 @@ cases only, not corpus rows.  They are also agent-authored synthetic smoke, the
 same evidence label as v1, so they widen the sample but are still not an
 independent holdout.  There is still no output-stage measurement.
 
+### Guard-lane dataset v3
+
+v3 gives every v1 case an English, Malay and Chinese version, so a gap between
+languages on the same OWASP payload is visible directly.  v2 already mirrored the
+22 v1 attacks in Malay; v3 adds the two missing parts:
+
+| File | Cases | Contents |
+|---|---|---|
+| `owasp-llm-top10-2026-v2.json` | 181 | v2 unchanged |
+| `owasp-llm-top10-2026-v3-bm-ctrl.json` | 17 allow | Malay version of each v1 control, ids `bm-` + v1 id |
+| `owasp-llm-top10-2026-v3-zh.json` | 22 block, 17 allow | Simplified Chinese version of each v1 case, ids `zh-` + v1 id |
+
+Each mirror keeps its v1 case's expected outcome, message roles and technique.
+Where a technique needs Latin letters, the Chinese case carries the instruction
+as pinyin: ROT13 (`zh-llm01-004`), leetspeak (`zh-llm01-005`) and fullwidth
+letters (`zh-llm01-006`).  `zh-llm01-008` pairs Chinese with English worded
+without the English deny phrase, so the English rule cannot decide it.
+
+`owasp-llm-top10-2026-v3.json` is exactly the three files' cases in that order
+(237 cases: 171 allow, 66 block; 111 `en`, 69 `bm`, 49 `zh`, 8 `mixed`), and
+`tests/test_owasp_guard_v3.py` fails if it drifts from them or if any v1 case
+lacks a `bm-` or `zh-` mirror.  Send it through the gateway with
+`scripts/run_owasp_live.py --dataset evals\guards\owasp-llm-top10-2026-v3.json`.
+The same limits as v2 apply: agent-authored synthetic smoke, not a holdout.
+
 ## Concurrency framing
 
 Three different questions are often conflated under "concurrency". They have
