@@ -504,6 +504,31 @@ no `bm`.
   1024-character per-message bound have to be revisited.  This remains an open
   item, not a resolved limitation.
 
+### Guard-lane dataset v2
+
+v2 addresses the thin benign sample and the missing BM coverage without
+touching the frozen corpus or v1.  It is built from three files in
+`evals/guards/`:
+
+| File | Cases | Contents |
+|---|---|---|
+| `owasp-llm-top10-2026-v1.json` | 39 | v1 unchanged |
+| `owasp-llm-top10-2026-v2-benign.json` | 90 allow | hard negatives: security education, shell/curl/SQL/admin in developer context, synthetic PII, role words in ordinary text, 8 `zh`, 7 `mixed`, 15 long prompts |
+| `owasp-llm-top10-2026-v2-bm.json` | 22 block, 30 allow | Malay rewrites of the 22 v1 attacks with the same technique and message roles, plus Malay benign prompts and hard negatives |
+
+`owasp-llm-top10-2026-v2.json` is exactly the three files' cases in that order
+(181 cases: 137 allow, 44 block; 111 `en`, 52 `bm`, 10 `zh`, 8 `mixed`), and
+`tests/test_owasp_guard_v2.py` fails if it drifts from them.  Run it like v1:
+
+```text
+.\.venv\Scripts\python.exe -m nasi_lemak.guard_eval --dataset evals\guards\owasp-llm-top10-2026-v2.json
+```
+
+The new rows have no corpus id and no exclusions ledger: they are guard-lane
+cases only, not corpus rows.  They are also agent-authored synthetic smoke, the
+same evidence label as v1, so they widen the sample but are still not an
+independent holdout.  There is still no output-stage measurement.
+
 ## Concurrency framing
 
 Three different questions are often conflated under "concurrency". They have
