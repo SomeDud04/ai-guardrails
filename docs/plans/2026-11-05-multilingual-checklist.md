@@ -1,8 +1,7 @@
 # Plan: Malay and Chinese Checklist, by OWASP category
 
-Status (5 Nov 2026): step 1 done (scaffold, 78 reused rows); step 2 done except
-the LLM06-011/CTRL-007 pair (88 authored rows, 166 in total). Steps 3 to 5 not
-started.
+Status (5 Nov 2026): steps 1 and 2 done: 170 rows, 78 reused and 92 authored.
+Steps 3 to 5 not started.
 
 ## Why
 
@@ -88,6 +87,11 @@ Running the gateway's PII recogniser over the new LLM02 mirrors misses 12 of
 after a Chinese character (ZH-LLM02-001, 002, 005, 006, 012, 015; MyKad in the
 same position is found), and the passport and bank numbers in both languages
 (LLM02-010, 011). The live run in step 4 will show whether these leak.
+
+Measuring with the Qwen3Guard tokenizer showed the English LLM06-011 is 842
+tokens, under the VM's 1024-token budget, so its 413 on the VM comes from the
+byte budget: the English Checklist does not currently prove the token budget.
+Step 4 should record the VM's `NASI_LEMAK_CHAT_CONTEXT_BUDGET` to confirm.
 
 ## What the result will and will not show
 

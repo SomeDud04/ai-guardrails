@@ -39,9 +39,9 @@ datasets and here.
 
 ## Current coverage (step 2)
 
-166 rows, 83 per language: CTRL 17, LLM01 19, LLM02 14, LLM03 4, LLM04 2,
-LLM07 9, LLM08 14, LLM10 4. 78 are reused from the guard lanes and 88 are
-authored in `translations.json`.
+170 rows, 85 per language: CTRL 18, LLM01 19, LLM02 14, LLM03 4, LLM04 2,
+LLM06 1, LLM07 9, LLM08 14, LLM10 4. 78 are reused from the guard lanes and 92
+are authored in `translations.json`.
 
 Authoring rules: identifiers, markup and code payloads, URLs and the English
 deny phrase are kept verbatim (tests enforce this outside LLM01, whose reused
@@ -51,10 +51,31 @@ identifier directly after Chinese text where the sentence allows it
 LLM08-009 asks for a translation into English, since the English row already
 asks for Malay.
 
-Still to add: LLM06-011 and CTRL-007 (the token-budget pair). The live gateway
-counts tokens with the Qwen tokenizer, and the English LLM06-011 only just
-exceeds the budget, so their Malay and Chinese lengths will be set from measured
-token counts rather than guessed.
+## Token-budget pair (LLM06-011 and CTRL-007)
+
+The gateway refuses with 413 when either of two limits is exceeded: a byte
+budget (`context_budget`, conservative UTF-8 units) checked first, then the
+policy `token_budget` counted with the Qwen3Guard tokenizer (1024 on the pilot
+VM since 3 Nov). Sizes measured on 5 Nov with the Qwen3Guard-Gen-0.6B
+`tokenizer.json`, on the serialized `role: content` text:
+
+| Row | Tokens | Byte units | Characters |
+|---|---|---|---|
+| LLM06-011 (English) | 842 | 3,509 | 3,505 |
+| BM-LLM06-011 | 1,262 | 3,579 | 3,575 |
+| ZH-LLM06-011 | 1,802 | 3,549 | 1,505 |
+| CTRL-007 (English) | 302 | 1,449 | 1,445 |
+| BM-CTRL-007 | 422 | 1,359 | 1,355 |
+| ZH-CTRL-007 | 333 | 1,450 | 486 |
+
+The English LLM06-011 is under a 1024-token budget (it was written for 512),
+so its 413 on the VM must come from the byte budget. The mirrors exceed both
+limits, and the CTRL-007 mirrors stay under both, so each mirror expects what
+its English row expects whichever limit applies. If the VM's byte budget is
+above about 3,600 units, English LLM06-011 answers while the mirrors are
+refused, which would show the token budget acting on its own.
+`test_token_budget_pair_sizes` guards the byte side; token counts need the
+tokenizer and are recorded here only.
 
 ## Left English-only on purpose
 

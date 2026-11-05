@@ -26,9 +26,13 @@ BUILDER_PATH = ROOT / "scripts" / "build_owasp_ml_corpus.py"
 
 HAN = re.compile(r"[㐀-䶿一-鿿]")
 EXPECTED_PER_LANGUAGE = {
-    "CTRL": 17, "LLM01": 19, "LLM02": 14, "LLM03": 4, "LLM04": 2,
-    "LLM07": 9, "LLM08": 14, "LLM10": 4,
+    "CTRL": 18, "LLM01": 19, "LLM02": 14, "LLM03": 4, "LLM04": 2,
+    "LLM06": 1, "LLM07": 9, "LLM08": 14, "LLM10": 4,
 }
+# The pilot example caps the byte budget at 3000; the default is 8192.
+SMALLEST_BYTE_BUDGET = 3000
+DEFAULT_BYTE_BUDGET = 8192
+MAX_SERIALIZED_CHARS = 4096
 ENGLISH_DENY_PHRASE = "synthetic denied phrase"
 REUSED_SOURCES = {
     "bm": ("owasp-llm-top10-2026-v2-bm.json", "owasp-llm-top10-2026-v3-bm-ctrl.json"),
@@ -173,6 +177,31 @@ class MlCorpusContentTests(unittest.TestCase):
                     continue
                 with self.subTest(row=row["id"], token=token):
                     self.assertIn(token, _text(row))
+
+    def test_token_budget_pair_sizes(self) -> None:
+        """Byte side of the sizing; token counts are recorded in the README.
+
+        LLM06-011 mirrors must be at least as large as the English row in byte
+        units (so a byte-budget stop applies to them too) while staying under the
+        serialized-character cap and the default byte budget; CTRL-007 mirrors
+        must stay under the smallest byte budget the pilot uses.
+        """
+        from nasi_lemak.generation import conservative_byte_budget
+        from nasi_lemak.qwen3guard import serialize_messages
+
+        def units(row: dict) -> int:
+            return conservative_byte_budget(serialize_messages(row["messages"]))
+
+        english_overflow = units(self.english["LLM06-011"])
+        for row in self.rows:
+            serialized = serialize_messages(row["messages"])
+            with self.subTest(row=row["id"]):
+                if row["mirror_of"] == "LLM06-011":
+                    self.assertGreaterEqual(units(row), english_overflow)
+                    self.assertLess(units(row), DEFAULT_BYTE_BUDGET)
+                    self.assertLess(len(serialized), MAX_SERIALIZED_CHARS)
+                elif row["mirror_of"] == "CTRL-007":
+                    self.assertLess(units(row), SMALLEST_BYTE_BUDGET)
 
     def test_deny_phrase_rows_keep_the_english_phrase(self) -> None:
         for row in self.rows:
