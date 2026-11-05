@@ -322,6 +322,148 @@ class DatasetModeTests(unittest.TestCase):
         )
 
 
+ML_PAYLOADS = ROOT / "evals" / "owasp" / "llm-top10-2026-ml" / "payloads"
+
+
+def answer_with(text: str):
+    def send(body: bytes) -> tuple[int, bytes]:
+        return 200, json.dumps({"choices": [{"message": {"content": text}}]}).encode("utf-8")
+
+    return send
+
+
+class CorpusFolderModeTests(unittest.TestCase):
+    @classmethod
+    def setUpClass(cls) -> None:
+        cls.ml = {record["id"]: record for record in live.corpus_records(ML_PAYLOADS)}
+
+    def run_main(self, report_path: Path, *extra: str, send=block_everything) -> tuple[int, str]:
+        output = io.StringIO()
+        with mock.patch.dict(os.environ, {live.KEY_ENV: "test-key"}), mock.patch.object(
+            live, "make_sender", lambda base, key, timeout: send
+        ), contextlib.redirect_stdout(output), contextlib.redirect_stderr(io.StringIO()):
+            status = live.main(
+                ["--base-url", "http://127.0.0.1:9", "--report", str(report_path),
+                 "--pause", "0", *extra]
+            )
+        return status, output.getvalue()
+
+    def test_every_mirror_row_is_linked_to_its_english_row(self) -> None:
+        english = {record["id"]: record for record in corpus.load_records()}
+        self.assertEqual(len(self.ml), 170)
+        for record in self.ml.values():
+            self.assertEqual(record[live.REFERENCE_KEY], english[record["mirror_of"]]["messages"])
+
+    def test_a_leak_the_recogniser_misses_still_fails(self) -> None:
+        # The gateway's recogniser does not find an email written straight
+        # after Chinese text, so the row alone would never look for it.
+        mirror = self.ml["ZH-LLM02-001"]
+        unlinked = {k: v for k, v in mirror.items() if k != live.REFERENCE_KEY}
+        self.assertEqual(live.raw_pii(unlinked), [])
+        leaked = "我的合成联系邮箱是alice@example.com。"
+        self.assertEqual(live.classify(unlinked, 200, None, leaked, {})[0], "Pass")
+        result, note = live.classify(mirror, 200, None, leaked, {})
+        self.assertEqual(result, "Fail")
+        self.assertIn("unmasked", note)
+        masked = "我的合成联系邮箱是[EMAIL]。"
+        self.assertEqual(live.classify(mirror, 200, None, masked, {})[0], "Pass")
+
+    def test_a_known_gap_mirror_is_judged_on_the_english_values(self) -> None:
+        mirror = self.ml["ZH-LLM02-010"]
+        self.assertEqual(
+            live.classify(mirror, 200, None, "护照号码是A12345678。", {})[0], "Fail"
+        )
+
+    def test_the_english_messages_are_never_sent(self) -> None:
+        sent: list[bytes] = []
+
+        def capture(body: bytes) -> tuple[int, bytes]:
+            sent.append(body)
+            return block_everything(body)
+
+        mirror = self.ml["BM-LLM02-012"]
+        live.run([mirror], capture, retired={})
+        body = json.loads(sent[0].decode("utf-8"))
+        self.assertEqual(body["messages"], mirror["messages"])
+        self.assertNotIn(live.REFERENCE_KEY, sent[0].decode("utf-8"))
+
+    def test_a_retired_limit_follows_mirror_of(self) -> None:
+        mirror = record(id="ZH-LLM06-004", mirror_of="LLM06-004",
+                        expect_status=400, expect_code="INVALID_REQUEST")
+        retired = {"LLM06-004": {"observed_status": 200, "reason": "Removed. On purpose."}}
+        self.assertEqual(live.classify(mirror, 200, None, "x", retired)[0], "N/A")
+
+    def test_a_corpus_folder_reports_language_and_category_totals(self) -> None:
+        wanted = "BM-LLM01-001,ZH-LLM01-001,BM-CTRL-001,ZH-LLM02-001"
+        with tempfile.TemporaryDirectory() as folder:
+            report_path = Path(folder) / "report.json"
+            status, printed = self.run_main(
+                report_path, "--corpus", str(ML_PAYLOADS), "--only", wanted
+            )
+            report = json.loads(report_path.read_text(encoding="utf-8"))
+        self.assertEqual(status, 0)
+        self.assertEqual(report["corpus_path"], str(ML_PAYLOADS))
+        self.assertEqual(report["cases_selected"], 4)
+        rows = {row["id"]: row for row in report["rows"]}
+        self.assertEqual(rows["ZH-LLM01-001"]["mirror_of"], "LLM01-001")
+        self.assertEqual(rows["ZH-LLM01-001"]["language"], "zh")
+        self.assertEqual(rows["BM-LLM01-001"]["result"], "Pass")
+        self.assertEqual(rows["BM-CTRL-001"]["result"], "Fail")
+        self.assertEqual(set(report["totals_by_language"]), {"bm", "zh"})
+        self.assertEqual(report["totals_by_category"]["LLM01"]["Pass"], 2)
+        self.assertEqual(report["totals_by_category"]["CTRL"]["Fail"], 1)
+        self.assertNotIn(live.REFERENCE_KEY, report_path.name)
+        self.assertIn("\nLLM01: ", printed)
+
+    def test_the_report_never_holds_the_english_reference(self) -> None:
+        with tempfile.TemporaryDirectory() as folder:
+            report_path = Path(folder) / "report.json"
+            self.run_main(report_path, "--corpus", str(ML_PAYLOADS), "--only", "ZH-LLM02-012",
+                          send=answer_with("ok"))
+            text = report_path.read_text(encoding="utf-8")
+        self.assertNotIn(live.REFERENCE_KEY, text)
+
+    def test_the_english_folder_runs_without_language_totals(self) -> None:
+        with tempfile.TemporaryDirectory() as folder:
+            report_path = Path(folder) / "report.json"
+            status, _ = self.run_main(
+                report_path, "--corpus", str(corpus.PAYLOAD_ROOT), "--only", "LLM01-001"
+            )
+            report = json.loads(report_path.read_text(encoding="utf-8"))
+        self.assertEqual(status, 0)
+        self.assertNotIn("totals_by_language", report)
+        self.assertEqual(report["totals_by_category"]["LLM01"]["Pass"], 1)
+
+    def test_an_unknown_mirror_is_refused_before_anything_is_sent(self) -> None:
+        sent: list[bytes] = []
+        with tempfile.TemporaryDirectory() as folder:
+            payloads = Path(folder) / "payloads"
+            payloads.mkdir()
+            row = dict(self.ml["BM-LLM01-001"], id="BM-LLM99-001", mirror_of="LLM99-001")
+            row.pop(live.REFERENCE_KEY)
+            (payloads / "x.jsonl").write_text(json.dumps(row) + "\n", encoding="utf-8")
+            status, _ = self.run_main(
+                Path(folder) / "report.json", "--corpus", str(payloads),
+                send=lambda body: sent.append(body) or block_everything(body),
+            )
+        self.assertEqual(status, 2)
+        self.assertEqual(sent, [])
+
+    def test_an_empty_folder_is_refused(self) -> None:
+        with tempfile.TemporaryDirectory() as folder:
+            status, _ = self.run_main(Path(folder) / "report.json", "--corpus", folder)
+        self.assertEqual(status, 2)
+
+    def test_dataset_and_corpus_together_are_refused(self) -> None:
+        with tempfile.TemporaryDirectory() as folder:
+            dataset_path = write_dataset(folder, [guard_case("case-block-en")])
+            status, _ = self.run_main(
+                Path(folder) / "report.json", "--dataset", str(dataset_path),
+                "--corpus", str(ML_PAYLOADS),
+            )
+        self.assertEqual(status, 2)
+
+
 class RunTests(unittest.TestCase):
     def test_every_case_runs_end_to_end_and_fills_the_workbook(self) -> None:
         send, close = local_sender()

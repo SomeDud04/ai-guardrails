@@ -591,7 +591,20 @@ drift.  It holds 170 rows (85 per language across CTRL, LLM01, LLM02, LLM03,
 LLM04, LLM06, LLM07, LLM08 and LLM10): 78 reused, 92 authored.  Measured with
 the Qwen3Guard tokenizer, the English LLM06-011 is 842 tokens, under the pilot's
 1024-token budget, so its 413 on the VM comes from the byte budget rather than
-the token budget; the folder README records the sizing.  The scope, the rows left English-only and the
+the token budget; the folder README records the sizing.
+
+Send it to a live gateway with the same runner:
+
+```text
+.\.venv\Scripts\python.exe scriptsun_owasp_live.py --base-url http://192.168.90.41:8080 `
+    --corpus evals\owasp\llm-top10-2026-ml\payloads --report owasp-live-ml.json
+```
+
+Each mirror row keeps its English expectation and retired-limit handling (looked
+up through `mirror_of`).  The leak check also looks for the English row's
+identifiers, because the recogniser can miss one written next to Chinese text
+and a missed identifier would otherwise never be checked.  The report adds
+`totals_by_language` and `totals_by_category`.  The scope, the rows left English-only and the
 remaining steps are in the folder's `README.md` and
 `docs/plans/2026-11-05-multilingual-checklist.md`.
 

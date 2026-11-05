@@ -1,7 +1,7 @@
 # Plan: Malay and Chinese Checklist, by OWASP category
 
-Status (5 Nov 2026): steps 1 and 2 done: 170 rows, 78 reused and 92 authored.
-Steps 3 to 5 not started.
+Status (5 Nov 2026): steps 1 to 3 done: 170 rows (78 reused, 92 authored) and
+`run_owasp_live.py --corpus`. Steps 4 and 5 not started.
 
 ## Why
 

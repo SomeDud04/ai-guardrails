@@ -26,6 +26,12 @@ Usage (PowerShell)::
     $env:NASI_LEMAK_OWASP_API_KEY = Read-Host "Paste the key"
     .\\.venv\\Scripts\\python.exe scripts\\run_owasp_live.py `
         --base-url http://192.168.90.41:8080 --report owasp-live.json
+
+``--corpus DIR`` sends another folder of corpus rows instead of the frozen
+English payloads, for example the Malay and Chinese mirror in
+``evals/owasp/llm-top10-2026-ml/payloads``.  A mirror row names its English row
+in ``mirror_of``; the leak check also looks for that English row's identifiers,
+and the report adds totals by language and by category.
 """
 
 from __future__ import annotations
@@ -57,6 +63,9 @@ EXCERPT_CHARS = 600
 DEFAULT_TIMEOUT = 90.0
 KEY_ENV = "NASI_LEMAK_OWASP_API_KEY"
 UNAVAILABLE = {401, 429, 502, 503, 504}
+# Internal record field holding a translated row's English messages; it is used
+# only by the leak check and is never sent (requests carry messages and extras).
+REFERENCE_KEY = "$english_messages"
 
 Sender = Callable[[bytes], tuple[int, bytes]]
 
@@ -90,10 +99,21 @@ def make_sender(base_url: str, api_key: str, timeout: float) -> Sender:
     return send
 
 
+def _leak_messages(record: dict[str, Any]) -> list[Any]:
+    """The row's messages plus, for a translated row, its English row's.
+
+    A translated row keeps every identifier verbatim, but the gateway's
+    recogniser may not find it next to Malay or Chinese text.  Taking the
+    values from the English row too means a missed identifier is still looked
+    for in the reply instead of silently scoring a Pass.
+    """
+    return list(record.get("messages") or []) + list(record.get(REFERENCE_KEY) or [])
+
+
 def raw_pii(record: dict[str, Any]) -> list[str]:
     """Values in the request that the gateway's own recognisers would mask."""
     values: list[str] = []
-    for message in record.get("messages") or []:
+    for message in _leak_messages(record):
         content = message.get("content") if isinstance(message, dict) else None
         if not isinstance(content, str):
             continue
@@ -107,7 +127,7 @@ def raw_pii(record: dict[str, Any]) -> list[str]:
 def raw_values(record: dict[str, Any]) -> list[str]:
     """Distinctive values in the user turns: anything with a digit or an @."""
     values: list[str] = []
-    for message in record.get("messages") or []:
+    for message in _leak_messages(record):
         if not isinstance(message, dict) or message.get("role") != "user":
             continue
         content = message.get("content")
@@ -182,6 +202,38 @@ def dataset_records(dataset: GuardDataset) -> list[dict[str, Any]]:
     return records
 
 
+class CorpusFolderError(ValueError):
+    """A ``--corpus`` folder cannot be sent as it is."""
+
+
+def corpus_records(
+    payload_root: Path,
+    english: list[dict[str, Any]] | None = None,
+) -> list[dict[str, Any]]:
+    """Load corpus rows from a folder and link each mirror to its English row."""
+    records = corpus.load_records(payload_root)
+    if not records:
+        raise CorpusFolderError(f"no corpus rows under {payload_root}")
+    ids = [record.get("id") for record in records]
+    duplicates = sorted({str(i) for i in ids if ids.count(i) > 1})
+    if duplicates:
+        raise CorpusFolderError("duplicate row ids: " + ", ".join(duplicates))
+    mirrors = [record for record in records if "mirror_of" in record]
+    if not mirrors:
+        return records
+    by_id = {row["id"]: row for row in (english if english is not None else corpus.load_records())}
+    linked: list[dict[str, Any]] = []
+    for record in records:
+        mirror_of = record.get("mirror_of")
+        if mirror_of is None:
+            linked.append(record)
+            continue
+        if mirror_of not in by_id:
+            raise CorpusFolderError(f"{record['id']}: mirror_of {mirror_of!r} is not an English row")
+        linked.append({**record, REFERENCE_KEY: by_id[mirror_of]["messages"]})
+    return linked
+
+
 def retired_limits() -> dict[str, dict[str, Any]]:
     """Rows whose authored limit the product removed on purpose."""
     return {
@@ -200,7 +252,7 @@ def classify(
 ) -> tuple[str, str]:
     """Return the checklist Result and a short note for one observed answer."""
     expected = record["expect_status"]
-    change = (retired or {}).get(record["id"])
+    change = (retired or {}).get(record.get("mirror_of") or record["id"])
     if change and status == change.get("observed_status") and status != expected:
         reason = change.get("reason", "").split(". ")
         return "N/A", (
@@ -263,7 +315,7 @@ def run_record(
     retired: dict[str, dict[str, Any]] | None = None,
 ) -> dict[str, Any]:
     row: dict[str, Any] = {"id": record["id"], "sent_at": datetime.now(timezone.utc).isoformat()}
-    for field in ("language", "expected"):
+    for field in ("language", "expected", "mirror_of"):
         if field in record:
             row[field] = record[field]
     try:
@@ -329,6 +381,7 @@ def run(
     progress: Callable[[str], None] = lambda line: None,
     retired: dict[str, dict[str, Any]] | None = None,
     by_language: bool = False,
+    by_category: bool = False,
 ) -> dict[str, Any]:
     report: dict[str, Any] = {
         "schema": REPORT_SCHEMA,
@@ -373,6 +426,16 @@ def run(
             }
             for language in languages
         }
+    if by_category:
+        categories: dict[str, dict[str, int]] = {}
+        for record, row in zip(records, report["rows"]):
+            category = record.get("category")
+            if not isinstance(category, str):
+                continue
+            if category not in categories:
+                categories[category] = {result: 0 for result in results}
+            categories[category][row["result"]] += 1
+        report["totals_by_category"] = categories
     if report_path is not None:
         _write(report_path, report)
     return report
@@ -407,13 +470,27 @@ def main(argv: list[str] | None = None) -> int:
         default="",
         help="guard-lane dataset to send instead of the corpus rows",
     )
+    parser.add_argument(
+        "--corpus",
+        default="",
+        help="folder of corpus payload .jsonl files to send instead of the frozen English rows",
+    )
     parser.add_argument("--timeout", type=float, default=DEFAULT_TIMEOUT)
     parser.add_argument("--pause", type=float, default=1.0, help="seconds between cases")
     parser.add_argument("--api-key-env", default=KEY_ENV)
     args = parser.parse_args(argv)
 
     dataset: GuardDataset | None = None
-    if args.dataset:
+    if args.dataset and args.corpus:
+        print("error: use --dataset or --corpus, not both", file=sys.stderr)
+        return 2
+    if args.corpus:
+        try:
+            records = corpus_records(Path(args.corpus))
+        except (CorpusFolderError, OSError, ValueError) as error:
+            print(f"error: {error}", file=sys.stderr)
+            return 2
+    elif args.dataset:
         try:
             dataset = load_dataset(args.dataset)
             records = dataset_records(dataset)
@@ -442,13 +519,19 @@ def main(argv: list[str] | None = None) -> int:
         "base_url": args.base_url.rstrip("/"),
         "runner_commit": _commit(),
         "corpus_digest": hashlib.sha256(
-            json.dumps(records, sort_keys=True, ensure_ascii=False).encode("utf-8")
+            json.dumps(
+                [{k: v for k, v in record.items() if k != REFERENCE_KEY} for record in records],
+                sort_keys=True,
+                ensure_ascii=False,
+            ).encode("utf-8")
         ).hexdigest(),
         "cases_selected": len(records),
     }
     if dataset is not None:
         meta["dataset_id"] = dataset.dataset_id
         meta["dataset_path"] = args.dataset
+    if args.corpus:
+        meta["corpus_path"] = args.corpus
     report = run(
         records,
         send,
@@ -457,12 +540,15 @@ def main(argv: list[str] | None = None) -> int:
         pause=args.pause,
         progress=lambda line: print(line, file=sys.stderr, flush=True),
         retired={} if dataset is not None else None,
-        by_language=dataset is not None,
+        by_language=dataset is not None or any("language" in record for record in records),
+        by_category=bool(args.corpus),
     )
     totals = report["totals"]
     print(" ".join(f"{name}={count}" for name, count in totals.items()))
     for language, counts in report.get("totals_by_language", {}).items():
         print(f"{language}: " + " ".join(f"{name}={count}" for name, count in counts.items()))
+    for category, counts in report.get("totals_by_category", {}).items():
+        print(f"{category}: " + " ".join(f"{name}={count}" for name, count in counts.items() if count))
     print(f"report: {args.report}")
     return 0
 
