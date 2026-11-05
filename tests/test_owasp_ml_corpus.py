@@ -25,7 +25,11 @@ GUARDS = ROOT / "evals" / "guards"
 BUILDER_PATH = ROOT / "scripts" / "build_owasp_ml_corpus.py"
 
 HAN = re.compile(r"[㐀-䶿一-鿿]")
-EXPECTED_PER_LANGUAGE = {"CTRL": 17, "LLM01": 18, "LLM03": 3, "LLM04": 1}
+EXPECTED_PER_LANGUAGE = {
+    "CTRL": 17, "LLM01": 19, "LLM02": 14, "LLM03": 4, "LLM04": 2,
+    "LLM07": 9, "LLM08": 14, "LLM10": 4,
+}
+ENGLISH_DENY_PHRASE = "synthetic denied phrase"
 REUSED_SOURCES = {
     "bm": ("owasp-llm-top10-2026-v2-bm.json", "owasp-llm-top10-2026-v3-bm-ctrl.json"),
     "zh": ("owasp-llm-top10-2026-v3-zh.json",),
@@ -129,7 +133,54 @@ class MlCorpusContentTests(unittest.TestCase):
                     row = by_id[f"{language.upper()}-{rest.upper()}"]
                     self.assertEqual(row["messages"], case["messages"], case["id"])
                     reused += 1
-        self.assertEqual(reused, len(self.rows))
+        authored = json.loads((ML_ROOT / "translations.json").read_text(encoding="utf-8"))["rows"]
+        self.assertEqual(reused + sum(len(rows) for rows in authored.values()), len(self.rows))
+
+    def test_identifiers_are_kept_verbatim(self) -> None:
+        """Every value a leak check looks for in the English row is in the mirror."""
+        sys.path.insert(0, str(ROOT / "scripts"))
+        import run_owasp_live as live
+
+        for row in self.rows:
+            if row["category"] == "LLM01":
+                # The reused LLM01 attacks re-encode their payload in the target
+                # language (Malay Base64, pinyin leetspeak), so their tokens
+                # differ from English on purpose.
+                continue
+            english = self.english[row["mirror_of"]]
+            values = set(live.raw_pii(english)) | {
+                value for value in live.raw_values(english) if not value.isdigit()
+            }
+            mirror_text = _text(row)
+            mirror_digits = re.sub(r"[^0-9]", "", mirror_text)
+            for value in values:
+                with self.subTest(row=row["id"], value=value):
+                    self.assertIn(value, mirror_text)
+            for value in live.raw_values(english):
+                if value.isdigit():
+                    with self.subTest(row=row["id"], digits=value):
+                        self.assertIn(value, mirror_digits)
+
+    def test_output_handling_payloads_are_unchanged(self) -> None:
+        for row in self.rows:
+            if row["category"] != "LLM10":
+                continue
+            payload = _text(self.english[row["mirror_of"]]).split(": ", 1)[1]
+            # Plain words such as "and" are translated; every token carrying
+            # markup or symbols must survive exactly.
+            for token in payload.split():
+                if token.isalpha():
+                    continue
+                with self.subTest(row=row["id"], token=token):
+                    self.assertIn(token, _text(row))
+
+    def test_deny_phrase_rows_keep_the_english_phrase(self) -> None:
+        for row in self.rows:
+            english = " ".join(_text(self.english[row["mirror_of"]]).split()).casefold()
+            if ENGLISH_DENY_PHRASE not in english:
+                continue
+            with self.subTest(row=row["id"]):
+                self.assertIn(ENGLISH_DENY_PHRASE, " ".join(_text(row).split()).casefold())
 
     def test_schema_describes_every_row(self) -> None:
         required = self.schema["required"]

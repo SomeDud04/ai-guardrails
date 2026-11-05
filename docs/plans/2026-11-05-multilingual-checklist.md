@@ -1,7 +1,8 @@
 # Plan: Malay and Chinese Checklist, by OWASP category
 
-Status: step 1 done (5 Nov 2026): corpus scaffold and the 78 reused rows.
-Steps 2 to 5 not started.
+Status (5 Nov 2026): step 1 done (scaffold, 78 reused rows); step 2 done except
+the LLM06-011/CTRL-007 pair (88 authored rows, 166 in total). Steps 3 to 5 not
+started.
 
 ## Why
 
@@ -25,7 +26,7 @@ test lives in a request field or a raw body stay English-only.
 | LLM02 Sensitive Info | 001..013, 015 | 14 | new | masking next to Chinese characters with no spaces, Malay wording; highest value |
 | LLM03 Excessive Agency | 006..008, plus 001 as a schema sample | 4 | reuse 3, new 1 | text attacks reuse; one schema row proves rejection is language-independent |
 | LLM04 Supply Chain | 007, plus 001 as a schema sample | 2 | reuse 1, new 1 | as above |
-| LLM06 Unbounded Consumption | 011 (token budget), plus one new near-budget benign | 2 | new | the budget counts bytes, so Chinese (3 bytes a character) reaches it about 3x sooner than English |
+| LLM06 Unbounded Consumption | 011 (over budget, 413), plus CTRL-007 (long benign, 200) | 2 | new | the live gateway counts Qwen tokens, so the budget may bite at a different length per language; lengths are set from measured token counts (correction: an earlier draft said the budget counts bytes, which is only the test-mode stand-in) |
 | LLM07 Misinformation | 001..009 | 9 | new | output guard and reply quality in Malay/Chinese |
 | LLM08 Hidden Context | 001..014 | 14 | new | extraction prompts in Malay/Chinese |
 | LLM10 Output Handling | 001, 004, 012, 013 (HTML, CSV, template, shell) | 4 | new | one per sink type; payload text stays literal |
@@ -35,7 +36,7 @@ Total: 85 per language, **170 rows** (78 reused, 92 new translations).
 Left English-only, with the reason recorded in the corpus README:
 LLM01-019, LLM02-014/016 (`$fixture_reply`), LLM03-002..005, LLM04-002..006,
 LLM06 except 011 (field and body limits), LLM05 and LLM09 (no surface, N/A),
-LLM10 other rows (same known gap, wrapper text only), CTRL-007 (harness-bound).
+LLM10 other rows (same known gap, wrapper text only).
 
 ## Translation rules
 
@@ -66,6 +67,10 @@ LLM10 other rows (same known gap, wrapper text only), CTRL-007 (harness-bound).
    markup is unchanged; counts per category match the table above.
 3. **Runner.** `scripts/run_owasp_live.py --corpus DIR`; retired-limit lookups
    go through `mirror_of`; totals by language and by category in the report.
+   The leak check must take its identifiers from the English row named by
+   `mirror_of`: it currently uses values the gateway's own recogniser finds in
+   the row, so an identifier the recogniser misses would never be checked and
+   would score a false Pass.
    Tests with a fake sender, then a local dry run. No VM traffic in this step.
 4. **Live run on the pilot VM.** About 170 cases at about 20 s each, so roughly
    an hour. The user supplies the API key. Report to
@@ -75,6 +80,14 @@ LLM10 other rows (same known gap, wrapper text only), CTRL-007 (harness-bound).
    "Multilingual cases" column in Category Map, a Run Log row, and progress
    text for T2/T3. Then the 36 Unverified rows (LLM08, LLM10) need a
    person who reads Malay and Chinese to judge the replies.
+
+## Found while authoring (offline, no gateway traffic)
+
+Running the gateway's PII recogniser over the new LLM02 mirrors misses 12 of
+28 rows that English detects: in Chinese, an email or phone number directly
+after a Chinese character (ZH-LLM02-001, 002, 005, 006, 012, 015; MyKad in the
+same position is found), and the passport and bank numbers in both languages
+(LLM02-010, 011). The live run in step 4 will show whether these leak.
 
 ## What the result will and will not show
 
