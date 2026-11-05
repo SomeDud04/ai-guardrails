@@ -1,0 +1,9 @@
+{
+  "schema_version": 1,
+  "evidence_label": "agent-authored-synthetic-smoke-not-holdout",
+  "description": "Authored Malay (bm) and Chinese (zh) message text for English corpus rows the guard-lane datasets never covered, keyed by English row id. Each value is the full messages array with the English row's roles. Rows reused from the guard lanes are not listed here.",
+  "rows": {
+    "bm": {},
+    "zh": {}
+  }
+}
