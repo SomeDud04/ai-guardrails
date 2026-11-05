@@ -152,6 +152,52 @@ class AdminRouteTests(ApiKeyBase):
         self.assertTrue(formula[0].endswith("+00:00"))
         self.assertEqual(len({row[1] for row in rows[1:]}), 105)
 
+    def test_requests_can_be_found_by_full_or_short_request_id(self) -> None:
+        admin = self.admin_headers()
+        secret = self.generate()["key"]
+        key = self.store.resolve_api_key(hashlib.sha256(secret.encode()).hexdigest())
+        full = "req_14731da3b8fe4222b162bb1e5152aa54"
+        self.store.record_api_key_use(
+            key["id"], "req_ffffffffffffffffffffffffffffffff"
+        )
+        self.store.record_api_key_use(key["id"], full)
+        base = f"{KEYS_PATH}/{key['id']}/requests"
+        for query in (full, "14731da3b8fe", "req_14731da3b8fe", "REQ_14731DA3B8FE"):
+            with self.subTest(query=query):
+                response = self.client.get(
+                    f"{base}?request_id={query}&limit=1", headers=admin
+                )
+                self.assertEqual(response.status_code, 200, response.text)
+                self.assertEqual(
+                    [item["request_id"] for item in response.json()["items"]],
+                    [full],
+                )
+                self.assertIsNone(response.json()["next"])
+        missing = self.client.get(f"{base}?request_id=000000000000", headers=admin)
+        self.assertEqual(missing.status_code, 200, missing.text)
+        self.assertEqual(missing.json(), {"items": [], "next": None})
+
+    def test_a_request_id_filter_must_be_eight_to_thirty_two_hex(self) -> None:
+        admin = self.admin_headers()
+        key_id = self.generate()["item"]["id"]
+        base = f"{KEYS_PATH}/{key_id}/requests"
+        invalid = (
+            "abc",
+            "req_zzzzzzzz",
+            "req_1234567",
+            "req_" + "a" * 33,
+            "req_" + "a" * 12 + "&request_id=req_" + "b" * 12,
+        )
+        for query in invalid:
+            with self.subTest(query=query):
+                response = self.client.get(f"{base}?request_id={query}", headers=admin)
+                self.assert_error(response, 400, "INVALID_REQUEST")
+        for bad in ("abc", "req_ABC", "req_1234567", "req_" + "a" * 33):
+            with self.subTest(store=bad), self.assertRaises(ValueError):
+                self.store.list_api_key_requests(
+                    self.admin["id"], key_id, request_id=bad
+                )
+
     def test_reading_stored_text_is_in_the_access_log(self) -> None:
         created = self.store.create_api_key(
             self.admin["id"], "Reviewed", self.alice["id"], store_text=True

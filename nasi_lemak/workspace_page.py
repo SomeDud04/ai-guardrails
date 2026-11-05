@@ -889,6 +889,7 @@ _WORKSPACE_JS = """
   var keyDetailsState = byId("key-details-state");
   var keyHistory = byId("key-history");
   var keyHistoryState = byId("key-history-state");
+  var keyHistorySearch = byId("key-history-search");
   var keyHistoryMore = byId("key-history-more");
   var keyHistoryExport = byId("key-history-export");
   var keyText = byId("key-text");
@@ -1117,6 +1118,7 @@ _WORKSPACE_JS = """
   var alertUser = byId("alert-user");
   var alertUnread = byId("alert-unread");
   var alertAck = byId("alert-ack");
+  var alertRequestSearch = byId("alert-request-search");
   var alertSummary = byId("alert-summary");
   var alertMarkAll = byId("alert-mark-all");
   var alertState = byId("alert-state");
@@ -1201,6 +1203,7 @@ _WORKSPACE_JS = """
   var keyHistoryCursor = null;
   var keyHistoryLoading = false;
   var keyHistorySeq = 0;
+  var keyHistoryFilter = "";
   var keySaving = false;
   var keyTextSeq = 0;
   var keySearchText = "";
@@ -1241,6 +1244,7 @@ _WORKSPACE_JS = """
   var alertCursor = null;
   var alertLoading = false;
   var alertListSeq = 0;
+  var alertRequestFilter = "";
   var alertSummaryLoading = false;
   var alertSummarySeq = 0;
   var alertSummaryEpoch = 0;
@@ -1273,6 +1277,18 @@ _WORKSPACE_JS = """
     if (typeof value !== "string" || !value) { return "–"; }
     var trimmed = value.indexOf("req_") === 0 ? value.slice(4) : value;
     return trimmed ? trimmed.slice(0, 12) : "–";
+  }
+
+  // A pasted request ID may be the full req_<32 hex> value or the short hex
+  // prefix the tables show. Anything else is rejected before a server call.
+  var REQUEST_ID_SEARCH = /^(req_)?[0-9a-f]{8,32}$/;
+  var REQUEST_ID_SEARCH_ERROR = "Enter a request ID: req_ followed by at least 8 " +
+    "hex characters, or the short ID shown in the table.";
+
+  function requestIdSearchValue(input) {
+    var raw = input && typeof input.value === "string" ? input.value.trim().toLowerCase() : "";
+    if (!raw) { return ""; }
+    return REQUEST_ID_SEARCH.test(raw) ? raw : null;
   }
 
   function formatClock(seconds) {
@@ -5054,6 +5070,8 @@ _WORKSPACE_JS = """
     alertStage.value = "";
     alertUnread.value = "";
     alertAck.value = "";
+    alertRequestSearch.value = "";
+    alertRequestFilter = "";
   }
 
   function currentAdmin(uid) {
@@ -5884,6 +5902,8 @@ _WORKSPACE_JS = """
     keyDetailsFor = item.id;
     keyDetails.hidden = false;
     clearKeyText();
+    keyHistorySearch.value = "";
+    keyHistoryFilter = "";
     keyHistorySeq += 1;
     keyHistoryLoading = false;
     keyHistoryCursor = null;
@@ -5982,20 +6002,24 @@ _WORKSPACE_JS = """
     if (!reset && keyHistoryLoading) { return Promise.resolve(false); }
     var epoch = sessionEpoch;
     var token = adminStateEpoch;
+    var filter = keyHistoryFilter;
     var seq = ++keyHistorySeq;
     keyHistoryLoading = true;
     if (reset) {
       keyHistoryCursor = null;
-      setStatus(keyHistoryState, "Loading request history…");
+      setStatus(keyHistoryState, filter
+        ? "Searching this key's history for " + filter + "…"
+        : "Loading request history…");
     } else {
       setStatus(keyHistoryState, "Loading more requests…");
     }
     var path = "/workspace/api/admin/api-keys/" + encodeURIComponent(target) +
       "/requests?limit=" + LIST_LIMIT +
+      (filter ? "&request_id=" + encodeURIComponent(filter) : "") +
       (keyHistoryCursor ? "&after=" + encodeURIComponent(keyHistoryCursor) : "");
     return api(path).then(function (result) {
       if (seq !== keyHistorySeq || epoch !== sessionEpoch || token !== adminStateEpoch ||
-          keyDetailsFor !== target) {
+          keyDetailsFor !== target || keyHistoryFilter !== filter) {
         keyHistoryLoading = false;
         return false;
       }
@@ -6014,10 +6038,24 @@ _WORKSPACE_JS = """
       keyHistoryCursor = typeof result.data.next === "string" && result.data.next
         ? result.data.next : null;
       keyHistoryMore.hidden = !keyHistoryCursor;
-      setStatus(keyHistoryState, reset && got.length === 0
-        ? "No requests have been recorded for this key." : "");
+      var emptyMessage = filter
+        ? "No request in this key's history matches " + filter + "."
+        : "No requests have been recorded for this key.";
+      setStatus(keyHistoryState, reset && got.length === 0 ? emptyMessage : "");
       return true;
     });
+  }
+
+  function submitKeyHistorySearch() {
+    var search = requestIdSearchValue(keyHistorySearch);
+    if (search === null) {
+      setStatus(keyHistoryState, REQUEST_ID_SEARCH_ERROR, "error");
+      return;
+    }
+    if (search === keyHistoryFilter) { return; }
+    keyHistoryFilter = search;
+    if (!keyDetailsFor) { return; }
+    queueAdminList(function () { return loadKeyHistory(true, keyDetailsFor); });
   }
 
   function exportKeyHistory() {
@@ -7577,6 +7615,13 @@ _WORKSPACE_JS = """
   }
 
   function alertQueryPath() {
+    if (alertRequestFilter) {
+      // A request ID identifies one request, so the other filters cannot add
+      // anything and are deliberately ignored while searching.
+      var searchParts = ["limit=50", "request_id=" + encodeURIComponent(alertRequestFilter)];
+      if (alertCursor) { searchParts.push("after=" + encodeURIComponent(alertCursor)); }
+      return "/workspace/api/admin/alerts?" + searchParts.join("&");
+    }
     var parts = ["limit=50"];
     if (alertStage.value) { parts.push("stage=" + encodeURIComponent(alertStage.value)); }
     if (alertDepartment.value) {
@@ -8050,7 +8095,10 @@ _WORKSPACE_JS = """
   function loadAlerts(reset) {
     if (!currentAdmin()) { return Promise.resolve(false); }
     if (!reset && alertLoading) { return Promise.resolve(false); }
-    if (alertUnread.value === "true" && alertAck.value === "true") {
+    // A request-ID search ignores the other filters, so their combination
+    // rules do not apply while it is active.
+    var filter = alertRequestFilter;
+    if (!filter && alertUnread.value === "true" && alertAck.value === "true") {
       setStatus(alertState, "Unread only cannot be combined with acknowledged alerts. Choose one filter.", "error");
       return Promise.resolve(false);
     }
@@ -8058,6 +8106,8 @@ _WORKSPACE_JS = """
     var token = adminStateEpoch;
     var uid = profile.user.id;
     var seq = ++alertListSeq;
+    var searchNote = filter
+      ? "Searching by request ID; the other filters are ignored. " : "";
     alertLoading = true;
     if (reset) {
       alertsLoaded = false;
@@ -8067,15 +8117,15 @@ _WORKSPACE_JS = """
       clearNode(alertList);
       alertDetail.hidden = true;
       clearNode(alertDetail);
-      setStatus(alertState, "Loading block alerts…");
+      setStatus(alertState, searchNote + "Loading block alerts…");
     } else {
-      setStatus(alertState, "Loading more block alerts…");
+      setStatus(alertState, searchNote + "Loading more block alerts…");
       alertMore.disabled = true;
     }
     var path = alertQueryPath();
     return api(path).then(function (result) {
       if (seq !== alertListSeq || epoch !== sessionEpoch || token !== adminStateEpoch ||
-          !currentAdmin(uid)) {
+          !currentAdmin(uid) || alertRequestFilter !== filter) {
         return false;
       }
       alertLoading = false;
@@ -8106,13 +8156,27 @@ _WORKSPACE_JS = """
       renderAlerts(alertsList, true);
       alertCursor = typeof result.data.next === "string" && result.data.next ? result.data.next : null;
       alertMore.hidden = !alertCursor;
-      setStatus(alertState, alertsList.length === 0
-        ? "No block alerts match these filters. The summary above reports overall totals."
+      var emptyMessage = filter
+        ? "No alert matches " + filter + ". Requests stopped before any guard ran do not create an alert."
+        : "No block alerts match these filters. The summary above reports overall totals.";
+      setStatus(alertState, searchNote + (alertsList.length === 0
+        ? emptyMessage
         : "Showing " + alertsList.length + " loaded alert" +
           (alertsList.length === 1 ? "" : "s") + "." +
-          (alertCursor ? " More may be available." : " No more pages in this filtered result."));
+          (alertCursor ? " More may be available." : " No more pages in this filtered result.")));
       return true;
     });
+  }
+
+  function submitAlertRequestSearch() {
+    var search = requestIdSearchValue(alertRequestSearch);
+    if (search === null) {
+      setStatus(alertState, REQUEST_ID_SEARCH_ERROR, "error");
+      return;
+    }
+    if (search === alertRequestFilter) { return; }
+    alertRequestFilter = search;
+    loadAlerts(true);
   }
 
   function queueAdminList(loader) {
@@ -8469,6 +8533,24 @@ _WORKSPACE_JS = """
     renderApiKeys();
   });
 
+  // Search fires only on Enter or the search field's clear button, never on
+  // every keystroke; an emptied box restores the unfiltered history.
+  keyHistorySearch.addEventListener("keydown", function (event) {
+    if (event.key !== "Enter") { return; }
+    event.preventDefault();
+    submitKeyHistorySearch();
+  });
+
+  keyHistorySearch.addEventListener("search", function () {
+    if (keyHistorySearch.value.trim()) { return; }
+    submitKeyHistorySearch();
+  });
+
+  keyHistorySearch.addEventListener("input", function () {
+    if (keyHistorySearch.value.trim()) { return; }
+    submitKeyHistorySearch();
+  });
+
   keyShowRevoked.addEventListener("change", function () {
     renderApiKeys();
   });
@@ -8710,6 +8792,22 @@ _WORKSPACE_JS = """
   alertUser.addEventListener("change", function () { loadAlerts(true); });
   alertUnread.addEventListener("change", function () { loadAlerts(true); });
   alertAck.addEventListener("change", function () { loadAlerts(true); });
+
+  alertRequestSearch.addEventListener("keydown", function (event) {
+    if (event.key !== "Enter") { return; }
+    event.preventDefault();
+    submitAlertRequestSearch();
+  });
+
+  alertRequestSearch.addEventListener("search", function () {
+    if (alertRequestSearch.value.trim()) { return; }
+    submitAlertRequestSearch();
+  });
+
+  alertRequestSearch.addEventListener("input", function () {
+    if (alertRequestSearch.value.trim()) { return; }
+    submitAlertRequestSearch();
+  });
 
   userSearch.addEventListener("input", function () {
     userSearchText = userSearch.value.trim();
@@ -9251,6 +9349,7 @@ WORKSPACE_HTML = """<!doctype html>
 </form>
 <p id="key-details-state" class="admin-note" role="status" aria-live="polite"></p>
 <h4>Request history</h4>
+<label class="admin-search" for="key-history-search">Find request<input id="key-history-search" type="search" autocomplete="off" spellcheck="false" placeholder="req_… or short ID"></label>
 <p id="key-history-state" class="admin-note" role="status" aria-live="polite"></p>
 <div id="key-history" class="admin-table" aria-label="API key request history"></div>
 <button id="key-history-more" class="admin-more" type="button" hidden>Load more</button>
@@ -9467,6 +9566,7 @@ WORKSPACE_HTML = """<!doctype html>
 </div>
 <p class="admin-note">Saved metadata only. Viewing original text requires an existing review grant; the administrator role alone is not enough. This page never marks an alert read just because the bell was opened.</p>
 <div class="admin-toolbar">
+<label class="admin-search" for="alert-request-search">Find request<input id="alert-request-search" type="search" autocomplete="off" spellcheck="false" placeholder="req_… or short ID"></label>
 <label for="alert-stage">Stage<select id="alert-stage" name="alert-stage">
 <option value="">All stages</option>
 <option value="input">Input</option>

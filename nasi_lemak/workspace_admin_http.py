@@ -17,6 +17,7 @@ from __future__ import annotations
 
 import csv
 import io
+import re
 import time
 from datetime import datetime, timezone
 from typing import Any
@@ -53,7 +54,21 @@ _ALERT_FILTERS = {
     "reason_code",
     "unread",
     "acknowledged",
+    "request_id",
 }
+
+_REQUEST_ID_FILTER_RE = re.compile(r"(?:req_)?([0-9a-f]{8,32})")
+
+
+def _request_id_filter(raw: str | None) -> str | None:
+    """Normalise one request ID or prefix; reject anything else."""
+
+    if raw is None:
+        return None
+    match = _REQUEST_ID_FILTER_RE.fullmatch(raw.strip().lower())
+    if match is None:
+        raise ValueError("request_id filter is invalid")
+    return f"req_{match.group(1)}"
 
 
 def _query_values(request: Request, allowed: set[str]) -> dict[str, str]:
@@ -617,7 +632,8 @@ def register_admin_policy_routes(app: FastAPI, runtime: Any) -> None:
         if error is not None:
             return error
         try:
-            limit, after = _page_query(request)
+            values = _query_values(request, {"limit", "after", "request_id"})
+            limit, after = _pagination(values)
             result = await _db_call(
                 app,
                 runtime.store.list_api_key_requests,
@@ -625,6 +641,7 @@ def register_admin_policy_routes(app: FastAPI, runtime: Any) -> None:
                 key_id,
                 limit=limit,
                 after=after,
+                request_id=_request_id_filter(values.get("request_id")),
             )
         except Exception as exc:
             return _store_error(request, exc)
@@ -889,6 +906,7 @@ def register_admin_policy_routes(app: FastAPI, runtime: Any) -> None:
                 reason_code=values.get("reason_code"),
                 unread=_optional_bool(values, "unread"),
                 acknowledged=_optional_bool(values, "acknowledged"),
+                request_id=_request_id_filter(values.get("request_id")),
             )
         except Exception as exc:
             return _store_error(request, exc)

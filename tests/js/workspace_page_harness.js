@@ -2130,6 +2130,81 @@ async function scenarioAdmin() {
   assert(app.elementFor("key-history-more").hidden === false,
     "a history page with a next cursor must offer Load more");
 
+  // Request search: only Enter submits, invalid text never calls the server,
+  // and clearing the box restores the unfiltered history.
+  const keyHistorySearch = app.elementFor("key-history-search");
+  const keyHistoryCallsBefore = app.callsMatching(
+    "/workspace/api/admin/api-keys/key-2/requests"
+  ).length;
+  keyHistorySearch.value = "not-a-request-id";
+  keyHistorySearch.dispatch("keydown", { key: "Enter" });
+  await settle();
+  assert(app.callsMatching("/workspace/api/admin/api-keys/key-2/requests").length ===
+      keyHistoryCallsBefore,
+    "an invalid request id must not be sent to the server");
+  assert(app.elementFor("key-history-state").textContent.indexOf(
+    "Enter a request ID: req_ followed by at least 8 hex characters") >= 0,
+    "an invalid request id must explain the accepted values");
+  assert(app.elementFor("key-history-state").getAttribute("data-kind") === "error",
+    "an invalid request id must be reported as an error");
+  keyHistorySearch.value = "REQ_00ABCDEF123456";
+  keyHistorySearch.dispatch("keydown", { key: "Enter" });
+  await settle();
+  const keyHistorySearchCall = app.lastMatching(
+    "/workspace/api/admin/api-keys/key-2/requests?limit=25&request_id=req_00abcdef123456"
+  );
+  assert(keyHistorySearchCall && keyHistorySearchCall.url ===
+      "/workspace/api/admin/api-keys/key-2/requests?limit=25&request_id=req_00abcdef123456",
+    "Enter must search the key history with a lowercase request id");
+  keyHistorySearchCall.respond({ items: [], next: null }, 200);
+  await settle();
+  assert(app.elementFor("key-history-state").textContent ===
+      "No request in this key's history matches req_00abcdef123456.",
+    "an empty request search must name the searched value");
+  app.elementFor("key-history-search").value = "";
+  app.elementFor("key-history-search").dispatch("input");
+  await settle();
+  const keyHistoryCalls = app.callsMatching(
+    "/workspace/api/admin/api-keys/key-2/requests"
+  );
+  const restoredKeyHistory = keyHistoryCalls[keyHistoryCalls.length - 1];
+  assert(restoredKeyHistory.url ===
+      "/workspace/api/admin/api-keys/key-2/requests?limit=25",
+    "clearing the request box must restore the unfiltered history path");
+  restoredKeyHistory.respond(
+    {
+      items: [
+        {
+          request_id: "req_text-1",
+          created_at: 1700000200,
+          client_ip: "192.168.0.5",
+          outcome: "allowed",
+          error_code: null,
+          has_text: true,
+          reply_tokens: 340,
+          tokens_per_second: 42.5,
+          total_ms: 19000,
+          allowed_categories: ["Safe chat"],
+        },
+        {
+          request_id: "req_text-2",
+          created_at: 1700000100,
+          client_ip: "10.0.0.5",
+          outcome: "blocked",
+          error_code: "PROMPT_SECRET",
+          has_text: false,
+        },
+      ],
+      next: "history-cursor",
+    },
+    200
+  );
+  await settle();
+  assert(app.elementFor("key-history-state").textContent === "",
+    "the restored history must clear the search status");
+  assert(findButton(app.elementFor("key-history"), "View"),
+    "the restored history must render the unfiltered rows again");
+
   function downloadedExports() {
     return app.created.filter(
       (element) => element.tagName === "A" &&
@@ -4076,6 +4151,50 @@ async function scenarioAlertProfileFallbackAndAcknowledgement() {
   assert(app.elementFor("alert-state").textContent.indexOf(
     "No block alerts match these filters") >= 0,
     "an empty filtered list must say that no alerts matched rather than that none exist");
+
+  // Request search replaces the filter path, rejects invalid text without a
+  // server call, and clearing the box restores the selected filters.
+  const alertRequestSearch = app.elementFor("alert-request-search");
+  const alertCallsBefore = app.callsMatching("/workspace/api/admin/alerts").length;
+  alertRequestSearch.value = "zzzz";
+  alertRequestSearch.dispatch("keydown", { key: "Enter" });
+  await settle();
+  assert(app.callsMatching("/workspace/api/admin/alerts").length === alertCallsBefore,
+    "an invalid request id must not be sent to the server");
+  assert(app.elementFor("alert-state").textContent.indexOf(
+    "Enter a request ID: req_ followed by at least 8 hex characters") >= 0,
+    "an invalid alert request id must explain the accepted values");
+  assert(app.elementFor("alert-state").getAttribute("data-kind") === "error",
+    "an invalid alert request id must be reported as an error");
+  alertRequestSearch.value = "ABCDEF123456";
+  alertRequestSearch.dispatch("keydown", { key: "Enter" });
+  await settle();
+  const requestSearch = app.lastMatching(
+    "/workspace/api/admin/alerts?limit=50&request_id=abcdef123456"
+  );
+  assert(requestSearch && requestSearch.url ===
+      "/workspace/api/admin/alerts?limit=50&request_id=abcdef123456",
+    "an alert request search must omit the stage, department, user, read and ack filters");
+  assert(app.elementFor("alert-state").textContent.indexOf(
+    "Searching by request ID; the other filters are ignored.") >= 0,
+    "an alert request search must say that the other filters are ignored");
+  requestSearch.respond({ items: [], next: null }, 200);
+  await settle();
+  assert(app.elementFor("alert-state").textContent.indexOf(
+    "No alert matches abcdef123456. Requests stopped before any guard ran do not create an alert."
+  ) >= 0, "an empty alert request search must name the searched value");
+  alertRequestSearch.value = "";
+  alertRequestSearch.dispatch("input");
+  await settle();
+  const restoredAlerts = app.lastMatching("/workspace/api/admin/alerts?limit=50");
+  assert(restoredAlerts && restoredAlerts.url ===
+      "/workspace/api/admin/alerts?limit=50&stage=output&unread=false&acknowledged=false",
+    "clearing the alert request box must restore the selected filter path");
+  restoredAlerts.respond({ items: [], next: null }, 200);
+  await settle();
+  assert(app.elementFor("alert-state").textContent.indexOf(
+    "No block alerts match these filters") >= 0,
+    "the restored alert list must use the normal filtered empty message");
 }
 
 async function scenarioMarkAllAlertsRead() {

@@ -62,6 +62,8 @@ DSN, key or exception text.
 | `GET` | `/workspace/api/admin/alerts/{alert_id}` | One alert |
 | `POST` | `/workspace/api/admin/alerts/{alert_id}/read` | Empty object `{}` |
 | `POST` | `/workspace/api/admin/alerts/{alert_id}/ack` | Empty object `{}` |
+| `GET` | `/workspace/api/admin/api-keys/{key_id}/requests?limit=&after=&request_id=` | Metadata-only key request page |
+| `GET` | `/workspace/api/admin/api-keys/{key_id}/requests.csv` | Full CSV export; no query |
 
 Profile create body:
 
@@ -95,10 +97,18 @@ its current version. An assignment for a new profile is not created by
 
 Alert list filters are ``limit`` (1–100, default 50), ``after``, ``stage``
 (``input``/``output``), ``user_id``, ``department_id``, ``reason_code``,
-``unread`` and ``acknowledged`` (literal ``true``/``false``). ``unread=true``
-with ``acknowledged=true`` is invalid. Read/acknowledgement is per
-administrator; acknowledgement also marks the alert read and both operations
-are idempotent.
+``unread``, ``acknowledged`` and ``request_id`` (literal ``true``/``false`` for
+the two booleans). ``unread=true`` with ``acknowledged=true`` is invalid.
+Read/acknowledgement is per administrator; acknowledgement also marks the alert
+read and both operations are idempotent.
+
+`request_id` is also available on
+`GET /workspace/api/admin/api-keys/{key_id}/requests`. It accepts a full
+``req_`` + 32 lowercase hex request ID or an 8–32 hex prefix, with or without the
+``req_`` prefix and in either case. The filter runs in the store, so a match is
+found even beyond the first page; a valid prefix that matches nothing returns
+``{"items": [], "next": null}``. Any other value, or a repeated parameter, is
+``400``. The CSV route is unchanged and ignores query parameters.
 
 Status mapping: ``400`` invalid input/filter/body, ``401`` missing or invalid
 session, ``403`` non-admin, identity conflict or rejected cookie origin,

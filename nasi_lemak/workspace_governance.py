@@ -43,6 +43,7 @@ MAX_SOURCES = 3
 MAX_DETAIL_LENGTH = 2048
 _DIGEST_RE = re.compile(r"^[0-9a-f]{64}$")
 _SAFE_ID_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._:-]{0,63}$")
+_REQUEST_ID_RE = re.compile(r"req_[0-9a-f]{8,32}")
 _SCOPE_ORDER = {"workspace": 0, "department": 1, "user": 2}
 
 
@@ -1477,6 +1478,7 @@ class AlertAdminMixin:
         reason_code: str | None = None,
         unread: bool | None = None,
         acknowledged: bool | None = None,
+        request_id: str | None = None,
     ) -> dict[str, Any]:
         limit = _limit(limit)
         if stage is not None and stage not in BLOCK_STAGES:
@@ -1487,6 +1489,8 @@ class AlertAdminMixin:
             raise ValueError("alert unread filter is invalid")
         if acknowledged is not None and not isinstance(acknowledged, bool):
             raise ValueError("alert acknowledged filter is invalid")
+        if request_id is not None and _REQUEST_ID_RE.fullmatch(request_id) is None:
+            raise ValueError("request_id filter is invalid")
         if unread is True and acknowledged is True:
             raise ValueError("alert filters are invalid")
         with self._backend.transaction() as db:
@@ -1512,6 +1516,13 @@ class AlertAdminMixin:
                 sql += " AND s.acknowledged_at IS NOT NULL"
             elif acknowledged is False:
                 sql += " AND s.acknowledged_at IS NULL"
+            if request_id is not None:
+                if len(request_id) == 36:
+                    sql += " AND a.request_id = ?"
+                    params.append(request_id)
+                else:
+                    sql += " AND substr(a.request_id, 1, ?) = ?"
+                    params.extend((len(request_id), request_id))
             if after is not None:
                 created_at, last_id = _decode_cursor(after)
                 sql += " AND (a.created_at < ? OR (a.created_at = ? AND a.id < ?))"

@@ -314,6 +314,25 @@ class WorkspacePageHTTPTests(WorkspaceHTTPBase):
             alerts.index('id="alert-mark-all"'), alerts.index('id="alert-list"')
         )
 
+    def test_admin_request_search_boxes_are_labelled(self) -> None:
+        html = self._page().text
+        for input_id in ("key-history-search", "alert-request-search"):
+            self.assertRegex(
+                html,
+                r'<label class="admin-search" for="' + input_id + r'">Find request'
+                r'<input id="' + input_id + r'" type="search" autocomplete="off" '
+                r'spellcheck="false" placeholder="req_… or short ID"></label>',
+            )
+        details = html.split('id="key-details"', 1)[1].split("</section>", 1)[0]
+        self.assertLess(
+            details.index('id="key-history-search"'),
+            details.index('id="key-history-state"'),
+        )
+        alerts = html.split('id="admin-alerts-panel"', 1)[1]
+        self.assertLess(
+            alerts.index('id="alert-request-search"'), alerts.index('id="alert-stage"')
+        )
+
     def test_review_metadata_is_joined_and_stays_inside_the_grant(self) -> None:
         self.store.grant_review(
             self.admin["id"], self.bob["id"], "department", self.accounting["id"]

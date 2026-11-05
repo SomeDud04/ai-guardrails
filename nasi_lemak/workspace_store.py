@@ -277,6 +277,9 @@ def _public_figures(row: dict[str, Any]) -> dict[str, Any]:
     }
 
 
+_REQUEST_ID_RE = re.compile(r"req_[0-9a-f]{8,32}")
+
+
 def _validate_limit(limit: Any) -> int:
     if isinstance(limit, bool) or not isinstance(limit, int):
         raise ValueError("limit must be an integer")
@@ -2803,10 +2806,18 @@ class WorkspaceStore(PolicyAdminMixin, AlertAdminMixin):
 
     @_guard
     def list_api_key_requests(
-        self, actor_id: str, key_id: str, *, limit: int = 50, after: str | None = None
+        self,
+        actor_id: str,
+        key_id: str,
+        *,
+        limit: int = 50,
+        after: str | None = None,
+        request_id: str | None = None,
     ) -> dict[str, Any]:
         """One key's requests, newest first.  Metadata only, never text."""
         limit = _validate_limit(limit)
+        if request_id is not None and _REQUEST_ID_RE.fullmatch(request_id) is None:
+            raise ValueError("request_id filter is invalid")
         with self._backend.transaction() as db:
             self._require_reader(db, actor_id)
             if not db.query_one("SELECT id FROM ws_api_keys WHERE id = ?", (key_id,)):
@@ -2828,6 +2839,13 @@ class WorkspaceStore(PolicyAdminMixin, AlertAdminMixin):
                     "(u.created_at = ? AND u.request_id < ?))"
                 )
                 params.extend((created_at, created_at, last_id))
+            if request_id is not None:
+                if len(request_id) == 36:
+                    sql += " AND u.request_id = ?"
+                    params.append(request_id)
+                else:
+                    sql += " AND substr(u.request_id, 1, ?) = ?"
+                    params.extend((len(request_id), request_id))
             sql += " ORDER BY u.created_at DESC, u.request_id DESC LIMIT ?"
             params.append(limit + 1)
             rows = db.query(sql, tuple(params))
