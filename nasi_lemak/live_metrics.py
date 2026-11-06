@@ -40,6 +40,17 @@ QUIET_ROUTES = frozenset(
 )
 
 
+# Guard passes the Monitor splits apart. Scans are recorded per lane with the
+# transport's own lane label ("input" / "response") and reported under the
+# screened half of the pipeline: "input" and "output".
+GUARD_LANES = ("input", "output")
+_GUARD_STORE_LANE: dict[str, str] = {
+    "input": "input",
+    "response": "output",
+    "output": "output",
+}
+
+
 def tokens_per_second(sample: dict[str, Any]) -> float | None:
     tokens = sample.get("reply_tokens")
     generation_ms = sample.get("generation_ms")
@@ -54,6 +65,41 @@ def _scan_rate(scans: list[tuple[int, float]]) -> float | None:
     if seconds <= 0:
         return None
     return round(sum(tokens for tokens, _elapsed_ms in scans) / seconds, 1)
+
+
+def _guard_average(rows: list[dict[str, Any]], key: str) -> float | None:
+    """Round average of the recorded, non-missing values under one key."""
+    values = [row[key] for row in rows if row[key] is not None]
+    return round(sum(values) / len(values)) if values else None
+
+
+def _known_token_rate(pairs: list[tuple[Any, Any]]) -> float | None:
+    """Tokens per second over the pairs where both sides are known."""
+    known = [(tokens, ms) for tokens, ms in pairs if tokens is not None and ms is not None]
+    seconds = sum(ms for _tokens, ms in known) / 1000.0
+    if seconds <= 0:
+        return None
+    return round(sum(tokens for tokens, _ms in known) / seconds, 1)
+
+
+def _guard_lane_summary(rows: list[dict[str, Any]] | None) -> dict[str, Any] | None:
+    """Per-lane averages over the last guard scans. None when no data."""
+    if not rows:
+        return None
+    return {
+        "scans": len(rows),
+        "tokens": _guard_average(rows, "tokens"),
+        "verdict_tokens": _guard_average(rows, "verdict_tokens"),
+        "read_ms": _guard_average(rows, "read_ms"),
+        "write_ms": _guard_average(rows, "write_ms"),
+        "total_ms": _guard_average(rows, "elapsed_ms"),
+        "read_tokens_per_second": _known_token_rate(
+            [(row["tokens"], row["read_ms"]) for row in rows]
+        ),
+        "write_tokens_per_second": _known_token_rate(
+            [(row["verdict_tokens"], row["write_ms"]) for row in rows]
+        ),
+    }
 
 
 def _traffic(rows: list[dict[str, Any]], now: float) -> dict[str, Any]:
@@ -86,7 +132,8 @@ class LiveMetrics:
         self._clock = clock
         self._lock = threading.Lock()
         self._samples: deque[dict[str, Any]] = deque(maxlen=MAX_SAMPLES)
-        self._guard_scans: deque[tuple[int, float]] = deque(maxlen=STAGE_WINDOW)
+        self._guard_scans: dict[str, deque[dict[str, Any]]] = {}
+        self._guard_scan_seq = 0
         self._http: deque[dict[str, Any]] = deque(maxlen=MAX_HTTP_ROWS)
         self._in_flight = 0
 
@@ -129,10 +176,36 @@ class LiveMetrics:
                 }
             )
 
-    def note_guard_scan(self, lane: str, tokens: int, elapsed_ms: float) -> None:
-        """Record one guard model pass: the tokens it read and how long it took."""
+    def note_guard_scan(
+        self,
+        lane: str,
+        tokens: int,
+        elapsed_ms: float,
+        *,
+        verdict_tokens: int | None = None,
+        read_ms: float | None = None,
+        write_ms: float | None = None,
+    ) -> None:
+        """Record one guard model pass: what it read, wrote and how long each took.
+
+        ``tokens`` is the prompt size the pass read; ``verdict_tokens`` counts
+        the generated verdict; ``read_ms`` is prefill up to the first generated
+        token and ``write_ms`` the rest of generation.  Each lane keeps its own
+        bounded history of the last ``STAGE_WINDOW`` scans.
+        """
         with self._lock:
-            self._guard_scans.append((tokens, elapsed_ms))
+            self._guard_scan_seq += 1
+            key = _GUARD_STORE_LANE.get(lane, lane)
+            self._guard_scans.setdefault(key, deque(maxlen=STAGE_WINDOW)).append(
+                {
+                    "seq": self._guard_scan_seq,
+                    "tokens": tokens,
+                    "elapsed_ms": elapsed_ms,
+                    "verdict_tokens": verdict_tokens,
+                    "read_ms": read_ms,
+                    "write_ms": write_ms,
+                }
+            )
 
     def note_http(
         self,
@@ -163,8 +236,14 @@ class LiveMetrics:
         with self._lock:
             samples = list(self._samples)
             in_flight = self._in_flight
-            scans = list(self._guard_scans)
+            lane_scans = {
+                lane: list(rows) for lane, rows in self._guard_scans.items()
+            }
             http_rows = list(self._http)
+        combined = sorted(
+            (row for rows in lane_scans.values() for row in rows),
+            key=lambda row: row["seq"],
+        )
         recent = [
             {**sample, "tokens_per_second": tokens_per_second(sample)}
             for sample in samples[-RECENT_ROWS:][::-1]
@@ -193,8 +272,16 @@ class LiveMetrics:
                 "average": round(sum(rates) / len(rates), 1) if rates else None,
             },
             "guard_tokens_per_second": {
-                "latest": _scan_rate(scans[-1:]),
-                "average": _scan_rate(scans),
+                "latest": _scan_rate(
+                    [(row["tokens"], row["elapsed_ms"]) for row in combined[-1:]]
+                ),
+                "average": _scan_rate(
+                    [(row["tokens"], row["elapsed_ms"]) for row in combined]
+                ),
+            },
+            "guard_scans": {
+                lane: _guard_lane_summary(lane_scans.get(lane))
+                for lane in GUARD_LANES
             },
             "stages_ms": {
                 "input": average("input_ms"),

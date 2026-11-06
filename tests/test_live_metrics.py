@@ -11,6 +11,7 @@ from nasi_lemak.live_metrics import (
     HTTP_WINDOW_SECONDS,
     MAX_HTTP_ROWS,
     MAX_SAMPLES,
+    STAGE_WINDOW,
     LiveMetrics,
     tokens_per_second,
 )
@@ -86,6 +87,84 @@ class LiveMetricsTests(unittest.TestCase):
             self.metrics.snapshot()["guard_tokens_per_second"],
             {"latest": None, "average": None},
         )
+
+    def test_guard_scans_summarise_per_lane(self) -> None:
+        self.metrics.note_guard_scan(
+            "input", 100, 1000.0, verdict_tokens=10, read_ms=200.0, write_ms=800.0
+        )
+        self.metrics.note_guard_scan(
+            "input", 200, 1000.0, verdict_tokens=20, read_ms=300.0, write_ms=700.0
+        )
+        self.metrics.note_guard_scan(
+            "response", 150, 1000.0, verdict_tokens=30, read_ms=250.0, write_ms=750.0
+        )
+        self.metrics.note_guard_scan(
+            "response", 250, 1000.0, verdict_tokens=50, read_ms=350.0, write_ms=650.0
+        )
+        snapshot = self.metrics.snapshot()
+        self.assertEqual(
+            snapshot["guard_scans"]["input"],
+            {
+                "scans": 2,
+                "tokens": 150,
+                "verdict_tokens": 15,
+                "read_ms": 250,
+                "write_ms": 750,
+                "total_ms": 1000,
+                "read_tokens_per_second": 600.0,
+                "write_tokens_per_second": 20.0,
+            },
+        )
+        self.assertEqual(
+            snapshot["guard_scans"]["output"],
+            {
+                "scans": 2,
+                "tokens": 200,
+                "verdict_tokens": 40,
+                "read_ms": 300,
+                "write_ms": 700,
+                "total_ms": 1000,
+                "read_tokens_per_second": 666.7,
+                "write_tokens_per_second": 57.1,
+            },
+        )
+        # The combined prompt rate still spans both lanes and its order.
+        self.assertEqual(
+            snapshot["guard_tokens_per_second"],
+            {"latest": 250.0, "average": 175.0},
+        )
+
+    def test_a_guard_scan_without_timing_fields_reports_none(self) -> None:
+        self.metrics.note_guard_scan("input", 100, 1000.0)
+        self.assertEqual(
+            self.metrics.snapshot()["guard_scans"]["input"],
+            {
+                "scans": 1,
+                "tokens": 100,
+                "verdict_tokens": None,
+                "read_ms": None,
+                "write_ms": None,
+                "total_ms": 1000,
+                "read_tokens_per_second": None,
+                "write_tokens_per_second": None,
+            },
+        )
+
+    def test_guard_scans_are_none_when_a_lane_has_no_data(self) -> None:
+        self.metrics.note_guard_scan("input", 100, 1000.0)
+        scans = self.metrics.snapshot()["guard_scans"]
+        self.assertEqual(scans["input"]["scans"], 1)
+        self.assertIsNone(scans["output"])
+
+    def test_guard_scan_history_is_bounded_per_lane(self) -> None:
+        for number in range(STAGE_WINDOW + 10):
+            self.metrics.note_guard_scan("input", 1, 1000.0)
+        self.metrics.note_guard_scan("response", 5, 500.0)
+        scans = self.metrics.snapshot()["guard_scans"]
+        self.assertEqual(scans["input"]["scans"], STAGE_WINDOW)
+        self.assertEqual(scans["input"]["tokens"], 1)
+        self.assertEqual(scans["output"]["scans"], 1)
+        self.assertEqual(scans["output"]["tokens"], 5)
 
     def test_traffic_is_counted_per_address_busiest_first(self) -> None:
         self.metrics.note_http("10.0.0.1", "POST", "/chat", 200, 15000.0)

@@ -14,6 +14,7 @@ from __future__ import annotations
 import contextlib
 import json
 import os
+import sys
 import tempfile
 import threading
 import time
@@ -266,6 +267,47 @@ class _ToyModel:
                 self.active -= 1
 
 
+class _CriteriaModel(_ToyModel):
+    """A causal double whose ``generate`` honours extra kwargs like the real one.
+
+    It invokes every supplied stopping criterion once (as Transformers does
+    after each generated token) and ignores the ``False`` result, so the
+    criterion is stamped but generation length is untouched.
+    """
+
+    def __init__(self, tokenizer: _ToyTokenizer, *, criteria_calls: int = 1, **kwargs: Any) -> None:
+        super().__init__(tokenizer, **kwargs)
+        self.criteria_calls = criteria_calls
+        self.criteria_invoked: list[Any] = []
+
+    def generate(self, **inputs: Any) -> Any:
+        criteria = inputs.get("stopping_criteria")
+        if criteria is not None:
+            for index, criterion in enumerate(criteria):
+                if index < self.criteria_calls:
+                    self.criteria_invoked.append(criterion)
+                    criterion(None, None)
+        return super().generate(**inputs)
+
+
+class _StubStoppingCriteria:
+    """Minimal stop-criterion base so tests need no Transformers install."""
+
+    def __call__(self, input_ids: Any, scores: Any, **kwargs: Any) -> bool:
+        return False
+
+
+class _StubStoppingCriteriaList(list):
+    pass
+
+
+def _stub_transformers_module() -> types.ModuleType:
+    module = types.ModuleType("transformers")
+    module.StoppingCriteria = _StubStoppingCriteria
+    module.StoppingCriteriaList = _StubStoppingCriteriaList
+    return module
+
+
 class _BrokenModel:
     """A loaded object that resembles a model but cannot generate."""
 
@@ -395,16 +437,62 @@ class VerdictLaneTests(LocalTransportTestCase):
 class TransportParityTests(LocalTransportTestCase):
     def test_each_model_pass_reports_tokens_and_time_only(self) -> None:
         guard = self._guard(model_kwargs={"output": SAFE})
-        seen: list[tuple] = []
-        guard.scan_observer = lambda *values: seen.append(values)
+        seen: list[tuple[tuple, dict]] = []
+        guard.scan_observer = lambda *values, **keywords: seen.append((values, keywords))
         guard.scan_attack("user: hello")
         guard.scan_response([{"role": "user", "content": "hello"}], "reply")
         self.assertEqual(len(seen), 2)
-        for lane, tokens, elapsed_ms in seen:
+        for (lane, tokens, elapsed_ms), keywords in seen:
             self.assertIsInstance(lane, str)
             self.assertIsInstance(tokens, int)
             self.assertGreater(tokens, 0)
             self.assertGreaterEqual(elapsed_ms, 0.0)
+            # The lane keyword extras arrive by name and stay absent for a fake
+            # model that never calls the stopping criterion: no read/write
+            # timing, while the verdict token count comes from the ids.
+            self.assertIn(lane, ("input", "response"))
+            self.assertIsNone(keywords["read_ms"])
+            self.assertIsNone(keywords["write_ms"])
+            self.assertEqual(keywords["verdict_tokens"], 2)  # verdict text + EOS
+
+    def test_generation_timing_covers_reading_and_writing(self) -> None:
+        stub = _stub_transformers_module()
+        with mock.patch.dict(sys.modules, {"transformers": stub}):
+            tokenizer = _ToyTokenizer()
+            model = _CriteriaModel(tokenizer, output=SAFE)
+            guard = self._guard(tokenizer=tokenizer, model=model)
+            seen: list[tuple[tuple, dict]] = []
+            guard.scan_observer = lambda *values, **keywords: seen.append(
+                (values, keywords)
+            )
+            guard.scan_attack("user: hello")
+            (lane, tokens, elapsed_ms), keywords = seen[0]
+        self.assertEqual(lane, "input")
+        self.assertEqual(keywords["verdict_tokens"], 2)  # verdict text + EOS
+        self.assertIsNotNone(keywords["read_ms"])
+        self.assertIsNotNone(keywords["write_ms"])
+        self.assertGreaterEqual(keywords["read_ms"], 0.0)
+        self.assertGreaterEqual(keywords["write_ms"], 0.0)
+        self.assertLessEqual(keywords["read_ms"] + keywords["write_ms"], elapsed_ms)
+        self.assertEqual(len(model.criteria_invoked), 1)
+        # The criterion never stops generation: the dummy always says False and
+        # the scan still parses the full deterministic verdict.
+        self.assertEqual(guard.scan_attack("user: hello"), {"decision": "allow"})
+
+    def test_timing_stays_off_when_transformers_is_missing(self) -> None:
+        if "transformers" in sys.modules:
+            self.skipTest("transformers is installed; only checked when absent")
+        tokenizer = _ToyTokenizer()
+        guard = self._guard(
+            tokenizer=tokenizer, model=_CriteriaModel(tokenizer, output=SAFE)
+        )
+        seen: list[tuple[tuple, dict]] = []
+        guard.scan_observer = lambda *values, **keywords: seen.append((values, keywords))
+        self.assertEqual(guard.scan_attack("user: hello"), {"decision": "allow"})
+        (_lane, _tokens, _elapsed_ms), keywords = seen[0]
+        self.assertEqual(keywords["verdict_tokens"], 2)
+        self.assertIsNone(keywords["read_ms"])
+        self.assertIsNone(keywords["write_ms"])
 
     def test_a_block_reports_the_verdict_categories(self) -> None:
         guard = self._guard(model_kwargs={"output": UNSAFE})

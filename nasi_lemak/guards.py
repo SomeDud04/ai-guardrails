@@ -30,6 +30,7 @@ from __future__ import annotations
 
 import math
 import re
+import time
 from pathlib import Path
 from typing import Any
 
@@ -507,6 +508,57 @@ def _parse_verdict(text: Any) -> bool:
     return False
 
 
+def _first_token_timing_criteria() -> tuple[Any, Any] | None:
+    """Build a stopping criterion that stamps the first generated token.
+
+    The criterion records the monotonic time of its first call (the first
+    generated token, after prompt prefill) and never stops generation: verdict
+    content, length and decoding are exactly what they would be without it.
+    Returns ``None`` when Transformers is unavailable; timing must never break
+    or change a scan, and this module imports no optional dependency eagerly.
+    """
+    try:
+        from transformers import StoppingCriteria, StoppingCriteriaList
+    except Exception:  # optional dependency absent: report no timing
+        return None
+
+    class _StampFirstToken(StoppingCriteria):
+        """Monotonic timestamp of the criterion's first call; never stops."""
+
+        def __init__(self) -> None:
+            self.stamp: float | None = None
+
+        def __call__(self, input_ids: Any, scores: Any, **kwargs: Any) -> bool:
+            if self.stamp is None:
+                self.stamp = time.perf_counter()
+            return False
+
+    try:
+        holder = _StampFirstToken()
+        return StoppingCriteriaList([holder]), holder
+    except Exception:  # pragma: no cover - construction must never poison a scan
+        return None
+
+
+def _record_verdict_timings(
+    timings: dict[str, Any], started: float, stamp: Any, verdict_tokens: int
+) -> None:
+    """Fill ``read_ms``/``write_ms``/``verdict_tokens`` into a caller's dict.
+
+    A criterion that was never called (a stand-in model ignoring the kwarg)
+    leaves the two durations ``None``.  Any timing failure is swallowed so it
+    can never break or change a scan.
+    """
+    try:
+        first = getattr(stamp, "stamp", None)
+        ended = time.perf_counter()
+        timings["read_ms"] = (first - started) * 1000.0 if first is not None else None
+        timings["write_ms"] = (ended - first) * 1000.0 if first is not None else None
+        timings["verdict_tokens"] = verdict_tokens
+    except Exception:
+        pass
+
+
 def _generated_verdict_text(
     model: Any,
     tokenizer: Any,
@@ -517,6 +569,7 @@ def _generated_verdict_text(
     eos_ids: int | list[int],
     accepted_eos: frozenset[int],
     pad_token_id: int,
+    timings: dict[str, Any] | None = None,
 ) -> str:
     """Run one deterministic generation and return only the new verdict text.
 
@@ -524,11 +577,26 @@ def _generated_verdict_text(
     copied per model: greedy decoding, a hard new-token ceiling, EOS supplied by
     the caller, the prompt sequence checked as a prefix, no truncation and no
     retry.  A non-EOS-terminated, over-long or undecodable sequence fails closed.
+
+    When ``timings`` is a dict it is filled with ``read_ms`` (generation start
+    to the first generated token, or ``None``), ``write_ms`` (first token to
+    the end of generation, or ``None``) and ``verdict_tokens`` (the number of
+    generated ids) without changing what is generated or returned.
     """
     inputs = {
         "input_ids": _as_tensor([prompt_ids], backend),
         "attention_mask": _as_tensor([[1] * len(prompt_ids)], backend),
     }
+    criteria: Any = None
+    stamp: Any = None
+    if timings is not None:
+        pair = _first_token_timing_criteria()
+        if pair is not None:
+            criteria, stamp = pair
+    call_kwargs: dict[str, Any] = {**inputs}
+    if criteria is not None:
+        call_kwargs["stopping_criteria"] = criteria
+    started = time.perf_counter()
     try:
         with _inference_context(backend):
             generated = model.generate(
@@ -536,7 +604,7 @@ def _generated_verdict_text(
                 do_sample=False,
                 eos_token_id=eos_ids,
                 pad_token_id=pad_token_id,
-                **inputs,
+                **call_kwargs,
             )
     except GuardError:
         raise
@@ -548,6 +616,8 @@ def _generated_verdict_text(
     if len(ids) <= len(prompt_ids) or ids[: len(prompt_ids)] != list(prompt_ids):
         raise GuardError("guard model returned an invalid sequence")
     new_ids = ids[len(prompt_ids) :]
+    if timings is not None:
+        _record_verdict_timings(timings, started, stamp, len(new_ids))
     if len(new_ids) > max_new_tokens:
         raise GuardError("guard model exceeded the verdict window")
     if not new_ids or new_ids[-1] not in accepted_eos:

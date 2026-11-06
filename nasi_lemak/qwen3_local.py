@@ -403,6 +403,7 @@ class Qwen3GuardLocal:
         if len(prompt_ids) > self._window_limit:
             raise GuardInputLimit("guard input exceeds the configured model window")
         started = time.perf_counter()
+        timings: dict[str, Any] = {}
         text = _generated_verdict_text(
             self._model,
             self._tokenizer,
@@ -412,10 +413,18 @@ class Qwen3GuardLocal:
             eos_ids=self._eos_ids,
             accepted_eos=self._accepted_eos,
             pad_token_id=self._pad_token_id,
+            timings=timings,
         )
         if self.scan_observer is not None:
             elapsed_ms = (time.perf_counter() - started) * 1000.0
-            self.scan_observer(lane, len(prompt_ids), elapsed_ms)
+            self.scan_observer(
+                lane,
+                len(prompt_ids),
+                elapsed_ms,
+                verdict_tokens=timings.get("verdict_tokens"),
+                read_ms=timings.get("read_ms"),
+                write_ms=timings.get("write_ms"),
+            )
         return parse_verdict_fields(text, lane=lane)
 
     def count_tokens(self, serialized: str) -> int:
