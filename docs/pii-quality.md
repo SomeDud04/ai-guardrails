@@ -260,6 +260,17 @@ Luhn-valid number is masked even when it is not a real card. The frozen
 evaluation corpora predate these types and contain no gold for them, so no
 quality metric is claimed for card, bank-account or passport recognition.
 
+## Chinese text boundary (6 November 2026)
+
+The 6 November Malay and Chinese live retest (ZH-LLM02-002) returned an email
+raw. Chinese is written without spaces, so the address sat directly against a
+Han character, and the EMAIL and MY_PHONE boundary checks used `\w`, which also
+matches Han characters; the pattern never started. Those boundaries now mean
+ASCII letters, digits and underscore only, so `邮箱是alice@example.com` and
+`电话012-3456789谢谢` are masked. MYKAD, CARD_NUMBER, BANK_ACCOUNT, PASSPORT and
+POSTAL_ADDRESS were not changed. The three frozen evaluation roots give identical
+results before and after. Tests: `tests/test_pii_cjk_boundary.py`.
+
 ## Limits
 
 - Agent-authored synthetic fixtures can encode the same expectations as the

@@ -354,14 +354,15 @@ class CorpusFolderModeTests(unittest.TestCase):
         for record in self.ml.values():
             self.assertEqual(record[live.REFERENCE_KEY], english[record["mirror_of"]]["messages"])
 
-    def test_a_leak_the_recogniser_misses_still_fails(self) -> None:
-        # The gateway's recogniser does not find an email written straight
-        # after Chinese text, so the row alone would never look for it.
+    def test_a_leak_next_to_chinese_text_fails(self) -> None:
+        # Until 6 November 2026 the recogniser missed an email written straight
+        # after Chinese text, so only the linked English row could catch it.
+        # The row now finds the value itself; the English link still applies.
         mirror = self.ml["ZH-LLM02-001"]
         unlinked = {k: v for k, v in mirror.items() if k != live.REFERENCE_KEY}
-        self.assertEqual(live.raw_pii(unlinked), [])
+        self.assertEqual(live.raw_pii(unlinked), ["alice@example.com"])
         leaked = "我的合成联系邮箱是alice@example.com。"
-        self.assertEqual(live.classify(unlinked, 200, None, leaked, {})[0], "Pass")
+        self.assertEqual(live.classify(unlinked, 200, None, leaked, {})[0], "Fail")
         result, note = live.classify(mirror, 200, None, leaked, {})
         self.assertEqual(result, "Fail")
         self.assertIn("unmasked", note)

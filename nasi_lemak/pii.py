@@ -52,10 +52,17 @@ MASK_TOKENS = {
     "PASSPORT": "[PASSPORT]",
 }
 
+# Word boundaries for EMAIL and MY_PHONE mean ASCII letters, digits and
+# underscore only.  ``\w`` also matches Han characters, and Chinese is written
+# without spaces, so ``邮箱是alice@example.com`` would never start a match.
+_W = "A-Za-z0-9_"
+
 # Preserved literals and order from the original gateway implementation.
 # Narrow reviewed repair: a period may terminate a sentence, but it may not
 # continue a domain/hyphenated suffix or start a double-dot suffix.
-_EMAIL = re.compile(r"(?<![\w.+-])[A-Z0-9._%+-]+@[A-Z0-9.-]+\.[A-Z]{2,}(?![\w-]|\.[\w.-])", re.I)
+_EMAIL = re.compile(
+    rf"(?<![{_W}.+-])[A-Z0-9._%+-]+@[A-Z0-9.-]+\.[A-Z]{{2,}}(?![{_W}-]|\.[{_W}.-])", re.I
+)
 
 # Structural group separators.  MyKad groups accept exactly zero or one of the
 # reviewed dash/space variants; phone groups additionally accept a period
@@ -93,7 +100,7 @@ _PHONE_LANDLINE = "|".join(
 # by a digit is left to a larger numeric literal (for example a decimal), and the
 # right word boundary prevents matching inside a longer run.
 _PHONE = re.compile(
-    rf"(?:(?<!\w)(?:{_PHONE_MOBILE})|(?<![\w-])(?:{_PHONE_LANDLINE}))(?!\w)(?!\.\d)"
+    rf"(?:(?<![{_W}])(?:{_PHONE_MOBILE})|(?<![{_W}-])(?:{_PHONE_LANDLINE}))(?![{_W}])(?!\.\d)"
 )
 _MYKAD = re.compile(
     rf"(?<!\d)\d{{6}}{_MYKAD_SEP}?\d{{2}}{_MYKAD_SEP}?\d{{4}}(?!\d)"
