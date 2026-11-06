@@ -22,6 +22,7 @@ never changed by it.
 from __future__ import annotations
 
 import argparse
+import csv
 import hashlib
 import io
 import json
@@ -38,6 +39,8 @@ PAYLOAD_ROOT = CORPUS_ROOT / "payloads"
 WORKBOOK = CORPUS_ROOT / "OWASP-LLM-Top10-2026-checklist.xlsx"
 MANIFEST = CORPUS_ROOT / "MANIFEST.sha256"
 SCHEMA = CORPUS_ROOT / "schema.json"
+ML_CORPUS_ROOT = ROOT / "evals" / "owasp" / "llm-top10-2026-ml"
+ML_PAYLOAD_ROOT = ML_CORPUS_ROOT / "payloads"
 
 PAYLOAD_FILES = (
     ("LLM01", "llm01_prompt_injection.jsonl"),
@@ -146,6 +149,39 @@ CHECKLIST_HEADERS = (
 
 HEADER_FILL = "1F3864"
 HEADER_ROW_HEIGHT = 42.0
+
+ML_LANGUAGES = {"bm": "Malay", "zh": "Chinese"}
+GUARD_DISPLAY = {"should_block": "Block", "should_allow": "Allow", "unverified": "Open"}
+REVIEWER_HEADERS = ("Reviewer verdict", "Reviewer note")
+REVIEW_COLUMNS = ("Case", "Proposed verdict", "Your verdict", "Your note")
+ML_SHEET_HEADERS = (
+    "ID",
+    "Language",
+    "English case",
+    "Category",
+    "Title",
+    "Expected",
+    "Result",
+    "HTTP status",
+    "Gateway outcome",
+    "Block reason",
+    "Latency (ms)",
+    "Request ID",
+    "Notes",
+    "Reviewer verdict",
+    "Reviewer note",
+)
+GAP_RESULTS = frozenset({"Fail", "Unverified", "Blocked"})
+GAP_SHEET_HEADERS = (
+    "ID",
+    "Language",
+    "Category",
+    "Title",
+    "Result",
+    "Reviewer verdict",
+    "Request ID",
+    "Notes",
+)
 
 
 class CorpusError(Exception):
@@ -789,6 +825,221 @@ def check(payload_root: Path = PAYLOAD_ROOT, workbook: Path = WORKBOOK,
 REPLY_NOTE_CHARS = 300
 
 
+def load_ml_corpus(payload_root: Path = ML_PAYLOAD_ROOT) -> dict[str, dict[str, Any]]:
+    """Load the Malay/Chinese corpus rows, keyed by case id."""
+    files = sorted(payload_root.glob("*.jsonl"))
+    if not files:
+        raise CorpusError(f"no Malay/Chinese payload files under {payload_root}")
+    records: dict[str, dict[str, Any]] = {}
+    for path in files:
+        with path.open("r", encoding="utf-8") as handle:
+            for number, line in enumerate(handle, 1):
+                source = f"{path.name}:{number}"
+                if not line.strip():
+                    raise CorpusError(f"{source}: blank line")
+                try:
+                    record = json.loads(line)
+                except json.JSONDecodeError as exc:
+                    raise CorpusError(f"{source}: invalid JSON ({exc.msg})") from exc
+                _require(isinstance(record, dict), f"{source}: record must be an object")
+                assert isinstance(record, dict)
+                case_id = record.get("id")
+                _require(isinstance(case_id, str) and bool(case_id), f"{source}: invalid id")
+                _require(record.get("language") in ML_LANGUAGES, f"{source}: invalid language")
+                _require(isinstance(record.get("mirror_of"), str) and bool(record["mirror_of"]),
+                         f"{source}: invalid mirror_of")
+                _require(record.get("guard_expect") in GUARD_DISPLAY,
+                         f"{source}: invalid guard_expect")
+                for key in ("category", "title"):
+                    _require(isinstance(record.get(key), str) and bool(record[key]),
+                             f"{source}: invalid {key}")
+                if case_id in records:
+                    raise CorpusError(f"{source}: duplicate id {case_id}")
+                records[case_id] = record
+    return records
+
+
+def load_review(path: Path) -> dict[str, dict[str, str | None]]:
+    """Read the manual-review CSV, keyed by case id.
+
+    ``Your verdict`` wins when present; otherwise the proposed verdict is shown
+    with a ``(proposed) `` prefix.  A missing verdict stays blank.
+    """
+    entries: dict[str, dict[str, str | None]] = {}
+    with path.open("r", encoding="utf-8-sig", newline="") as handle:
+        reader = csv.DictReader(handle)
+        missing = [name for name in REVIEW_COLUMNS if name not in (reader.fieldnames or ())]
+        if missing:
+            raise CorpusError(f"{path.name}: missing review columns {missing}")
+        for row in reader:
+            case_id = (row.get("Case") or "").strip()
+            if not case_id:
+                continue
+            your = (row.get("Your verdict") or "").strip()
+            proposed = (row.get("Proposed verdict") or "").strip()
+            note = (row.get("Your note") or "").strip()
+            if your:
+                verdict = your
+            elif proposed:
+                verdict = f"(proposed) {proposed}"
+            else:
+                verdict = None
+            entries[case_id] = {"verdict": verdict, "note": note or None}
+    return entries
+
+
+def _report_notes(item: dict[str, Any]) -> str:
+    """Build the Notes text shared by the Checklist and Malay/Chinese sheets."""
+    notes = [item.get("note") or ""]
+    if item.get("block_reason"):
+        notes.append(f"Block reason: {item['block_reason']}.")
+    if item.get("request_id"):
+        notes.append(f"Request {item['request_id']}.")
+    if item.get("reply_excerpt"):
+        excerpt = item["reply_excerpt"][:REPLY_NOTE_CHARS]
+        more = "…" if item.get("reply_chars", 0) > REPLY_NOTE_CHARS else ""
+        notes.append(f"Reply: {excerpt}{more}")
+    return " ".join(part for part in notes if part)
+
+
+def _case_review(entries: dict[str, dict[str, str | None]], case_id: str) -> dict[str, str | None]:
+    return entries.get(case_id) or {"verdict": None, "note": None}
+
+
+def _write_reviewer_cell(cell, value: str | None) -> None:
+    """Store a reviewer value as escaped plain text, never as a formula."""
+    if value is None:
+        cell.value = None
+        return
+    text = _cell_text(value)
+    cell.value = text
+    if text.startswith(("=", "+", "-", "@")):
+        cell.data_type = "s"
+
+
+def _sheet_ml(wb, report: dict[str, Any], corpus: dict[str, dict[str, Any]],
+              reviews: dict[str, dict[str, str | None]]) -> list[dict[str, Any]]:
+    """Write the Malay/Chinese results sheet and return its gap candidates."""
+    from openpyxl.styles import Alignment, Border, Font, PatternFill, Side
+
+    ws = wb.create_sheet("Malay and Chinese")
+    ws.append(list(ML_SHEET_HEADERS))
+    _style_header(ws, 1, len(ML_SHEET_HEADERS))
+    gaps: list[dict[str, Any]] = []
+    for item in report.get("rows", []):
+        case_id = item.get("id")
+        if not isinstance(case_id, str) or case_id not in corpus:
+            raise CorpusError(f"Malay/Chinese report has a case not in the corpus: {case_id}")
+        if item.get("result") not in RESULTS:
+            raise CorpusError(f"{case_id} has an unknown result")
+        record = corpus[case_id]
+        review = _case_review(reviews, case_id)
+        ws.append([
+            _cell_text(case_id),
+            ML_LANGUAGES[record["language"]],
+            _cell_text(record["mirror_of"]),
+            _cell_text(record["category"]),
+            _cell_text(record["title"]),
+            GUARD_DISPLAY[record["guard_expect"]],
+            item["result"],
+            item.get("status"),
+            item.get("verdict"),
+            item.get("block_reason"),
+            item.get("latency_ms"),
+            item.get("request_id"),
+            _cell_text(_report_notes(item)),
+            None,
+            None,
+        ])
+        _write_reviewer_cell(ws.cell(row=ws.max_row, column=14), review["verdict"])
+        _write_reviewer_cell(ws.cell(row=ws.max_row, column=15), review["note"])
+        if item["result"] in GAP_RESULTS:
+            gaps.append({
+                "id": case_id,
+                "language": ML_LANGUAGES[record["language"]],
+                "category": record["category"],
+                "title": record["title"],
+                "result": item["result"],
+                "reviewer": review["verdict"],
+                "request_id": item.get("request_id"),
+                "notes": _report_notes(item),
+            })
+
+    last = ws.max_row
+    thin = Side(style="thin", color="BFBFBF")
+    border = Border(left=thin, right=thin, top=thin, bottom=thin)
+    wrap_columns = (3, 5, 10, 13, 15)
+    for row in ws.iter_rows(min_row=2, max_row=last, max_col=len(ML_SHEET_HEADERS)):
+        for cell in row:
+            cell.border = border
+            cell.alignment = Alignment(vertical="top", wrap_text=cell.column in wrap_columns)
+    for cell in ws[1]:
+        cell.border = border
+    for column, width in {
+        "A": 18, "B": 10, "C": 15, "D": 10, "E": 42, "F": 10, "G": 12, "H": 10,
+        "I": 16, "J": 18, "K": 12, "L": 20, "M": 50, "N": 20, "O": 42,
+    }.items():
+        ws.column_dimensions[column].width = width
+    ws.freeze_panes = "A2"
+    ws.auto_filter.ref = f"A1:O{max(last, 1)}"
+
+    def fill(colour: str) -> PatternFill:
+        return PatternFill(start_color=colour, end_color=colour, fill_type="solid")
+
+    from openpyxl.formatting.rule import CellIsRule
+
+    for value, colour in (
+        ("Pass", "C6EFCE"),
+        ("Fail", "FFC7CE"),
+        ("Blocked", "FFEB9C"),
+        ("Unverified", "D9D9D9"),
+        ("N/A", "EDEDED"),
+    ):
+        ws.conditional_formatting.add(
+            f"G2:G{max(last, 2)}",
+            CellIsRule(operator="equal", formula=[f'"{value}"'], fill=fill(colour)),
+        )
+    for cell in ws[1]:
+        cell.font = Font(bold=True, color="FFFFFF")
+    ws.print_title_rows = "1:1"
+    return gaps
+
+
+def _sheet_outstanding(wb, gaps: list[dict[str, Any]]) -> None:
+    from openpyxl.styles import Alignment, Border, Side
+
+    ws = wb.create_sheet("Outstanding Gaps")
+    ws.append(list(GAP_SHEET_HEADERS))
+    _style_header(ws, 1, len(GAP_SHEET_HEADERS))
+    for gap in sorted(gaps, key=lambda row: row["id"]):
+        ws.append([
+            _cell_text(gap["id"]),
+            gap["language"],
+            _cell_text(gap["category"]),
+            _cell_text(gap["title"]),
+            gap["result"],
+            None,
+            gap["request_id"],
+            _cell_text(gap["notes"]),
+        ])
+        _write_reviewer_cell(ws.cell(row=ws.max_row, column=6), gap["reviewer"])
+    last = ws.max_row
+    thin = Side(style="thin", color="BFBFBF")
+    border = Border(left=thin, right=thin, top=thin, bottom=thin)
+    for row in ws.iter_rows(min_row=2, max_row=last, max_col=len(GAP_SHEET_HEADERS)):
+        for cell in row:
+            cell.border = border
+            cell.alignment = Alignment(vertical="top", wrap_text=cell.column in (3, 4, 8))
+    for cell in ws[1]:
+        cell.border = border
+    for column, width in {
+        "A": 18, "B": 12, "C": 10, "D": 42, "E": 12, "F": 22, "G": 20, "H": 54,
+    }.items():
+        ws.column_dimensions[column].width = width
+    ws.freeze_panes = "A2"
+    ws.auto_filter.ref = f"A1:H{max(last, 1)}"
+
+
 def fill_results(
     data: bytes,
     reports: list[dict[str, Any]],
@@ -796,6 +1047,9 @@ def fill_results(
     tester: str,
     build_label: str,
     guard_label: str,
+    ml_report: dict[str, Any] | None = None,
+    review: Path | None = None,
+    ml_payload_root: Path = ML_PAYLOAD_ROOT,
 ) -> bytes:
     """Return the workbook with live results written into it."""
     openpyxl = _openpyxl()
@@ -818,15 +1072,6 @@ def fill_results(
         if item.get("result") not in RESULTS:
             raise CorpusError(f"{case_id} has an unknown result")
         row = rows_by_id[case_id]
-        notes = [item.get("note") or ""]
-        if item.get("block_reason"):
-            notes.append(f"Block reason: {item['block_reason']}.")
-        if item.get("request_id"):
-            notes.append(f"Request {item['request_id']}.")
-        if item.get("reply_excerpt"):
-            excerpt = item["reply_excerpt"][:REPLY_NOTE_CHARS]
-            more = "…" if item.get("reply_chars", 0) > REPLY_NOTE_CHARS else ""
-            notes.append(f"Reply: {excerpt}{more}")
         values = {
             "Result": item["result"],
             "Actual HTTP Status": item.get("status"),
@@ -834,11 +1079,67 @@ def fill_results(
             "Latency (ms)": item.get("latency_ms"),
             "Tester": tester,
             "Date Tested": (item.get("sent_at") or "")[:10] or None,
-            "Notes": " ".join(part for part in notes if part),
+            "Notes": _report_notes(item),
         }
         for header, value in values.items():
             cell = ws.cell(row=row, column=column[header], value=value)
             cell.alignment = Alignment(vertical="top", wrap_text=True)
+
+    ml_corpus: dict[str, dict[str, Any]] = {}
+    if ml_report is not None:
+        ml_corpus = load_ml_corpus(ml_payload_root)
+        unknown = sorted(
+            {item.get("id") for item in ml_report.get("rows", [])} - set(ml_corpus)
+        )
+        if unknown:
+            raise CorpusError(
+                "Malay/Chinese report has cases not in the corpus: " + ", ".join(
+                    str(case_id) for case_id in unknown
+                )
+            )
+
+    reviews = load_review(review) if review is not None else {}
+    known_cases = set(rows_by_id) | set(ml_corpus)
+    unknown_reviews = sorted(set(reviews) - known_cases)
+    if unknown_reviews:
+        raise CorpusError(
+            "review has cases not in either sheet: " + ", ".join(unknown_reviews)
+        )
+
+    if review is not None:
+        start = len(CHECKLIST_HEADERS) + 1
+        for offset, header in enumerate(REVIEWER_HEADERS):
+            ws.cell(row=1, column=start + offset, value=header)
+        _style_header(ws, 1, start + len(REVIEWER_HEADERS) - 1)
+        for case_id in set(rows_by_id) & set(reviews):
+            review_row = _case_review(reviews, case_id)
+            for offset, key in enumerate(("verdict", "note")):
+                cell = ws.cell(row=rows_by_id[case_id], column=start + offset)
+                _write_reviewer_cell(cell, review_row[key])
+                cell.alignment = Alignment(vertical="top", wrap_text=True)
+        ws.auto_filter.ref = f"A1:{ws.cell(row=1, column=start + 1).column_letter}{max(ws.max_row, 1)}"
+
+    ml_gaps: list[dict[str, Any]] = []
+    if ml_report is not None:
+        ml_gaps = _sheet_ml(wb, ml_report, ml_corpus, reviews)
+
+    gaps: list[dict[str, Any]] = []
+    for case_id, item in results.items():
+        if item.get("result") not in GAP_RESULTS:
+            continue
+        row = rows_by_id[case_id]
+        gaps.append({
+            "id": case_id,
+            "language": "English",
+            "category": ws.cell(row=row, column=2).value,
+            "title": ws.cell(row=row, column=7).value,
+            "result": item["result"],
+            "reviewer": _case_review(reviews, case_id)["verdict"],
+            "request_id": item.get("request_id"),
+            "notes": _report_notes(item),
+        })
+    _sheet_outstanding(wb, gaps + ml_gaps)
+
     log = wb["Run Log"]
     for offset, report in enumerate(reports):
         totals = {}
@@ -858,6 +1159,23 @@ def fill_results(
         ]
         for index, value in enumerate(values, 1):
             log.cell(row=2 + offset, column=index, value=value)
+    if ml_report is not None:
+        totals = {}
+        for item in ml_report.get("rows", []):
+            totals[item["result"]] = totals.get(item["result"], 0) + 1
+        values = [
+            (ml_report.get("started_at") or "")[:10],
+            tester,
+            build_label,
+            ml_report.get("base_url"),
+            guard_label,
+            len(ml_report.get("rows", [])),
+            ", ".join(f"{name} {count}" for name, count in sorted(totals.items())),
+            "Live Malay/Chinese run of the mirrored synthetic corpus with "
+            f"run_owasp_live.py (runner {ml_report.get('runner_commit') or 'unknown'}).",
+        ]
+        for index, value in enumerate(values, 1):
+            log.cell(row=2 + len(reports), column=index, value=value)
     buffer = io.BytesIO()
     wb.save(buffer)
     return buffer.getvalue()
@@ -869,23 +1187,34 @@ def main(argv: list[str] | None = None) -> int:
                         help="verify the committed workbook and manifest without writing")
     parser.add_argument("--results", nargs="+", default=None,
                         help="run_owasp_live.py reports to write into an evidence copy")
+    parser.add_argument("--ml-results", default=None, metavar="REPORT",
+                        help="Malay/Chinese run_owasp_live.py report to add to the evidence copy")
+    parser.add_argument("--review", default=None, metavar="CSV",
+                        help="manual-review CSV with reviewer verdicts and notes")
     parser.add_argument("--output", default=None, help="evidence workbook to write")
     parser.add_argument("--tester", default="")
     parser.add_argument("--build", default="", help="gateway commit that was tested")
     parser.add_argument("--guard", default="Qwen3Guard-Gen-0.6B, threshold 0.5",
                         help="guard model and threshold that was tested")
     args = parser.parse_args(argv)
-    if args.results:
+    if args.results or args.ml_results or args.review:
         if not args.output:
-            parser.error("--results needs --output")
+            parser.error("--results, --ml-results and --review need --output")
         try:
-            reports = [json.loads(Path(path).read_text(encoding="utf-8")) for path in args.results]
+            reports = [json.loads(Path(path).read_text(encoding="utf-8"))
+                       for path in (args.results or [])]
+            ml_report = (
+                json.loads(Path(args.ml_results).read_text(encoding="utf-8"))
+                if args.ml_results else None
+            )
             data = fill_results(
                 build_workbook_bytes(load_corpus()),
                 reports,
                 tester=args.tester,
                 build_label=args.build,
                 guard_label=args.guard,
+                ml_report=ml_report,
+                review=Path(args.review) if args.review else None,
             )
         except (CorpusError, OSError, ValueError) as exc:
             print(f"error: {exc}", file=sys.stderr)
