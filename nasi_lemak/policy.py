@@ -26,7 +26,7 @@ MAX_COLLECTION_DEPTH = 8
 _REQUIRED_KEYS = frozenset(
     {"app_id", "version", "model", "token_budget", "deny_phrases"}
 )
-_OPTIONAL_KEYS = frozenset({"limits", "guard"})
+_OPTIONAL_KEYS = frozenset({"limits", "guard", "reply_deny_phrases"})
 _GUARD_KEYS = frozenset({"input_allow_categories", "output_allow_categories"})
 _ALLOWED_KEYS = _REQUIRED_KEYS | _OPTIONAL_KEYS
 
@@ -129,7 +129,10 @@ def load_policy(path: str | Path | None) -> Policy:
     The returned object is immutable and its digest covers the app identity,
     version, public model alias, token budget, literal deny phrases and, when
     the optional ``limits`` mapping is present, that mapping in canonical order,
-    plus any guard categories the policy allows.
+    plus any guard categories the policy allows.  The optional
+    ``reply_deny_phrases`` list, when present, is validated with the same
+    bounds as ``deny_phrases`` and only enters the digest when it is
+    non-empty, so existing policy files keep their exact digest.
     Any failure raises :class:`PolicyError` with a fixed generic message; file
     contents and paths are never echoed.
     """
@@ -146,6 +149,11 @@ def load_policy(path: str | Path | None) -> Policy:
         raise PolicyError("policy keys are invalid")
     if not isinstance(loaded["deny_phrases"], list):
         raise PolicyError("policy deny phrases are invalid")
+    if "reply_deny_phrases" in loaded and not isinstance(
+        loaded["reply_deny_phrases"], list
+    ):
+        # ``reply_deny_phrases:`` with a null or scalar value is not a list.
+        raise PolicyError("policy reply deny phrases are invalid")
     if "limits" in loaded and not isinstance(loaded["limits"], dict):
         # ``limits:`` with a null or sequence value is not a flat mapping.
         raise PolicyError("policy limits are invalid")
@@ -160,6 +168,7 @@ def load_policy(path: str | Path | None) -> Policy:
             token_budget=loaded["token_budget"],
             app_id=loaded["app_id"],
             deny_phrases=loaded["deny_phrases"],
+            reply_deny_phrases=loaded.get("reply_deny_phrases", ()),
             limits=loaded["limits"] if "limits" in loaded else None,
             input_allow_categories=_allow_list(guard, "input_allow_categories"),
             output_allow_categories=_allow_list(guard, "output_allow_categories"),

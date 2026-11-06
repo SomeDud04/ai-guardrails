@@ -4,12 +4,15 @@
 # default. Copy an operator-approved version to a separate preserved path and
 # point NASI_LEMAK_POLICY_FILE at it before a controlled restart.
 #
-# The loader accepts exactly these five required keys plus an optional `limits`
-# mapping, one YAML document, no anchors, aliases or custom tags, at most 8
-# nested collections and at most 32 KiB. deny_phrases are literal
+# The loader accepts exactly these five required keys plus the optional
+# `limits` mapping, `guard` mapping and `reply_deny_phrases` list, one YAML
+# document, no anchors, aliases or custom tags, at most 8 nested collections
+# and at most 32 KiB. deny_phrases are literal
 # case-insensitive substrings matched across every accepted input turn and the
 # buffered output; they are not a semantic topic filter and cannot disable PII
-# masks or guard verdicts.
+# masks or guard verdicts. reply_deny_phrases, when configured, are matched
+# with the same normalisation but only against the model's buffered reply, so
+# users can still ask about those topics.
 #
 # Optional limits may only tighten the environment/default chat ceilings; a
 # larger value is clamped. Each supplied field is a positive integer and the
@@ -24,7 +27,7 @@ token_budget: 256
 deny_phrases:
   - "synthetic denied phrase"
 
-# Optional: guard categories this policy allows on each lane.  Omit it to block
+# Optional guard categories this policy allows on each lane.  Omit it to block
 # every category.  Each name must match the guard's category list exactly.
 # Jailbreak cannot be allowed.  Measure the change with docs/guard-evaluation.md
 # before relying on it.
@@ -32,3 +35,14 @@ deny_phrases:
 #   input_allow_categories:
 #     - Politically Sensitive Topics
 #   output_allow_categories: []
+
+# Optional: reply-only deny phrases.  Same bounds as deny_phrases (at most 64
+# phrases, each at most 256 characters, no phrase may normalise to empty) and
+# the same literal substring matching — but only against the model's buffered
+# reply, never the user's prompt, so users can still ask about these topics.
+# A reply containing one is withheld exactly like a deny_phrases output block
+# (OUTPUT_POLICY_BLOCK).  An empty or absent list changes nothing, including
+# the policy digest.
+# reply_deny_phrases:
+#   - "200 words"
+#   - "200 字"

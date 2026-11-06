@@ -341,6 +341,73 @@ class PolicyLoaderTests(unittest.TestCase):
         with self.assertRaises(PolicyError):
             load_policy(self._write_text(text, "nested.yaml"))
 
+    def test_reply_deny_phrases_load_validate_and_change_the_digest(self) -> None:
+        policy = load_policy(
+            _write_policy(
+                self.root / "reply.yaml",
+                reply_deny_phrases=["200 words"],
+            )
+        )
+        self.assertEqual(policy.reply_deny_phrases, ("200 words",))
+        # ``denies`` deliberately ignores reply phrases so an input turn is
+        # never blocked by them; the gateway runs a separate reply check.
+        self.assertFalse(policy.denies("the reply says 200 words"))
+        baseline = load_policy(_write_policy(self.root / "baseline.yaml"))
+        self.assertNotEqual(policy.digest, baseline.digest)
+
+        # Canonical digest: mapping order does not matter.
+        reordered = self.root / "reordered.yaml"
+        reordered.write_text(
+            "\n".join(
+                [
+                    "app_id: nasi-lemak",
+                    "version: 2026-10-20.1",
+                    "model: pilot-local",
+                    "token_budget: 128",
+                    "reply_deny_phrases: [200 words]",
+                    "deny_phrases: [Forbidden Phrase]",
+                ]
+            ),
+            encoding="utf-8",
+        )
+        self.assertEqual(load_policy(reordered).digest, policy.digest)
+
+    def test_reply_deny_phrases_absent_or_empty_keep_the_exact_digest(self) -> None:
+        absent = load_policy(_write_policy(self.root / "absent.yaml"))
+        empty = load_policy(
+            _write_policy(self.root / "empty.yaml", reply_deny_phrases=[])
+        )
+        self.assertEqual(absent.reply_deny_phrases, ())
+        self.assertEqual(empty.reply_deny_phrases, ())
+        self.assertEqual(absent.digest, empty.digest)
+        self.assertEqual(
+            absent.digest,
+            # Locked value from before the optional reply_deny_phrases key
+            # existed, so existing policy files stay comparable.
+            "3462e6a641342c014873593533d9bb76beb828585a975c1625fa1f0266dad662",
+        )
+
+    def test_invalid_reply_deny_phrases_are_rejected(self) -> None:
+        cases = {
+            "string": _policy_data(reply_deny_phrases="phrase"),
+            "null": _policy_data(reply_deny_phrases=None),
+            "int-item": _policy_data(reply_deny_phrases=[1]),
+            "empty-item": _policy_data(reply_deny_phrases=[""]),
+            "too-long": _policy_data(
+                reply_deny_phrases=["x" * (MAX_DENY_PHRASE_LENGTH + 1)]
+            ),
+            "too-many": _policy_data(
+                reply_deny_phrases=["p" + str(i) for i in range(65)]
+            ),
+            "whitespace-only": _policy_data(reply_deny_phrases=["\u200b \u200b"]),
+        }
+        for name, data in cases.items():
+            with self.subTest(name=name):
+                path = self.root / (name + ".yaml")
+                path.write_text(json.dumps(data), encoding="utf-8")
+                with self.assertRaises(PolicyError):
+                    load_policy(path)
+
     def test_invalid_types_and_bounds_are_rejected(self) -> None:
         cases = {
             "budget-zero": _policy_data(token_budget=0),

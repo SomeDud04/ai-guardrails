@@ -189,10 +189,13 @@ class Policy:
     There are deliberately no knobs for PII masking or audit ordering: those
     controls are unconditional in ``Gateway``.  A policy only selects the public
     app identity, version, alias, token budget, the bounded literal deny-phrase
-    list, an optional set of chat-limit tightening values and the guard
-    categories it allows on each lane.  ``limits`` is ``None`` when the policy
-    file omitted the key, and a flat mapping of field name to positive integer
-    otherwise.  Both allow lists are empty unless the policy names categories.
+    list, an optional reply-only phrase list, an optional set of chat-limit
+    tightening values and the guard categories it allows on each lane.
+    ``limits`` is ``None`` when the policy file omitted the key, and a flat
+    mapping of field name to positive integer otherwise.  Both allow lists are
+    empty unless the policy names categories.  Reply-only phrases are validated
+    like ``deny_phrases`` but are only ever matched against the model's
+    buffered reply, never an input turn.
     """
 
     version: str = "synthetic-0.1"
@@ -200,6 +203,7 @@ class Policy:
     token_budget: int = 512
     app_id: str = "synthetic-app"
     deny_phrases: tuple[str, ...] = ()
+    reply_deny_phrases: tuple[str, ...] = ()
     limits: dict[str, int] | None = None
     input_allow_categories: tuple[str, ...] = ()
     output_allow_categories: tuple[str, ...] = ()
@@ -220,6 +224,10 @@ class Policy:
     def __post_init__(self):
         if isinstance(self.deny_phrases, list):
             object.__setattr__(self, "deny_phrases", tuple(self.deny_phrases))
+        if isinstance(self.reply_deny_phrases, list):
+            object.__setattr__(
+                self, "reply_deny_phrases", tuple(self.reply_deny_phrases)
+            )
         if (
             not isinstance(self.app_id, str)
             or not self.app_id
@@ -251,6 +259,22 @@ class Policy:
                 or len(phrase) > MAX_DENY_PHRASE_LENGTH
             ):
                 raise ValueError("invalid policy")
+        # Reply-only phrases follow the exact same bounds and normalisation
+        # check, so a whitelist-evading whitespace-only phrase cannot hide in
+        # this lane either.  They are matched through the same matcher on the
+        # gateway side (a cached ``replace`` with ``deny_phrases``), which
+        # redoes this normalisation.
+        if not isinstance(self.reply_deny_phrases, tuple) or len(
+            self.reply_deny_phrases
+        ) > MAX_DENY_PHRASES:
+            raise ValueError("invalid policy")
+        for phrase in self.reply_deny_phrases:
+            if (
+                not isinstance(phrase, str)
+                or not phrase
+                or len(phrase) > MAX_DENY_PHRASE_LENGTH
+            ):
+                raise ValueError("invalid policy")
         normalized: list[str] = []
         spaced: list[str] = []
         for phrase in self.deny_phrases:
@@ -270,6 +294,13 @@ class Policy:
             "_folded_deny_phrases",
             tuple(_fold_leet(candidate) for candidate in normalized),
         )
+        for phrase in self.reply_deny_phrases:
+            # Reject it here, not only when the gateway composes the matcher,
+            # so an invalid reply phrase is a policy failure at load time.
+            if not _normalize_deny_text(phrase) or not _normalize_deny_text_spaced(
+                phrase
+            ):
+                raise ValueError("invalid policy")
         if self.limits is not None:
             raw_limits = self.limits
             if isinstance(raw_limits, (str, bytes, bytearray)) or isinstance(
@@ -298,18 +329,19 @@ class Policy:
             )
 
     def __hash__(self) -> int:
-        return hash(
-            (
-                self.version,
-                self.model,
-                self.token_budget,
-                self.app_id,
-                self.deny_phrases,
-                None
-                if self.limits is None
-                else tuple(sorted(self.limits.items())),
-            )
-        )
+        canonical = [
+            self.version,
+            self.model,
+            self.token_budget,
+            self.app_id,
+            self.deny_phrases,
+            None if self.limits is None else tuple(sorted(self.limits.items())),
+        ]
+        if self.reply_deny_phrases:
+            # Only a policy that actually has a non-empty list hashes
+            # differently, staying stable for every existing policy object.
+            canonical.append(self.reply_deny_phrases)
+        return hash(tuple(canonical))
 
     def denies(self, text: str) -> bool:
         """Literal substring match on both normalized forms; never a regex.
@@ -368,6 +400,8 @@ class Policy:
             # Only a policy that actually has the optional key changes the
             # digest, so existing five-key files and audit rows stay comparable.
             canonical_document["limits"] = dict(self.limits)
+        if self.reply_deny_phrases:
+            canonical_document["reply_deny_phrases"] = list(self.reply_deny_phrases)
         if self.input_allow_categories or self.output_allow_categories:
             canonical_document["guard"] = {
                 "input_allow_categories": sorted(self.input_allow_categories),
@@ -512,6 +546,9 @@ class Gateway:
         self._key_hits: dict[str, deque[float]] = {}
         self._key_hits_lock = threading.Lock()
         self._extra_denies: tuple[int, Policy] | None = None
+        # Matcher for the policy file's reply-only phrases, keyed by the phrase
+        # tuple so a rebuilt policy with the same phrases stays cached.
+        self._reply_denies: tuple[tuple[str, ...], Policy] | None = None
         if not isinstance(policy, Policy):
             raise ValueError("invalid policy")
         if limits is None:
@@ -677,6 +714,24 @@ class Gateway:
                 replace(self.policy, deny_phrases=tuple(values["deny_phrases"])),
             )
             self._extra_denies = cached
+        return cached[1].denies(text)
+
+    def _reply_denied(self, text: str) -> bool:
+        """Check only the policy file's reply-only phrases against ``text``.
+
+        The phrases reuse the exact same matcher as every other deny list,
+        composed once as a cached policy replacement.  They never mix with the
+        Settings phrase list; the caller keeps the existing output check in
+        charge of those.  Empty lists short-circuit, so policies without the
+        key pay nothing.
+        """
+        phrases = self.policy.reply_deny_phrases
+        if not phrases:
+            return False
+        cached = self._reply_denies
+        if cached is None or cached[0] != phrases:
+            cached = (phrases, replace(self.policy, deny_phrases=phrases))
+            self._reply_denies = cached
         return cached[1].denies(text)
 
     def _allowed_categories(self, lane: str) -> tuple[str, ...]:
@@ -1048,8 +1103,9 @@ class Gateway:
                     return self._blocked(request_id, "OUTPUT_GUARD_BLOCK")
             # The complete buffered output is checked before any release.
             # Disabling the model output classifier never bypasses the literal
-            # policy deny list.
-            if self._denied(output):
+            # policy deny list.  The reply-only phrase list adds a second
+            # check on the same buffered text; input turns already passed.
+            if self._denied(output) or self._reply_denied(output):
                 _audit_sink("request_blocked", "blocked", "POLICY_BLOCK")
                 timing["block_source"] = "deny_phrase_output"
                 return self._blocked(request_id, "OUTPUT_POLICY_BLOCK")
