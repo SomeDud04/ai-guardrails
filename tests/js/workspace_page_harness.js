@@ -1440,6 +1440,19 @@ async function respondMonitor(app, settingsOverrides) {
       last_minute: { requests: 3, reply_tokens: 90 },
       tokens_per_second: { latest: 42.5, average: 40 },
       guard_tokens_per_second: { latest: 96.2, average: 91.4 },
+      guard_scans: {
+        input: {
+          scans: 20,
+          tokens: 360,
+          verdict_tokens: 18,
+          read_ms: 4200,
+          write_ms: 1400,
+          total_ms: 6100,
+          read_tokens_per_second: 85.3,
+          write_tokens_per_second: 12.9,
+        },
+        output: null,
+      },
       stages_ms: { input: 6000, generation: 8000, output: 5000 },
       traffic: {
         by_ip: [
@@ -1567,8 +1580,25 @@ async function scenarioAdmin() {
     "recent blocks must render");
   assert(app.elementFor("live-metrics").textContent.indexOf("42.5") >= 0,
     "the latest tokens per second must render");
-  assert(app.elementFor("live-metrics").textContent.indexOf("96.2") >= 0,
-    "the guard tokens per second must render");
+  assert(app.elementFor("live-metrics").textContent.indexOf("Input check") >= 0,
+    "the input guard lane must get its own live tile");
+  assert(app.elementFor("live-metrics").textContent.indexOf("Output check") >= 0,
+    "the output guard lane must get its own live tile");
+  const liveMetricTerms = collect(app.elementFor("live-metrics")).map(
+    (item) => item.textContent
+  ).join("\n");
+  assert(liveMetricTerms.indexOf("85.3 tokens/s read") >= 0,
+    "the input check tile must show the guard read speed");
+  assert(
+    liveMetricTerms.indexOf("Verdict 1.4 s · 360 prompt tokens · 18 verdict tokens · last 20 scans") >= 0,
+    "the input check tile must show the verdict writing time and sizes"
+  );
+  assert(liveMetricTerms.indexOf("No scans yet") >= 0,
+    "a null guard lane must show that no scans have happened yet");
+  assert(liveMetricTerms.indexOf("Guard tokens per second") < 0,
+    "the blended guard tokens per second tile must be gone");
+  assert(app.elementFor("live-metrics").textContent.indexOf("96.2") < 0,
+    "the blended guard tokens per second figure must not render");
   assert(app.elementFor("live-metrics").textContent.indexOf("1 of 2") >= 0,
     "running requests must show against capacity");
   assert(app.elementFor("live-stages-legend").textContent.indexOf("Model 8.0 s") >= 0,

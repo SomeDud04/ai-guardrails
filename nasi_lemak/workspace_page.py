@@ -6781,6 +6781,21 @@ _WORKSPACE_JS = """
     container.appendChild(item);
   }
 
+  function appendGuardLaneMetric(label, lane) {
+    if (!isObject(lane) || typeof lane.read_tokens_per_second !== "number") {
+      appendMonitorMetric(liveMetrics, label, "No scans yet");
+      return;
+    }
+    appendMonitorMetric(
+      liveMetrics, label,
+      monitorCount(lane.read_tokens_per_second) + " tokens/s read",
+      "Verdict " + monitorSeconds(lane.write_ms) +
+        " · " + monitorCount(lane.tokens) + " prompt tokens" +
+        " · " + monitorCount(lane.verdict_tokens) + " verdict tokens" +
+        " · last " + monitorCount(lane.scans) + " scans"
+    );
+  }
+
   function monitorSeconds(ms) {
     if (typeof ms !== "number") { return "–"; }
     return (ms / 1000).toFixed(1) + " s";
@@ -7068,17 +7083,15 @@ _WORKSPACE_JS = """
 
   function renderLive(data) {
     var speed = isObject(data.tokens_per_second) ? data.tokens_per_second : {};
-    var guardSpeed = isObject(data.guard_tokens_per_second) ? data.guard_tokens_per_second : {};
+    var guardScans = isObject(data.guard_scans) ? data.guard_scans : {};
     var minute = isObject(data.last_minute) ? data.last_minute : {};
     clearNode(liveMetrics);
     appendMonitorMetric(
       liveMetrics, "Model tokens per second", monitorCount(speed.latest),
       "Average " + monitorCount(speed.average)
     );
-    appendMonitorMetric(
-      liveMetrics, "Guard tokens per second", monitorCount(guardSpeed.latest),
-      "Average " + monitorCount(guardSpeed.average)
-    );
+    appendGuardLaneMetric("Input check", guardScans.input);
+    appendGuardLaneMetric("Output check", guardScans.output);
     appendMonitorMetric(liveMetrics, "Running now", monitorCount(data.in_flight) + " of " + monitorCount(data.capacity));
     appendMonitorMetric(liveMetrics, "Requests, last minute", monitorCount(minute.requests));
     appendMonitorMetric(liveMetrics, "Reply tokens, last minute", monitorCount(minute.reply_tokens));
