@@ -13,7 +13,9 @@ the repository actually demonstrates. It does not establish pilot acceptance.
 | English semantic guard quality | **UNVERIFIED** | No guard weights downloaded or executed; deterministic doubles only |
 | BM semantic guard protection | **UNSUPPORTED for pilot acceptance** | No BM classifier evaluation or independent labels |
 | Chinese semantic guard protection | **UNSUPPORTED for pilot acceptance** | No Chinese classifier evaluation or independent labels |
-| Passport numbers, bank accounts, addresses, names and free-text identity | **Not implemented / deferred** | No recognizers or gold labels |
+| Passport numbers and bank accounts | **Partial: labelled values only** | Masked only after an English or Malay label (`passport`/`pasport`; `account`, `acct`, `a/c`, `akaun`, `bank account`). Chinese labels (护照, 银行账号) and unlabelled values are not recognised. No gold labels, so no accuracy is measured |
+| Addresses | **Partial: narrow Malaysian shapes** | See [postal-address-mask.md](postal-address-mask.md). No gold labels |
+| Names and free-text identity | **Not implemented** | No recognizers or gold labels |
 
 The structured recognizers operate on ASCII patterns. Matching an email, phone
 or 12-digit value inside a BM or Chinese sentence demonstrates only that the

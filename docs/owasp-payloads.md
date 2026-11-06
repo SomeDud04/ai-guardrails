@@ -132,8 +132,8 @@ or a workbook that no longer matches the corpus.
 ## Known gaps carried by this corpus
 
 - MyKad recogniser false positives (shape-only, invalid dates masked).
-- Passports and bank accounts are unsupported.
-- Spaced international phone numbers such as `+60 12-345 6789` are not matched.
+- Passports and bank accounts were unsupported when this corpus was written. Since 2 November 2026 they are masked only when an English or Malay label comes first; unlabelled values stay raw.
+- Spaced international phone numbers such as `+60 12-345 6789` were not matched when this corpus was written; they are masked since 2 November 2026.
 - PII split across messages is not stitched.
 - No RAG, vector store, embedding model, tenant corpus, tools, agents or ingest
   path exists.
