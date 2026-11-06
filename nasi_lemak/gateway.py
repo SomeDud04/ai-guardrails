@@ -83,16 +83,40 @@ class _ScanCancelled(Exception):
     """Internal marker: the per-request scan context is cancelled/deadlined."""
 
 
+# Han ideographs, kana and CJK punctuation are written without spaces, so a
+# space between two of them carries no meaning and is dropped.  Hangul is left
+# out on purpose: Korean separates words with spaces.
+_CJK = r"\u3000-\u303f\u3040-\u30ff\u3400-\u4dbf\u4e00-\u9fff\uf900-\ufaff\uff00-\uff60"
+_CJK_SPACE = re.compile(rf"(?<=[{_CJK}]) (?=[{_CJK}])")
+
+# Leetspeak: each class folds to one letter on both the phrase and the text, so
+# "hu1u3" matches "hulue" even though "1" can stand for either "i" or "l".
+_LEET_FOLD = str.maketrans(
+    {"1": "i", "l": "i", "!": "i", "|": "i", "0": "o", "3": "e",
+     "4": "a", "@": "a", "5": "s", "$": "s", "7": "t"}
+)
+_LEET_TRIGGER = frozenset("013457!|@$")
+
+
+def _join_cjk(text: str) -> str:
+    return _CJK_SPACE.sub("", text)
+
+
+def _fold_leet(normalized: str) -> str:
+    """Fold an already-normalized text; see ``_LEET_FOLD``."""
+    return normalized.translate(_LEET_FOLD)
+
+
 def _normalize_deny_text(text: str) -> str:
     """Canonical form (a) shared by policy phrases and candidate text.
 
     NFKC first, so compatibility variants (for example fullwidth letters) fold
     to their canonical spelling.  Every Unicode ``Cf`` character (zero-width
     space, bidi controls, soft hyphen, BOM and the rest) is then **deleted**, all
-    whitespace runs collapse to one ASCII space and the edges are stripped, and
-    the result is casefolded.  This form catches a format character inserted
-    inside a word.  Accents are preserved: this is canonical equivalence, not
-    accent or diacritic stripping.
+    whitespace runs collapse to one ASCII space and the edges are stripped, a
+    space between two CJK characters is dropped, and the result is casefolded.
+    This form catches a format character inserted inside a word.  Accents are
+    preserved: this is canonical equivalence, not accent or diacritic stripping.
 
     Form (a) is matched only against :func:`_normalize_deny_text_spaced`'s
     counterpart for the candidate; see ``Policy.denies``.
@@ -101,7 +125,7 @@ def _normalize_deny_text(text: str) -> str:
     visible = "".join(
         char for char in normalized if unicodedata.category(char) != "Cf"
     )
-    return " ".join(visible.split()).casefold()
+    return _join_cjk(" ".join(visible.split())).casefold()
 
 
 def _normalize_deny_text_spaced(text: str) -> str:
@@ -112,15 +136,15 @@ def _normalize_deny_text_spaced(text: str) -> str:
     join two words ("synthetic\\u200bdenied" -> "syntheticdenied") and evade a
     literal phrase, so form (b) keeps the separation.  Whitespace runs still
     collapse to a single space and are never removed, so a phrase itself still
-    requires its own word boundaries.  NFKC and casefold are identical to form
-    (a); accents stay preserved.
+    requires its own word boundaries.  NFKC, the CJK space rule and casefold
+    are identical to form (a); accents stay preserved.
     """
     normalized = unicodedata.normalize("NFKC", text)
     spaced = "".join(
         " " if unicodedata.category(char) == "Cf" else char
         for char in normalized
     )
-    return " ".join(spaced.split()).casefold()
+    return _join_cjk(" ".join(spaced.split())).casefold()
 
 
 # Bound once for the variant check in ``Policy.denies``.  The configured text
@@ -189,6 +213,9 @@ class Policy:
     _spaced_deny_phrases: tuple[str, ...] = field(
         init=False, repr=False, compare=False, default=()
     )
+    _folded_deny_phrases: tuple[str, ...] = field(
+        init=False, repr=False, compare=False, default=()
+    )
 
     def __post_init__(self):
         if isinstance(self.deny_phrases, list):
@@ -238,6 +265,11 @@ class Policy:
             spaced.append(spaced_candidate)
         object.__setattr__(self, "_normalized_deny_phrases", tuple(normalized))
         object.__setattr__(self, "_spaced_deny_phrases", tuple(spaced))
+        object.__setattr__(
+            self,
+            "_folded_deny_phrases",
+            tuple(_fold_leet(candidate) for candidate in normalized),
+        )
         if self.limits is not None:
             raw_limits = self.limits
             if isinstance(raw_limits, (str, bytes, bytearray)) or isinstance(
@@ -292,7 +324,11 @@ class Policy:
         ``"not allowed"``.  The same check is repeated for the light-encoding
         candidates from :mod:`nasi_lemak.deny_variants` (spaced-out letters,
         ROT13 and printable Base64), so those cannot hide the phrase either.
-        Callers check each message (or the complete buffered output)
+        When the text contains a digit or symbol commonly swapped for a letter,
+        both sides are also compared leet-folded (``_LEET_FOLD``), so
+        ``"1gn0r3"`` cannot hide ``"ignore"``.  Text without such a character is
+        never folded.  A space between two CJK characters is ignored on both
+        sides.  Callers check each message (or the complete buffered output)
         separately: this method never joins turn boundaries, so a phrase split
         across turns is not matched.
         """
@@ -303,6 +339,10 @@ class Policy:
             phrase in normalized for phrase in self._normalized_deny_phrases
         ):
             return True
+        if not _LEET_TRIGGER.isdisjoint(normalized):
+            folded = _fold_leet(normalized)
+            if any(phrase in folded for phrase in self._folded_deny_phrases):
+                return True
         spaced = _normalize_deny_text_spaced(text)
         if any(phrase in spaced for phrase in self._spaced_deny_phrases):
             return True
